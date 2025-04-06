@@ -15,7 +15,7 @@ from ..core.landscape import FitnessLandscape
 
 def eigenmode_decomposition(graph: Union[nx.Graph, FitnessLandscape],
                             k: int = None,
-                            matrix: Literal['adjacency', 'laplacian'] = 'laplacian',
+                            matrix: Literal['adjacency', 'laplacian', 'transition'] = 'laplacian',
                             backend: Literal['numpy', 'torch'] = 'numpy'):
     """
     Compute eigenmode decomposition of a graph.
@@ -51,6 +51,13 @@ def eigenmode_decomposition(graph: Union[nx.Graph, FitnessLandscape],
     
     elif matrix == 'laplacian':
         eig_mat = nx.laplacian_matrix(graph)
+    
+    # Row stochastic Markov transition matrix.
+    elif matrix == 'transition':
+        A = nx.to_numpy_array(graph)
+        degrees = A.sum(axis=1)
+        degrees[degrees == 0] = 1
+        eig_mat = A / degrees[:, None]
 
     else:
         raise ValueError(f"Unsupported matrix: {matrix}")

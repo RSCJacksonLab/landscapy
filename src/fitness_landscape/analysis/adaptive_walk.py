@@ -6,7 +6,7 @@ from ..core.sequence import Sequence
 from ..core.graph import create_hamming_graph
 from logging import Logger
 
-def find_greedy_accessible_paths(landscape: FitnessLandscape,
+def find_greedy_accessible_paths(landscape: FitnessLandscape, 
                                  start_sequence: Sequence,
                                  end_sequence: Sequence,
                                  **kwargs) -> Dict:

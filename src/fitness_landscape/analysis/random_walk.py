@@ -5,6 +5,43 @@ from ..core.landscape import FitnessLandscape
 from ..core.graph import create_hamming_graph
 from ..core.sequence import sequence_distance
 from logging import Logger
+from .eigenmode import eigenmode_decomposition
+
+def calculate_ruggedness_autocorrelation_analytical(landscape: FitnessLandscape,
+                                                    lag_max: int = 10) -> Dict:
+    """
+    Calculate landscape ruggedness as the lagged autocorrelation of a 
+    random walk using the eigenvalues of the Markov transition matrix.
+
+    Parameters
+    ----------
+    landscape : FitnessLandscape
+        The fitness landscape to analyze. 
+    
+    lag_max : int, default=`10`
+        The lag size.
+    
+    Returns
+    -------
+    Dict
+        The results dict of the analyitcal random walk.
+    """
+    eigenvalues, _ = eigenmode_decomposition(graph=landscape,
+                                             matrix='transition',
+                                             backend='numpy')
+    eigenvalues = np.real(eigenvalues)
+    idx = np.argsort(eigenvalues)
+    eigenvalues = eigenvalues[idx]
+    autocorr = np.zeros(lag_max)
+    for t in range(lag_max):
+        autocorr[t] = np.sum(eigenvalues[1:]**t)
+    
+    return {
+        'autocorrelation': autocorr,
+        'eigenvalues': eigenvalues,
+        'lag_max': lag_max
+        }
+    
 
 def calculate_ruggedness_autocorrelation_stochastic(landscape: FitnessLandscape,
                                                     steps: int = 1000,
@@ -27,7 +64,8 @@ def calculate_ruggedness_autocorrelation_stochastic(landscape: FitnessLandscape,
     
     Returns
     -------
-
+    Dict
+        The result dict of the stochastic random walk.
     """
     # Extract sequences and fitness values
     sequences = landscape.sequences
@@ -158,79 +196,3 @@ def _correlation_length(autocorr: np.ndarray) -> int:
     
     # If autocorrelation never drops below threshold, return max lag
     return len(autocorr) - 1
-
-
-def calculate_ruggedness_local_optima(landscape: FitnessLandscape,
-                                      **kwargs) -> Dict:
-    """
-    Function to measure ruggedness as the number of local fitness
-    optima / maxima. 
-
-    Parameters
-    ----------
-    landscape : FitnessLandscape
-        The fitness landscape to analyze. 
-    
-    Returns
-    -------
-    Dict
-        The results dictionary.
-    """
-    # Extract sequences
-    sequences = landscape.sequences
-    
-    if not sequences:
-        raise ValueError("Landscape contains no sequences")
-    
-    assert landscape.graph is not None, \
-    'Landscape graph must be initialised.'
-    
-    if landscape.graph_type is not 'hamming':
-        Logger.warning(msg="Landscape graph type is not `Hamming`. Path analysis relies on Hamming structure for valid interpretation.")
-    
-    # Find local optima
-    local_optima = []
-    
-    for i, seq in enumerate(sequences):
-        # Get fitness of current sequence
-        fitness = landscape.get_fitness(seq)
-        
-        # Get neighbors
-        neighbors = list(landscape.graph.neighbors(i))
-        
-        # Check if fitness is higher than all neighbors
-        is_local_optimum = True
-        for neighbor in neighbors:
-            neighbor_fitness = landscape.get_fitness(sequences[neighbor])
-            if neighbor_fitness > fitness:
-                is_local_optimum = False
-                break
-        
-        if is_local_optimum:
-            local_optima.append(i)
-    
-    # Calculate density of local optima
-    density = len(local_optima) / len(sequences)
-    
-    # Calculate fitness statistics of local optima
-    local_optima_fitness = [landscape.get_fitness(sequences[i]) for i in local_optima]
-    
-    if local_optima_fitness:
-        mean_fitness = np.mean(local_optima_fitness)
-        std_fitness = np.std(local_optima_fitness)
-        max_fitness = np.max(local_optima_fitness)
-        min_fitness = np.min(local_optima_fitness)
-    else:
-        mean_fitness = std_fitness = max_fitness = min_fitness = None
-    
-    return {
-        'local_optima_count': len(local_optima),
-        'local_optima_density': density,
-        'local_optima_indices': local_optima,
-        'mean_fitness': mean_fitness,
-        'std_fitness': std_fitness,
-        'max_fitness': max_fitness,
-        'min_fitness': min_fitness,
-        'method': 'local_optima'
-    }
-
