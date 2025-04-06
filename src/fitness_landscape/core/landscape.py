@@ -1,36 +1,36 @@
-"""
-Fitness landscape representations and operations.
-
-This module provides classes and functions for representing and manipulating
-fitness landscapes, which map sequences to fitness values.
-"""
-
 import numpy as np
 import networkx as nx
-from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable
+from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
 from .sequence import Sequence, BinarySequence, MultialleleSequence, sequence_distance
-
+from .graph import create_hamming_graph
 
 class FitnessLandscape:
     """
     Base class for fitness landscapes.
     
-    Parameters
+    Attributes
     ----------
-    sequences : array-like or None
+    sequences : array-like, default=`None`
         Sequences represented as arrays of elements.
-    fitness_values : array-like or None
+    fitness_values : array-like, default=`None`
         Fitness values corresponding to sequences.
-    graph : networkx.Graph or None
+    graph : networkx.Graph, default=`None`
         NetworkX graph representation of the landscape.
     graph_type : str, optional
         Type of graph to create if sequences are provided ('hamming', 'knn', 'custom').
     """
     
-    def __init__(self, sequences=None, fitness_values=None, graph=None, graph_type='hamming', **kwargs):
+    def __init__(self,
+                 sequences: np.ndarray = None,
+                 fitness_values: np.ndarray = None,
+                 graph: nx.Graph = None,
+                 graph_type: Literal['hamming'] = 'hamming',
+                 **kwargs) -> None:
+        
         self.sequences = []
         self.fitness_values = {}
         self.graph = None
+        self.graph_type = graph_type
         
         if sequences is not None and fitness_values is not None:
             self._init_from_sequences(sequences, fitness_values)
@@ -43,8 +43,22 @@ class FitnessLandscape:
         if self.graph is None and graph_type is not None:
             self.to_graph(graph_type=graph_type, **kwargs)
     
-    def _init_from_sequences(self, sequences, fitness_values):
-        """Initialize from sequences and fitness values."""
+    def _init_from_sequences(self,
+                             sequences,
+                             fitness_values) -> None:
+        """
+        Initialise fitness landscape from sequences and fitness
+        values. 
+
+        Parameters
+        ----------
+        sequences : np.ndarray
+            Sequences in the fitness landscape.
+        
+        fitness_values : np.ndarray
+            fitness values indexed matched to the sequences.
+        
+        """
         # Convert sequences to Sequence objects if they aren't already
         self.sequences = []
         for seq in sequences:
@@ -60,8 +74,16 @@ class FitnessLandscape:
             seq_tuple = tuple(seq.to_array())
             self.fitness_values[seq_tuple] = float(fitness)
     
-    def _init_from_graph(self, graph):
-        """Initialize from NetworkX graph."""
+    def _init_from_graph(self,
+                         graph: nx.Graph):
+        """
+        Initialise fitness landscape class from networkX graph. 
+
+        Parameters
+        ----------
+        graph : nx.Graph
+            The initialised network Graph fitness landscape.
+        """
         self.graph = graph
         
         # Extract sequences and fitness values from graph
@@ -81,24 +103,20 @@ class FitnessLandscape:
                 if 'fitness' in data:
                     self.fitness_values[seq_tuple] = float(data['fitness'])
     
-    def get_fitness(self, sequence):
+    def get_fitness(self,
+                    sequence: Union[Sequence, np.ndarray]) -> float:
         """
-        Get fitness value for a sequence.
+        Method to return fitness value for a sequence.
         
         Parameters
         ----------
         sequence : Sequence or array-like
-            Sequence to get fitness for.
+            Sequence to retrieve fitness for.
             
         Returns
         -------
         float
             Fitness value.
-            
-        Raises
-        ------
-        KeyError
-            If sequence is not in the landscape.
         """
         if not isinstance(sequence, Sequence):
             sequence = Sequence(sequence)
@@ -110,9 +128,11 @@ class FitnessLandscape:
         else:
             raise KeyError(f"Sequence {sequence} not found in fitness landscape")
     
-    def set_fitness(self, sequence, fitness):
+    def set_fitness(self,
+                    sequence: Union[Sequence, np.ndarray],
+                    fitness: float) -> None:
         """
-        Set fitness value for a sequence.
+        Method to set fitness value for a sequence.
         
         Parameters
         ----------
@@ -140,17 +160,18 @@ class FitnessLandscape:
                     self.graph.nodes[node]['fitness'] = float(fitness)
                     break
     
-    def to_graph(self, graph_type='hamming', **kwargs):
+    def to_graph(self,
+                 graph_type: Literal['hamming', 'knn'],
+                 **kwargs) -> nx.Graph:
         """
-        Convert to graph representation.
+        Method to convert fitness landscape to a network graph.
         
         Parameters
         ----------
-        graph_type : str, optional
-            Type of graph to create:
-            - 'hamming': Connect sequences that differ by exactly one position
-            - 'knn': Connect each sequence to its k nearest neighbors
-            - 'custom': Use custom graph creation function
+        graph_type : str
+            Type of graph to create. 'hamming': Connect sequences that
+            differ by exactly one position. 'knn': Connect each
+            sequence to its k nearest neighbors.
         **kwargs
             Additional parameters for graph creation.
             
@@ -160,23 +181,20 @@ class FitnessLandscape:
             Graph representation of the landscape.
         """
         if graph_type == 'hamming':
-            from .graph import create_hamming_graph
+            
             self.graph = create_hamming_graph(self.sequences, list(self.fitness_values.values()), **kwargs)
         elif graph_type == 'knn':
             from .graph import create_knn_graph
             self.graph = create_knn_graph(self.sequences, list(self.fitness_values.values()), **kwargs)
-        elif graph_type == 'custom':
-            if 'create_graph_func' not in kwargs:
-                raise ValueError("Custom graph type requires 'create_graph_func' parameter")
-            create_graph_func = kwargs.pop('create_graph_func')
-            self.graph = create_graph_func(self.sequences, list(self.fitness_values.values()), **kwargs)
         else:
             raise ValueError(f"Unsupported graph type: {graph_type}")
         
         return self.graph
     
     @classmethod
-    def from_graph(cls, graph, **kwargs):
+    def from_graph(cls,
+                   graph: nx.Graph,
+                   **kwargs):
         """
         Create landscape from graph representation.
         
@@ -184,8 +202,6 @@ class FitnessLandscape:
         ----------
         graph : networkx.Graph
             Graph representation of the landscape.
-        **kwargs
-            Additional parameters.
             
         Returns
         -------
@@ -193,81 +209,6 @@ class FitnessLandscape:
             Fitness landscape.
         """
         return cls(graph=graph, **kwargs)
-    
-    def analyze(self, method, **kwargs):
-        """
-        Analyze landscape using specified method.
-        
-        Parameters
-        ----------
-        method : str
-            Analysis method ('epistasis', 'ruggedness', 'paths', etc.)
-        **kwargs
-            Additional parameters for the analysis method.
-            
-        Returns
-        -------
-        dict
-            Results of the analysis.
-        """
-        if method == 'epistasis':
-            from ..analysis.epistasis import calculate_epistasis
-            return calculate_epistasis(self, **kwargs)
-        elif method == 'ruggedness':
-            from ..analysis.ruggedness import calculate_ruggedness
-            return calculate_ruggedness(self, **kwargs)
-        elif method == 'paths':
-            from ..analysis.paths import find_adaptive_paths
-            return find_adaptive_paths(self, **kwargs)
-        else:
-            raise ValueError(f"Unsupported analysis method: {method}")
-    
-    def transform(self, transform_type, **kwargs):
-        """
-        Apply mathematical transformation to the landscape.
-        
-        Parameters
-        ----------
-        transform_type : str
-            Type of transform ('walsh', 'fourier', 'eigenmode', etc.)
-        **kwargs
-            Additional parameters for the transformation.
-            
-        Returns
-        -------
-        object
-            Result of the transformation.
-        """
-        if transform_type == 'walsh':
-            from ..transforms.walsh_hadamard import walsh_transform
-            return walsh_transform(self, **kwargs)
-        elif transform_type == 'fourier':
-            from ..transforms.graph_fourier import graph_fourier_transform
-            return graph_fourier_transform(self.graph, **kwargs)
-        elif transform_type == 'eigenmode':
-            from ..transforms.eigenmode import eigenmode_decomposition
-            return eigenmode_decomposition(self.graph, **kwargs)
-        else:
-            raise ValueError(f"Unsupported transform type: {transform_type}")
-    
-    def visualize(self, method='network', **kwargs):
-        """
-        Visualize the fitness landscape.
-        
-        Parameters
-        ----------
-        method : str
-            Visualization method ('network', 'heatmap', '3d', etc.)
-        **kwargs
-            Additional parameters for visualization.
-            
-        Returns
-        -------
-        matplotlib.Figure or None
-            Figure object if return_fig=True, otherwise None.
-        """
-        from ..utils.visualization import visualize_landscape
-        return visualize_landscape(self, method=method, **kwargs)
     
     def __len__(self):
         return len(self.sequences)

@@ -1,18 +1,13 @@
-"""
-Walsh-Hadamard transform implementations for fitness landscape analysis.
-
-This module provides functions for computing Walsh-Hadamard transforms of fitness landscapes,
-including extensions for multiallelic landscapes.
-"""
-
 import numpy as np
 import torch
-from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable
+from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
 from ..core.landscape import FitnessLandscape
-from ..core.sequence import Sequence, BinarySequence
+from ..core.sequence import Sequence, BinarySequence, generate_sequences
 
 
-def walsh_transform(landscape, order=None, backend='numpy'):
+def walsh_transform(landscape: FitnessLandscape,
+                    order: int = None,
+                    backend: Literal['numpy', 'torch']='numpy') -> np.ndarray:
     """
     Compute Walsh-Hadamard transform of a fitness landscape.
     
@@ -20,9 +15,9 @@ def walsh_transform(landscape, order=None, backend='numpy'):
     ----------
     landscape : FitnessLandscape
         Fitness landscape to transform.
-    order : int or None, optional
+    order : int, default=`None`
         Maximum order of coefficients to compute.
-    backend : str, optional
+    backend : str, default=`numpy`
         Computational backend ('numpy', 'torch').
         
     Returns
@@ -61,8 +56,24 @@ def walsh_transform(landscape, order=None, backend='numpy'):
         raise ValueError(f"Unsupported backend: {backend}")
 
 
-def _walsh_transform_numpy(sequence_matrix, fitness_values, order=None):
-    """Compute Walsh transform using NumPy."""
+def _walsh_transform_numpy(sequence_matrix: np.ndarry,
+                           fitness_values: np.ndarray,
+                           order: int) -> np.ndarray:
+    """
+    Helper function to compute the walsh trasnform using the numpy
+    backend. 
+
+    Parameters
+    ----------
+    sequene_matrix : np.ndarray
+        The matrix array of sequences. 
+    
+    fitness_values : np.ndarray
+        The fitnes values. 
+    
+    order : int, default=`None`
+        The maximum ordr to compute interaction terms up to.
+    """
     n_sequences, seq_length = sequence_matrix.shape
     
     # Compute all possible binary masks up to the specified order
@@ -97,11 +108,34 @@ def _walsh_transform_numpy(sequence_matrix, fitness_values, order=None):
     return coefficients
 
 
-def _walsh_transform_torch(sequence_matrix, fitness_values, order=None):
-    """Compute Walsh transform using PyTorch."""
+def _walsh_transform_torch(sequence_matrix: Union[torch.Tensor, np.ndarray],
+                           fitness_values: Union[torch.Tensor, np.ndarray],
+                           order: int) -> torch.Tensor:
+    """
+    Helper function to compute the walsh trasnform using the torch
+    backend. 
+
+    Parameters
+    ----------
+    sequene_matrix : np.ndarray or torch.tensor
+        The matrix array of sequences. 
+    
+    fitness_values : np.ndarray or torch.tensor
+        The fitnes values. 
+    
+    order : int, default=`None`
+        The maximum ordr to compute interaction terms up to.
+
+    Returns
+    -------
+    coefficients : torch.tensor
+        The WHT coefficients.
+    """
     # Convert to PyTorch tensors
-    sequence_tensor = torch.tensor(sequence_matrix, dtype=torch.float32)
-    fitness_tensor = torch.tensor(fitness_values, dtype=torch.float32)
+
+    if isinstance(sequence_matrix, np.ndarray):
+        sequence_tensor = torch.tensor(sequence_matrix, dtype=torch.float32)
+        fitness_tensor = torch.tensor(fitness_values, dtype=torch.float32)
     
     n_sequences, seq_length = sequence_tensor.shape
     
@@ -137,7 +171,9 @@ def _walsh_transform_torch(sequence_matrix, fitness_values, order=None):
     return coefficients
 
 
-def inverse_walsh_transform(coefficients, sequences=None, backend='numpy'):
+def inverse_walsh_transform(coefficients: Union[torch.Tensor, np.ndarray],
+                            sequences: List = None,
+                            backend: Literal['numpy', 'torch']='numpy') -> Union[torch.tensor, np.ndarray]:
     """
     Compute inverse Walsh-Hadamard transform.
     
@@ -145,9 +181,10 @@ def inverse_walsh_transform(coefficients, sequences=None, backend='numpy'):
     ----------
     coefficients : array-like
         Walsh coefficients.
-    sequences : array-like or None, optional
-        Sequences to compute fitness for. If None, compute for all possible sequences.
-    backend : str, optional
+    sequences : array-like, default=`None`
+        Sequences to compute fitness for. If None, compute for all
+        possible sequences.
+    backend : str, default=`numpy`
         Computational backend ('numpy', 'torch').
         
     Returns
@@ -163,8 +200,25 @@ def inverse_walsh_transform(coefficients, sequences=None, backend='numpy'):
         raise ValueError(f"Unsupported backend: {backend}")
 
 
-def _inverse_walsh_transform_numpy(coefficients, sequences=None):
-    """Compute inverse Walsh transform using NumPy."""
+def _inverse_walsh_transform_numpy(coefficients: np.ndarray,
+                                   sequences=None) -> np.ndarray:
+    """
+    Helper function to compute inverse welsh-transform using numpy
+    backend. 
+
+    Parameters
+    ----------
+    coeffiicents : np.ndarray
+        The WHT coefficients. 
+    
+    sequences : array-like, default=`None`
+        Sequences to compute fitness for. If None, compute for all
+
+    Returns
+    -------
+    fitness_values : np.ndarray
+        The reconstructed fitness array.
+    """
     coefficients = np.asarray(coefficients)
     
     if sequences is None:
@@ -208,17 +262,34 @@ def _inverse_walsh_transform_numpy(coefficients, sequences=None):
     return fitness_values
 
 
-def _inverse_walsh_transform_torch(coefficients, sequences=None):
-    """Compute inverse Walsh transform using PyTorch."""
+def _inverse_walsh_transform_torch(coefficients: Union[torch.Tensor, np.ndarray],
+                                   sequences=None) -> torch.Tensor:
+    """
+    Helper function to compute inverse welsh-transform using torch
+    backend. 
+
+    Parameters
+    ----------
+    coeffiicents : np.ndarray or torch.Tensor
+        The WHT coefficients. 
+    
+    sequences : array-like, default=`None`
+        Sequences to compute fitness for. If None, compute for all
+
+    Returns
+    -------
+    fitness_values : np.ndarray
+        The reconstructed fitness array.
+    """
     # Convert to PyTorch tensor
-    coefficients = torch.tensor(coefficients, dtype=torch.float32)
+    if isinstance(coefficients, np.ndarray):
+        coefficients = torch.tensor(coefficients, dtype=torch.float32)
     
     if sequences is None:
         # Determine sequence length from coefficients
         seq_length = int(torch.log2(torch.tensor(len(coefficients))))
         
         # Generate all possible binary sequences
-        from ..core.sequence import generate_sequences
         sequences = generate_sequences(seq_length, [0, 1], strategy='complete')
         sequences = torch.tensor([seq.to_array() for seq in sequences], dtype=torch.float32)
     else:
@@ -254,7 +325,9 @@ def _inverse_walsh_transform_torch(coefficients, sequences=None):
     return fitness_values
 
 
-def walsh_coefficients(landscape, order=None, backend='numpy'):
+def walsh_coefficients(landscape: FitnessLandscape,
+                       order: int = None,
+                       backend: Literal['numpy', 'torch']='numpy') -> Dict:
     """
     Extract Walsh coefficients up to specified order.
     
@@ -262,9 +335,11 @@ def walsh_coefficients(landscape, order=None, backend='numpy'):
     ----------
     landscape : FitnessLandscape
         Fitness landscape to analyze.
-    order : int or None, optional
+
+    order : int, default=`None`
         Maximum order of coefficients to compute.
-    backend : str, optional
+    
+    backend : str, default=`numpy`
         Computational backend ('numpy', 'torch').
         
     Returns
@@ -299,290 +374,3 @@ def walsh_coefficients(landscape, order=None, backend='numpy'):
         result[term] = coefficients[mask]
     
     return result
-
-
-class MultialleleWalshTransform:
-    """
-    Extended Walsh-Hadamard transform for multiallelic landscapes.
-    
-    Parameters
-    ----------
-    alphabet_sizes : list or array-like
-        Number of possible values at each position.
-    backend : str, optional
-        Computational backend ('numpy', 'torch').
-    """
-    
-    def __init__(self, alphabet_sizes, backend='numpy'):
-        self.alphabet_sizes = np.asarray(alphabet_sizes)
-        self.backend = backend
-        self.n_positions = len(alphabet_sizes)
-        
-        # Precompute basis matrices for each position
-        self.basis_matrices = []
-        for size in alphabet_sizes:
-            self.basis_matrices.append(self._create_basis_matrix(size))
-    
-    def _create_basis_matrix(self, size):
-        """Create orthogonal basis matrix for a given alphabet size."""
-        if self.backend == 'numpy':
-            # Create Fourier basis matrix
-            matrix = np.zeros((size, size))
-            for i in range(size):
-                for j in range(size):
-                    matrix[i, j] = np.cos(2 * np.pi * i * j / size)
-            
-            # Normalize columns
-            for j in range(size):
-                matrix[:, j] /= np.sqrt(np.sum(matrix[:, j] ** 2))
-            
-            return matrix
-        
-        elif self.backend == 'torch':
-            # Create Fourier basis matrix
-            matrix = torch.zeros((size, size))
-            for i in range(size):
-                for j in range(size):
-                    matrix[i, j] = torch.cos(2 * torch.pi * i * j / size)
-            
-            # Normalize columns
-            for j in range(size):
-                matrix[:, j] /= torch.sqrt(torch.sum(matrix[:, j] ** 2))
-            
-            return matrix
-        
-        else:
-            raise ValueError(f"Unsupported backend: {self.backend}")
-    
-    def transform(self, landscape):
-        """
-        Compute transform for multiallelic landscape.
-        
-        Parameters
-        ----------
-        landscape : FitnessLandscape
-            Fitness landscape to transform.
-            
-        Returns
-        -------
-        array-like
-            Transform coefficients.
-        """
-        # Validate input
-        if not isinstance(landscape, FitnessLandscape):
-            raise TypeError("landscape must be a FitnessLandscape object")
-        
-        # Check if all sequences have the same length
-        sequences = landscape.sequences
-        if not sequences:
-            raise ValueError("Landscape contains no sequences")
-        
-        seq_length = len(sequences[0])
-        if seq_length != self.n_positions:
-            raise ValueError(f"Sequence length ({seq_length}) does not match alphabet_sizes length ({self.n_positions})")
-        
-        # Extract fitness values and sequences
-        fitness_values = np.array([landscape.get_fitness(seq) for seq in sequences])
-        sequence_matrix = np.array([seq.to_array() for seq in sequences])
-        
-        # Compute transform based on backend
-        if self.backend == 'numpy':
-            return self._transform_numpy(sequence_matrix, fitness_values)
-        elif self.backend == 'torch':
-            return self._transform_torch(sequence_matrix, fitness_values)
-        else:
-            raise ValueError(f"Unsupported backend: {self.backend}")
-    
-    def _transform_numpy(self, sequence_matrix, fitness_values):
-        """Compute multiallelic Walsh transform using NumPy."""
-        n_sequences, seq_length = sequence_matrix.shape
-        
-        # Initialize coefficient array
-        total_coeffs = np.prod(self.alphabet_sizes)
-        coefficients = np.zeros(total_coeffs)
-        
-        # Compute coefficients
-        for i in range(n_sequences):
-            seq = sequence_matrix[i]
-            fitness = fitness_values[i]
-            
-            # Compute basis function value for each position
-            position_values = []
-            for pos in range(seq_length):
-                pos_value = self.basis_matrices[pos][seq[pos], :]
-                position_values.append(pos_value)
-            
-            # Compute all interaction terms
-            for idx in np.ndindex(*self.alphabet_sizes):
-                # Compute product of basis functions
-                basis_product = 1.0
-                for pos, basis_idx in enumerate(idx):
-                    basis_product *= position_values[pos][basis_idx]
-                
-                # Compute flat index
-                flat_idx = np.ravel_multi_index(idx, self.alphabet_sizes)
-                
-                # Update coefficient
-                coefficients[flat_idx] += fitness * basis_product
-        
-        # Normalize coefficients
-        coefficients /= n_sequences
-        
-        return coefficients
-    
-    def _transform_torch(self, sequence_matrix, fitness_values):
-        """Compute multiallelic Walsh transform using PyTorch."""
-        # Convert to PyTorch tensors
-        sequence_tensor = torch.tensor(sequence_matrix, dtype=torch.long)
-        fitness_tensor = torch.tensor(fitness_values, dtype=torch.float32)
-        
-        n_sequences, seq_length = sequence_tensor.shape
-        
-        # Initialize coefficient array
-        total_coeffs = np.prod(self.alphabet_sizes)
-        coefficients = torch.zeros(total_coeffs)
-        
-        # Compute coefficients
-        for i in range(n_sequences):
-            seq = sequence_tensor[i]
-            fitness = fitness_tensor[i]
-            
-            # Compute basis function value for each position
-            position_values = []
-            for pos in range(seq_length):
-                pos_value = self.basis_matrices[pos][seq[pos], :]
-                position_values.append(pos_value)
-            
-            # Compute all interaction terms
-            for idx in np.ndindex(*self.alphabet_sizes):
-                # Compute product of basis functions
-                basis_product = torch.tensor(1.0)
-                for pos, basis_idx in enumerate(idx):
-                    basis_product *= position_values[pos][basis_idx]
-                
-                # Compute flat index
-                flat_idx = np.ravel_multi_index(idx, self.alphabet_sizes)
-                
-                # Update coefficient
-                coefficients[flat_idx] += fitness * basis_product
-        
-        # Normalize coefficients
-        coefficients /= n_sequences
-        
-        return coefficients
-    
-    def inverse_transform(self, coefficients, sequences=None):
-        """
-        Compute inverse transform.
-        
-        Parameters
-        ----------
-        coefficients : array-like
-            Transform coefficients.
-        sequences : array-like or None, optional
-            Sequences to compute fitness for. If None, compute for all possible sequences.
-            
-        Returns
-        -------
-        array-like
-            Reconstructed fitness values.
-        """
-        if self.backend == 'numpy':
-            return self._inverse_transform_numpy(coefficients, sequences)
-        elif self.backend == 'torch':
-            return self._inverse_transform_torch(coefficients, sequences)
-        else:
-            raise ValueError(f"Unsupported backend: {self.backend}")
-    
-    def _inverse_transform_numpy(self, coefficients, sequences=None):
-        """Compute inverse multiallelic Walsh transform using NumPy."""
-        coefficients = np.asarray(coefficients)
-        
-        if sequences is None:
-            # Generate all possible sequences
-            from itertools import product
-            all_sequences = list(product(*[range(size) for size in self.alphabet_sizes]))
-            sequences = np.array(all_sequences)
-        else:
-            # Convert sequences to numpy array if needed
-            if isinstance(sequences[0], Sequence):
-                sequences = np.array([seq.to_array() for seq in sequences])
-            else:
-                sequences = np.asarray(sequences)
-        
-        n_sequences, seq_length = sequences.shape
-        
-        # Initialize fitness values
-        fitness_values = np.zeros(n_sequences)
-        
-        # Compute fitness values
-        for i in range(n_sequences):
-            seq = sequences[i]
-            
-            # Compute basis function value for each position
-            position_values = []
-            for pos in range(seq_length):
-                pos_value = self.basis_matrices[pos][seq[pos], :]
-                position_values.append(pos_value)
-            
-            # Compute fitness as sum of coefficients * basis functions
-            for idx in np.ndindex(*self.alphabet_sizes):
-                # Compute product of basis functions
-                basis_product = 1.0
-                for pos, basis_idx in enumerate(idx):
-                    basis_product *= position_values[pos][basis_idx]
-                
-                # Compute flat index
-                flat_idx = np.ravel_multi_index(idx, self.alphabet_sizes)
-                
-                # Update fitness
-                fitness_values[i] += coefficients[flat_idx] * basis_product
-        
-        return fitness_values
-    
-    def _inverse_transform_torch(self, coefficients, sequences=None):
-        """Compute inverse multiallelic Walsh transform using PyTorch."""
-        # Convert to PyTorch tensor
-        coefficients = torch.tensor(coefficients, dtype=torch.float32)
-        
-        if sequences is None:
-            # Generate all possible sequences
-            from itertools import product
-            all_sequences = list(product(*[range(size) for size in self.alphabet_sizes]))
-            sequences = torch.tensor(all_sequences, dtype=torch.long)
-        else:
-            # Convert sequences to torch tensor if needed
-            if isinstance(sequences[0], Sequence):
-                sequences = torch.tensor([seq.to_array() for seq in sequences], dtype=torch.long)
-            else:
-                sequences = torch.tensor(sequences, dtype=torch.long)
-        
-        n_sequences, seq_length = sequences.shape
-        
-        # Initialize fitness values
-        fitness_values = torch.zeros(n_sequences)
-        
-        # Compute fitness values
-        for i in range(n_sequences):
-            seq = sequences[i]
-            
-            # Compute basis function value for each position
-            position_values = []
-            for pos in range(seq_length):
-                pos_value = self.basis_matrices[pos][seq[pos], :]
-                position_values.append(pos_value)
-            
-            # Compute fitness as sum of coefficients * basis functions
-            for idx in np.ndindex(*self.alphabet_sizes):
-                # Compute product of basis functions
-                basis_product = torch.tensor(1.0)
-                for pos, basis_idx in enumerate(idx):
-                    basis_product *= position_values[pos][basis_idx]
-                
-                # Compute flat index
-                flat_idx = np.ravel_multi_index(idx, self.alphabet_sizes)
-                
-                # Update fitness
-                fitness_values[i] += coefficients[flat_idx] * basis_product
-        
-        return fitness_values

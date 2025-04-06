@@ -1,23 +1,20 @@
-"""
-Path analysis for fitness landscapes.
-
-This module provides functions for analyzing evolutionary paths through fitness landscapes,
-including accessible paths, shortest paths, and path statistics.
-"""
-
 import numpy as np
 import networkx as nx
-from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable
+from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
 from ..core.landscape import FitnessLandscape
+from ..core.sequence import Sequence
 from ..core.graph import create_hamming_graph
+from logging import Logger
 
-
-def find_accessible_paths(landscape, start_sequence, end_sequence, **kwargs):
+def find_greedy_accessible_paths(landscape: FitnessLandscape,
+                                 start_sequence: Sequence,
+                                 end_sequence: Sequence,
+                                 **kwargs) -> Dict:
     """
-    Find all accessible paths between two sequences.
-    
-    An accessible path is one where fitness increases at each step.
-    
+    Function to find all fitness greedy paths between two sequences.
+    Assumes a Hamming graph structure and does not weight paths by
+    the evolutionary distance. 
+        
     Parameters
     ----------
     landscape : FitnessLandscape
@@ -25,13 +22,11 @@ def find_accessible_paths(landscape, start_sequence, end_sequence, **kwargs):
     start_sequence : Sequence
         Starting sequence.
     end_sequence : Sequence
-        Ending sequence.
-    **kwargs
-        Additional parameters.
-        
+        Ending sequence.        
+    
     Returns
     -------
-    dict
+    Dict
         Path analysis results.
     """
     # Extract sequences
@@ -52,11 +47,13 @@ def find_accessible_paths(landscape, start_sequence, end_sequence, **kwargs):
     if end_idx is None:
         raise ValueError("End sequence not found in landscape")
     
-    # Create Hamming graph if not already present
-    if landscape.graph is None:
-        landscape.graph = create_hamming_graph(sequences, 
-                                              [landscape.get_fitness(seq) for seq in sequences])
+    # Assert graph structure exists in landscape and warn if not Hamming graph.
+    assert landscape.graph is not None, \
+    'Landscape graph must be initialised.'
     
+    if landscape.graph_type is not 'hamming':
+        Logger.warning(msg="Landscape graph type is not `Hamming`. Path analysis relies on Hamming structure for valid interpretation.")
+
     # Create directed graph for accessible paths
     directed_graph = nx.DiGraph()
     
@@ -114,122 +111,31 @@ def find_accessible_paths(landscape, start_sequence, end_sequence, **kwargs):
         'end_fitness': landscape.get_fitness(end_sequence)
     }
 
-
-def find_shortest_paths(landscape, start_sequence, end_sequence, **kwargs):
+def analyze_path_accessibility(landscape: FitnessLandscape,
+                               **kwargs) -> Dict:
     """
-    Find shortest paths between two sequences.
+    Analyze accessibility of paths between local minima and maxima
+    on a Hamming graph.
     
     Parameters
     ----------
     landscape : FitnessLandscape
         Fitness landscape to analyze.
-    start_sequence : Sequence
-        Starting sequence.
-    end_sequence : Sequence
-        Ending sequence.
-    **kwargs
-        Additional parameters.
-        
+    
     Returns
     -------
-    dict
-        Path analysis results.
-    """
-    # Extract sequences
-    sequences = landscape.sequences
-    
-    # Find indices of start and end sequences
-    start_idx = None
-    end_idx = None
-    
-    for i, seq in enumerate(sequences):
-        if seq == start_sequence:
-            start_idx = i
-        if seq == end_sequence:
-            end_idx = i
-    
-    if start_idx is None:
-        raise ValueError("Start sequence not found in landscape")
-    if end_idx is None:
-        raise ValueError("End sequence not found in landscape")
-    
-    # Create Hamming graph if not already present
-    if landscape.graph is None:
-        landscape.graph = create_hamming_graph(sequences, 
-                                              [landscape.get_fitness(seq) for seq in sequences])
-    
-    # Find shortest paths
-    try:
-        shortest_paths = list(nx.all_shortest_paths(landscape.graph, start_idx, end_idx))
-    except nx.NetworkXNoPath:
-        shortest_paths = []
-    
-    # Convert path indices to sequences and fitness values
-    paths = []
-    
-    for path in shortest_paths:
-        path_sequences = [sequences[i] for i in path]
-        path_fitness = [landscape.get_fitness(seq) for seq in path_sequences]
-        
-        # Check if path is accessible (fitness increases at each step)
-        is_accessible = True
-        for i in range(len(path_fitness) - 1):
-            if path_fitness[i + 1] <= path_fitness[i]:
-                is_accessible = False
-                break
-        
-        paths.append({
-            'indices': path,
-            'sequences': path_sequences,
-            'fitness': path_fitness,
-            'is_accessible': is_accessible
-        })
-    
-    # Calculate path statistics
-    if paths:
-        path_lengths = [len(path['indices']) - 1 for path in paths]
-        accessible_paths = [path for path in paths if path['is_accessible']]
-        accessible_count = len(accessible_paths)
-    else:
-        path_lengths = []
-        accessible_count = 0
-    
-    return {
-        'paths': paths,
-        'path_count': len(paths),
-        'path_length': path_lengths[0] if path_lengths else None,
-        'accessible_count': accessible_count,
-        'accessible_fraction': accessible_count / len(paths) if paths else 0.0,
-        'start_sequence': start_sequence,
-        'end_sequence': end_sequence,
-        'start_fitness': landscape.get_fitness(start_sequence),
-        'end_fitness': landscape.get_fitness(end_sequence)
-    }
-
-
-def analyze_path_accessibility(landscape, **kwargs):
-    """
-    Analyze accessibility of paths between local minima and maxima.
-    
-    Parameters
-    ----------
-    landscape : FitnessLandscape
-        Fitness landscape to analyze.
-    **kwargs
-        Additional parameters.
-        
-    Returns
-    -------
-    dict
+    Dict
         Path accessibility analysis results.
     """
     # Extract sequences
     sequences = landscape.sequences
     
-    # Create Hamming graph if not already present
-    if landscape.graph is None:
-        landscape.graph = create_hamming_graph(sequences, 
-                                              [landscape.get_fitness(seq) for seq in sequences])
+    # Assert graph structure exists in landscape and warn if not Hamming graph.
+    assert landscape.graph is not None, \
+    'Landscape graph must be initialised.'
+    
+    if landscape.graph_type is not 'hamming':
+        Logger.warning(msg="Landscape graph type is not `Hamming`. Path analysis relies on Hamming structure for valid interpretation.")
     
     # Find local minima and maxima
     local_minima = []
@@ -318,213 +224,12 @@ def analyze_path_accessibility(landscape, **kwargs):
         'total_pairs': total_pairs
     }
 
-
-def calculate_path_metrics(landscape, sample_size=100, **kwargs):
+def calculate_basin_of_attraction(landscape: FitnessLandscape,
+                                  local_optimum: Sequence,
+                                  **kwargs) -> Dict:
     """
-    Calculate metrics for random paths through the landscape.
-    
-    Parameters
-    ----------
-    landscape : FitnessLandscape
-        Fitness landscape to analyze.
-    sample_size : int, optional
-        Number of random paths to sample.
-    **kwargs
-        Additional parameters.
-        
-    Returns
-    -------
-    dict
-        Path metrics.
-    """
-    # Extract sequences
-    sequences = landscape.sequences
-    
-    # Create Hamming graph if not already present
-    if landscape.graph is None:
-        landscape.graph = create_hamming_graph(sequences, 
-                                              [landscape.get_fitness(seq) for seq in sequences])
-    
-    # Sample random pairs of sequences
-    n_sequences = len(sequences)
-    start_indices = np.random.choice(n_sequences, sample_size)
-    end_indices = np.random.choice(n_sequences, sample_size)
-    
-    # Calculate path metrics
-    path_lengths = []
-    accessible_paths = []
-    accessible_fractions = []
-    
-    for i in range(sample_size):
-        start_idx = start_indices[i]
-        end_idx = end_indices[i]
-        
-        # Skip if start and end are the same
-        if start_idx == end_idx:
-            continue
-        
-        # Find shortest paths
-        try:
-            shortest_paths = list(nx.all_shortest_paths(landscape.graph, start_idx, end_idx))
-        except nx.NetworkXNoPath:
-            continue
-        
-        # Calculate path length
-        path_length = len(shortest_paths[0]) - 1
-        path_lengths.append(path_length)
-        
-        # Check accessibility of each path
-        accessible_count = 0
-        
-        for path in shortest_paths:
-            path_fitness = [landscape.get_fitness(sequences[i]) for i in path]
-            
-            # Check if path is accessible (fitness increases at each step)
-            is_accessible = True
-            for j in range(len(path_fitness) - 1):
-                if path_fitness[j + 1] <= path_fitness[j]:
-                    is_accessible = False
-                    break
-            
-            if is_accessible:
-                accessible_count += 1
-        
-        accessible_paths.append(accessible_count)
-        accessible_fractions.append(accessible_count / len(shortest_paths))
-    
-    # Calculate statistics
-    if path_lengths:
-        mean_length = np.mean(path_lengths)
-        std_length = np.std(path_lengths)
-        mean_accessible = np.mean(accessible_fractions)
-        std_accessible = np.std(accessible_fractions)
-    else:
-        mean_length = std_length = mean_accessible = std_accessible = None
-    
-    return {
-        'mean_path_length': mean_length,
-        'std_path_length': std_length,
-        'mean_accessible_fraction': mean_accessible,
-        'std_accessible_fraction': std_accessible,
-        'sample_size': sample_size,
-        'valid_samples': len(path_lengths)
-    }
-
-
-def find_evolutionary_trajectories(landscape, start_sequence, max_steps=100, n_trajectories=10, **kwargs):
-    """
-    Find evolutionary trajectories from a starting sequence.
-    
-    Parameters
-    ----------
-    landscape : FitnessLandscape
-        Fitness landscape to analyze.
-    start_sequence : Sequence
-        Starting sequence.
-    max_steps : int, optional
-        Maximum number of steps per trajectory.
-    n_trajectories : int, optional
-        Number of trajectories to simulate.
-    **kwargs
-        Additional parameters.
-        
-    Returns
-    -------
-    dict
-        Trajectory analysis results.
-    """
-    # Extract sequences
-    sequences = landscape.sequences
-    
-    # Find index of start sequence
-    start_idx = None
-    
-    for i, seq in enumerate(sequences):
-        if seq == start_sequence:
-            start_idx = i
-            break
-    
-    if start_idx is None:
-        raise ValueError("Start sequence not found in landscape")
-    
-    # Create Hamming graph if not already present
-    if landscape.graph is None:
-        landscape.graph = create_hamming_graph(sequences, 
-                                              [landscape.get_fitness(seq) for seq in sequences])
-    
-    # Simulate trajectories
-    trajectories = []
-    
-    for _ in range(n_trajectories):
-        # Initialize trajectory
-        current_idx = start_idx
-        current_fitness = landscape.get_fitness(sequences[current_idx])
-        
-        trajectory = {
-            'indices': [current_idx],
-            'fitness': [current_fitness]
-        }
-        
-        # Simulate steps
-        for step in range(max_steps):
-            # Get neighbors
-            neighbors = list(landscape.graph.neighbors(current_idx))
-            
-            # Get fitness of neighbors
-            neighbor_fitness = [landscape.get_fitness(sequences[i]) for i in neighbors]
-            
-            # Find neighbors with higher fitness
-            better_indices = [i for i, fitness in enumerate(neighbor_fitness) 
-                             if fitness > current_fitness]
-            
-            if not better_indices:
-                # No better neighbors, end trajectory
-                break
-            
-            # Choose random neighbor with higher fitness
-            better_neighbors = [neighbors[i] for i in better_indices]
-            next_idx = np.random.choice(better_neighbors)
-            
-            # Update current position
-            current_idx = next_idx
-            current_fitness = landscape.get_fitness(sequences[current_idx])
-            
-            # Update trajectory
-            trajectory['indices'].append(current_idx)
-            trajectory['fitness'].append(current_fitness)
-        
-        # Add sequences to trajectory
-        trajectory['sequences'] = [sequences[i] for i in trajectory['indices']]
-        
-        # Calculate trajectory statistics
-        trajectory['length'] = len(trajectory['indices']) - 1
-        trajectory['fitness_gain'] = trajectory['fitness'][-1] - trajectory['fitness'][0]
-        trajectory['reached_optimum'] = trajectory['length'] < max_steps
-        
-        trajectories.append(trajectory)
-    
-    # Calculate overall statistics
-    lengths = [traj['length'] for traj in trajectories]
-    fitness_gains = [traj['fitness_gain'] for traj in trajectories]
-    reached_optima = [traj['reached_optimum'] for traj in trajectories]
-    
-    return {
-        'trajectories': trajectories,
-        'mean_length': np.mean(lengths),
-        'std_length': np.std(lengths),
-        'mean_fitness_gain': np.mean(fitness_gains),
-        'std_fitness_gain': np.std(fitness_gains),
-        'optimum_fraction': np.mean(reached_optima),
-        'start_sequence': start_sequence,
-        'start_fitness': landscape.get_fitness(start_sequence),
-        'n_trajectories': n_trajectories,
-        'max_steps': max_steps
-    }
-
-
-def calculate_basin_of_attraction(landscape, local_optimum, **kwargs):
-    """
-    Calculate basin of attraction for a local optimum.
+    Calculate the characteristics of a basin of attraction around a
+    local optimum. Assumes a Hamming graph structure.
     
     Parameters
     ----------
@@ -532,12 +237,10 @@ def calculate_basin_of_attraction(landscape, local_optimum, **kwargs):
         Fitness landscape to analyze.
     local_optimum : Sequence
         Local optimum sequence.
-    **kwargs
-        Additional parameters.
         
     Returns
     -------
-    dict
+    Dict
         Basin of attraction analysis results.
     """
     # Extract sequences
@@ -554,10 +257,12 @@ def calculate_basin_of_attraction(landscape, local_optimum, **kwargs):
     if optimum_idx is None:
         raise ValueError("Local optimum not found in landscape")
     
-    # Create Hamming graph if not already present
-    if landscape.graph is None:
-        landscape.graph = create_hamming_graph(sequences, 
-                                              [landscape.get_fitness(seq) for seq in sequences])
+    # Assert graph structure exists in landscape and warn if not Hamming graph.
+    assert landscape.graph is not None, \
+    'Landscape graph must be initialised.'
+    
+    if landscape.graph_type is not 'hamming':
+        Logger.warning(msg="Landscape graph type is not `Hamming`. Path analysis relies on Hamming structure for valid interpretation.")
     
     # Verify that the sequence is a local optimum
     optimum_fitness = landscape.get_fitness(local_optimum)
@@ -629,4 +334,198 @@ def calculate_basin_of_attraction(landscape, local_optimum, **kwargs):
         'basin_fraction': basin_fraction,
         'optimum': local_optimum,
         'optimum_fitness': optimum_fitness
+    }
+
+def adaptive_walk_stochastic(landscape: FitnessLandscape,
+                             start_sequence: Sequence=None,
+                             max_steps: int=100,
+                             strategy: Literal['greedy', 'random_improvement']='greedy') -> Dict:
+    """
+    Perform adaptive walk on fitness landscape.
+    
+    Parameters
+    ----------
+    landscape : FitnessLandscape
+        Fitness landscape to walk on.
+    start_sequence : Sequence, default=`None`
+        Starting sequence. If None, a random sequence is chosen.
+    max_steps : int, default=`100`
+        Maximum number of steps to take.
+    strategy : str, default=`greedy`
+        Walk strategy. 'greedy': Always move to the neighbor with
+        highest fitness. 'random_improvement': Move to a random
+        neighbor with higher fitness.
+        
+    Returns
+    -------
+    dict
+        Walk results.
+    """
+    # Extract sequences
+    sequences = landscape.sequences
+    
+    if not sequences:
+        raise ValueError("Landscape contains no sequences")
+    
+    # Create Hamming graph if not already present
+    if landscape.graph is None:
+        landscape.graph = create_hamming_graph(sequences, 
+                                              [landscape.get_fitness(seq) for seq in sequences])
+    
+    # Determine start sequence
+    if start_sequence is None:
+        # Choose random sequence
+        start_idx = np.random.choice(len(sequences))
+        start_sequence = sequences[start_idx]
+    else:
+        # Find index of start sequence
+        for i, seq in enumerate(sequences):
+            if seq == start_sequence:
+                start_idx = i
+                break
+        else:
+            raise ValueError("Start sequence not found in landscape")
+    
+    # Initialize walk
+    current_idx = start_idx
+    current_fitness = landscape.get_fitness(sequences[current_idx])
+    
+    walk_indices = [current_idx]
+    walk_fitness = [current_fitness]
+    
+    # Perform walk
+    for step in range(max_steps):
+        # Get neighbors
+        neighbors = list(landscape.graph.neighbors(current_idx))
+        
+        # Get fitness of neighbors
+        neighbor_fitness = [landscape.get_fitness(sequences[i]) for i in neighbors]
+        
+        # Find neighbors with higher fitness
+        better_indices = [i for i, fitness in enumerate(neighbor_fitness) 
+                         if fitness > current_fitness]
+        
+        if not better_indices:
+            # No better neighbors, end walk
+            break
+        
+        # Choose next step based on strategy
+        if strategy == 'greedy':
+            # Choose neighbor with highest fitness
+            best_idx = np.argmax(neighbor_fitness)
+            next_idx = neighbors[best_idx]
+        elif strategy == 'random_improvement':
+            # Choose random neighbor with higher fitness
+            better_neighbors = [neighbors[i] for i in better_indices]
+            next_idx = np.random.choice(better_neighbors)
+        else:
+            raise ValueError(f"Unsupported walk strategy: {strategy}")
+        
+        # Update current position
+        current_idx = next_idx
+        current_fitness = landscape.get_fitness(sequences[current_idx])
+        
+        # Update walk
+        walk_indices.append(current_idx)
+        walk_fitness.append(current_fitness)
+    
+    # Calculate walk statistics
+    steps_taken = len(walk_indices) - 1
+    fitness_gain = walk_fitness[-1] - walk_fitness[0]
+    
+    return {
+        'walk_indices': walk_indices,
+        'walk_fitness': walk_fitness,
+        'steps_taken': steps_taken,
+        'fitness_gain': fitness_gain,
+        'start_fitness': walk_fitness[0],
+        'end_fitness': walk_fitness[-1],
+        'reached_optimum': steps_taken < max_steps,
+        'strategy': strategy
+    }
+
+def neutral_network_analysis(landscape: FitnessLandscape,
+                             threshold: float = 0.0): 
+    """
+    Analyze neutral networks, where sequences can diverge and not
+    improve in fitness, in the fitness landscape.
+    
+    Parameters
+    ----------
+    landscape : FitnessLandscape
+        Fitness landscape to analyze.
+    threshold : float, optional
+        Fitness difference threshold for considering two sequences neutral.
+        
+    Returns
+    -------
+    dict
+        Neutral network analysis results.
+    """
+    # Extract sequences and fitness values
+    sequences = landscape.sequences
+    fitness_values = np.array([landscape.get_fitness(seq) for seq in sequences])
+    
+    # Create Hamming graph if not already present
+    if landscape.graph is None:
+        landscape.graph = create_hamming_graph(sequences, fitness_values)
+    
+    # Create neutral network graph
+    neutral_graph = nx.Graph()
+    
+    # Add all nodes
+    for i in range(len(sequences)):
+        neutral_graph.add_node(i, fitness=fitness_values[i])
+    
+    # Add edges between neutral neighbors
+    for i, j in landscape.graph.edges():
+        # Check if fitness difference is within threshold
+        if abs(fitness_values[i] - fitness_values[j]) <= threshold:
+            neutral_graph.add_edge(i, j)
+    
+    # Find connected components (neutral networks)
+    components = list(nx.connected_components(neutral_graph))
+    
+    # Calculate statistics for each neutral network
+    networks = []
+    
+    for i, component in enumerate(components):
+        # Convert to list for indexing
+        component = list(component)
+        
+        # Calculate statistics
+        network_fitness = [fitness_values[j] for j in component]
+        mean_fitness = np.mean(network_fitness)
+        std_fitness = np.std(network_fitness)
+        size = len(component)
+        
+        # Calculate network diameter
+        subgraph = neutral_graph.subgraph(component)
+        try:
+            diameter = nx.diameter(subgraph)
+        except nx.NetworkXError:
+            # Not connected or empty graph
+            diameter = 0
+        
+        networks.append({
+            'id': i,
+            'size': size,
+            'mean_fitness': mean_fitness,
+            'std_fitness': std_fitness,
+            'diameter': diameter,
+            'nodes': component
+        })
+    
+    # Sort networks by size (largest first)
+    networks.sort(key=lambda x: x['size'], reverse=True)
+    
+    # Calculate overall statistics
+    total_nodes = sum(network['size'] for network in networks)
+    
+    return {
+        'networks': networks,
+        'network_count': len(networks),
+        'largest_network_size': networks[0]['size'] if networks else 0,
+        'largest_network_fraction': networks[0]['size'] / total_nodes if networks else 0,
+        'threshold': threshold
     }

@@ -1,27 +1,24 @@
-"""
-Sequence representations and operations for fitness landscape analysis.
-
-This module provides classes and functions for representing and manipulating
-biological sequences (DNA, RNA, protein) and abstract sequences.
-"""
-
 import numpy as np
-from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable
+from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
 
 
 class Sequence:
     """
     Base class for sequence representations.
     
-    Parameters
+    Attributes
     ----------
     sequence : array-like
         Sequence data as a list, array, or other iterable.
-    alphabet : list or None, optional
-        Possible values at each position. If None, inferred from sequence.
+    alphabet : list, default=`None`
+        Possible values at each position. If `None`, inferred from
+        sequence.
     """
     
-    def __init__(self, sequence, alphabet=None):
+    def __init__(self,
+                 sequence: np.ndarray,
+                 alphabet: List=None) -> None:
+        
         self.sequence = np.asarray(sequence)
         
         if alphabet is None:
@@ -33,21 +30,24 @@ class Sequence:
         self.length = len(self.sequence)
         self.alphabet_size = len(self.alphabet)
     
-    def __len__(self):
+    def __len__(self) -> int:
         return self.length
     
     def __getitem__(self, idx):
         return self.sequence[idx]
     
-    def __eq__(self, other):
+    def __eq__(self,
+               other) -> np.ndarray:
         if isinstance(other, Sequence):
             return np.array_equal(self.sequence, other.sequence)
         return np.array_equal(self.sequence, np.asarray(other))
     
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self.sequence})"
     
-    def distance(self, other, metric='hamming'):
+    def distance(self,
+                 other,
+                 metric: Literal ['hamming', 'euclidean'] = 'hamming'):
         """
         Calculate distance between this sequence and another.
         
@@ -72,17 +72,20 @@ class Sequence:
         else:
             raise ValueError(f"Unsupported distance metric: {metric}")
     
-    def mutate(self, positions=None, values=None):
+    def mutate(self,
+               positions: Union[int, List] = None,
+               values: List = None):
         """
         Create a mutated copy of the sequence.
         
         Parameters
         ----------
         positions : int or list, optional
-            Position(s) to mutate. If None, a random position is chosen.
+            Position(s) to mutate. If None, a random position is
+            chosen.
         values : any or list, optional
-            Value(s) to set at the position(s). If None, random values from
-            the alphabet are chosen.
+            Value(s) to set at the position(s). If None, random values
+            from the alphabet are chosen.
             
         Returns
         -------
@@ -109,7 +112,7 @@ class Sequence:
         
         return self.__class__(new_sequence, self.alphabet)
     
-    def to_array(self):
+    def to_array(self) -> np.ndarray:
         """
         Convert sequence to numpy array.
         
@@ -120,17 +123,25 @@ class Sequence:
         """
         return self.sequence.copy()
     
-    def to_one_hot(self):
+    def to_one_hot(self,
+                   alphabet_map: Dict = None) -> np.ndarray:
         """
         Convert sequence to one-hot encoding.
         
+        Parameters
+        ----------
+        alphabet_map : dict
+            The alphabet map to construct one-hot encoding vectors
+            from. If `None`, infer from self.alphabet.
+
         Returns
         -------
         numpy.ndarray
             One-hot encoded sequence.
         """
+        if alphabet_map is None:
         # Create mapping from alphabet to indices
-        alphabet_map = {val: idx for idx, val in enumerate(self.alphabet)}
+            alphabet_map = {val: idx for idx, val in enumerate(self.alphabet)}
         
         # Convert sequence to indices
         indices = np.array([alphabet_map[val] for val in self.sequence])
@@ -146,14 +157,17 @@ class BinarySequence(Sequence):
     """
     Binary sequence representation with efficient bit storage.
     
-    Parameters
+    Attributes
     ----------
     sequence : array-like
         Binary sequence data (0s and 1s).
     """
     
-    def __init__(self, sequence):
-        super().__init__(sequence, alphabet=[0, 1])
+    def __init__(self,
+                 sequence: np.ndarray) -> None:
+        
+        super().__init__(sequence,
+                         alphabet= [0, 1])
         
         # Validate binary sequence
         if not set(self.sequence).issubset({0, 1}):
@@ -162,7 +176,8 @@ class BinarySequence(Sequence):
         # Convert to bit array for efficient storage
         self._bit_array = np.packbits(self.sequence.astype(bool))
     
-    def __getitem__(self, idx):
+    def __getitem__(self,
+                    idx: Union[int, List]):
         if isinstance(idx, slice):
             # Handle slice indexing
             return self.sequence[idx]
@@ -170,7 +185,8 @@ class BinarySequence(Sequence):
             # Handle integer indexing
             return self.sequence[idx]
     
-    def hamming_distance(self, other):
+    def hamming_distance(self,
+                         other) -> float:
         """
         Calculate Hamming distance using efficient bit operations.
         
@@ -200,15 +216,19 @@ class MultialleleSequence(Sequence):
     Parameters
     ----------
     sequence : array-like
-        Sequence data with multiple possible values at each position.
+        Sequence data with multiple possible values at each
+        position.
     alphabet : list or None, optional
-        Possible values at each position. If None, inferred from sequence.
+        Possible values at each position. If None, inferred from
+        sequence.
     """
     
-    def __init__(self, sequence, alphabet=None):
+    def __init__(self,
+                 sequence,
+                 alphabet=None) -> None:
         super().__init__(sequence, alphabet)
     
-    def to_categorical(self):
+    def to_categorical(self) -> np.ndarray:
         """
         Convert sequence to categorical encoding (integers).
         
@@ -224,21 +244,24 @@ class MultialleleSequence(Sequence):
         return np.array([alphabet_map[val] for val in self.sequence])
 
 
-def generate_sequences(length, alphabet, strategy='complete', n=None, seed=None):
+def generate_sequences(length: int,
+                       alphabet: Union[List, np.ndarray],
+                       strategy: Literal['complete', 'mutational', 'random'] = 'complete',
+                       n: int = None,
+                       seed: int = None) -> List:
     """
-    Generate sequences based on strategy.
+    Generate sequences based on a generation strategy.
     
     Parameters
     ----------
     length : int
-        Length of sequences.
+        Length of sequences. All sequences are of length `n`.
     alphabet : list or array-like
         Possible values at each position.
-    strategy : str, optional
-        Generation strategy:
-        - 'complete': All possible sequences (combinatorial)
-        - 'random': Random sampling of sequence space
-        - 'mutational': Start from a random sequence and apply mutations
+    strategy : str
+        'complete': All possible sequences (combinatorial). 'random':
+        Random sampling of sequence space. 'mutational': Start from a
+        random sequence and apply mutations.
     n : int, optional
         Number of sequences to generate (for 'random' and 'mutational').
     seed : int, optional
@@ -310,9 +333,11 @@ def generate_sequences(length, alphabet, strategy='complete', n=None, seed=None)
         raise ValueError(f"Unsupported strategy: {strategy}")
 
 
-def sequence_distance(seq1, seq2, metric='hamming'):
+def sequence_distance(seq1: Union[Sequence, np.ndarray],
+                      seq2: Union[Sequence, np.ndarray],
+                      metric: Literal['hamming', 'euclidean'] = 'hamming') -> Union[float, int]:
     """
-    Calculate distance between sequences.
+    Function to calculate distance between sequences.
     
     Parameters
     ----------

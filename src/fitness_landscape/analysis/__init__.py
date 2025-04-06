@@ -1,10 +1,3 @@
-"""
-Analysis module for fitness landscape package.
-
-This module provides functions for analyzing fitness landscapes, including
-epistasis analysis, ruggedness analysis, path analysis, and statistical analysis.
-"""
-
 from .epistasis import (
     calculate_epistasis,
     epistasis_decomposition,

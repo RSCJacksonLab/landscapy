@@ -1,55 +1,38 @@
-"""
-Epistasis analysis for fitness landscapes.
-
-This module provides functions for analyzing epistasis (genetic interactions)
-in fitness landscapes.
-"""
-
 import numpy as np
 import torch
-from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable
+from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
 from ..core.landscape import FitnessLandscape
-from ..transforms.walsh_hadamard import walsh_transform, walsh_coefficients, MultialleleWalshTransform
+from ..transforms.walsh_hadamard import walsh_transform, walsh_coefficients
+from sklearn.linear_model import LinearRegression, Lasso, Ridge, ElasticNet
+from itertools import combinations
+from sklearn.preprocessing import PolynomialFeatures
 
 
-def calculate_epistasis(landscape, order=2, method='walsh', **kwargs):
+def calculate_epistasis_walsh(landscape: FitnessLandscape,
+                               order: int,
+                               backend: Literal['numpy', 'torch'] = 'numpy',
+                               **kwargs) -> Dict:
     """
-    Calculate epistasis up to specified order.
-    
+    Function to measure epistasis using the Walsh-Hadamard
+    transformation. Supports binary and higher dimensional state
+    spaces. 
+
     Parameters
     ----------
     landscape : FitnessLandscape
-        Fitness landscape to analyze.
-    order : int, optional
-        Maximum order of epistasis to calculate.
-    method : str, optional
-        Method for calculating epistasis:
-        - 'walsh': Use Walsh-Hadamard transform
-        - 'regression': Use linear regression
-        - 'ensemble': Use background-averaged (ensemble) epistasis
-        - 'reference_free': Use reference-free analysis
-    **kwargs
-        Additional parameters for the method.
-        
+        The fitness landscape to transform.
+    
+    order : int
+        The order of interactions to test up to. 
+    
+    backend : str, default=`numpy`
+        The backend to use.
+    
     Returns
     -------
-    dict
-        Epistasis values and statistics.
+    resutls : dict
+        Dictionary of results on the transformation.
     """
-    if method == 'walsh':
-        return _calculate_epistasis_walsh(landscape, order, **kwargs)
-    elif method == 'regression':
-        return _calculate_epistasis_regression(landscape, order, **kwargs)
-    elif method == 'ensemble':
-        return _calculate_epistasis_ensemble(landscape, order, **kwargs)
-    elif method == 'reference_free':
-        return _calculate_epistasis_reference_free(landscape, order, **kwargs)
-    else:
-        raise ValueError(f"Unsupported epistasis calculation method: {method}")
-
-
-def _calculate_epistasis_walsh(landscape, order=2, backend='numpy', **kwargs):
-    """Calculate epistasis using Walsh-Hadamard transform."""
     # Check if sequences are binary
     is_binary = True
     for seq in landscape.sequences:
@@ -59,7 +42,9 @@ def _calculate_epistasis_walsh(landscape, order=2, backend='numpy', **kwargs):
     
     if is_binary:
         # Use standard Walsh transform for binary sequences
-        coeffs = walsh_coefficients(landscape, order=order, backend=backend)
+        coeffs = walsh_coefficients(landscape,
+                                    order=order,
+                                    backend=backend)
         
         # Organize coefficients by order
         result = {
@@ -82,40 +67,38 @@ def _calculate_epistasis_walsh(landscape, order=2, backend='numpy', **kwargs):
         result['statistics'] = _calculate_epistasis_statistics(coeffs)
         
         return result
-    else:
-        # Use multiallelic Walsh transform
-        # Determine alphabet sizes
-        alphabet_sizes = []
-        for i in range(len(landscape.sequences[0])):
-            unique_values = set(seq[i] for seq in landscape.sequences)
-            alphabet_sizes.append(len(unique_values))
-        
-        # Create multiallelic transform
-        transform = MultialleleWalshTransform(alphabet_sizes, backend=backend)
-        
-        # Compute transform
-        coefficients = transform.transform(landscape)
-        
-        # Organize coefficients
-        result = {
-            'coefficients': coefficients,
-            'alphabet_sizes': alphabet_sizes
-        }
-        
-        # Calculate summary statistics
-        result['statistics'] = {
-            'mean': np.mean(np.abs(coefficients)),
-            'std': np.std(coefficients),
-            'max': np.max(np.abs(coefficients)),
-            'min': np.min(np.abs(coefficients))
-        }
-        
-        return result
+    
 
+def calculate_epistasis_regression(landscape: FitnessLandscape,
+                                    order: int,
+                                    regularization: Literal['l1', 'l2', 'elastic_net'] = None,
+                                    alpha: float = 1.0,
+                                    **kwargs) -> Dict: 
+    """
+    Function to measure epistasis with linear modelling.
 
-def _calculate_epistasis_regression(landscape, order=2, regularization=None, alpha=1.0, **kwargs):
-    """Calculate epistasis using linear regression."""
-    from sklearn.linear_model import LinearRegression, Lasso, Ridge, ElasticNet
+    Parameters
+    ----------
+    landscape : FitnessLandscape
+        The fitness landscape to analyze. 
+    
+    order : int
+        The order of interaction to test up to. 
+    
+    regularization : str, default=`None`
+        The regularization method to use during linear modelling. If 
+        `L1`, LASSO regression is used. If `L2`, RIDGE regression is
+        used. If `elastic_net`, `ElasticNet` regression is used. if
+        `None`, model is simple linear regression. 
+    
+    alpha : float
+        The regularisation alpha parameter. 
+    
+    Returns
+    -------
+    results : Dict
+        The results dictionary. 
+    """
     
     # Extract sequences and fitness values
     sequences = np.array([seq.to_array() for seq in landscape.sequences])
@@ -175,8 +158,24 @@ def _calculate_epistasis_regression(landscape, order=2, regularization=None, alp
     return result
 
 
-def _calculate_epistasis_ensemble(landscape, order=2, **kwargs):
-    """Calculate background-averaged (ensemble) epistasis."""
+def calculate_epistasis_ensemble(landscape: FitnessLandscape,
+                                 order: int,**kwargs) -> Dict:
+    """
+    Function to compute the background average epistasis of a system.
+
+    Parameters
+    ----------
+    landscape : FitnessLandscape
+        The fitness landscape to analyze.
+    
+    order : int
+        The order of epistasis to test up to. 
+    
+    Returns
+    -------
+    results : Dict
+        The results dictionary. 
+    """
     # Extract sequences and fitness values
     sequences = [seq.to_array() for seq in landscape.sequences]
     fitness_values = [landscape.get_fitness(seq) for seq in landscape.sequences]
@@ -220,7 +219,6 @@ def _calculate_epistasis_ensemble(landscape, order=2, **kwargs):
             result['by_order'][o] = {}
             
             # Generate all combinations of o positions
-            from itertools import combinations
             for pos_combo in combinations(range(seq_length), o):
                 # Group sequences by values at these positions
                 by_values = {}
@@ -265,13 +263,33 @@ def _calculate_epistasis_ensemble(landscape, order=2, **kwargs):
     return result
 
 
-def _calculate_epistasis_reference_free(landscape, order=2, **kwargs):
-    """Calculate reference-free epistasis."""
+def calculate_epistasis_reference_free(landscape: FitnessLandscape,
+                                       order: int,
+                                       **kwargs) -> Dict:
+    """
+    Function to calculate the referece-free epistasis (i.e., mutational
+    effects are measured relative to the global population and not a
+    reference sequence).
+
+    Parameters
+    ----------
+    landscape : FitnessLandscape
+        The fitness landscape to analyze.
+    
+    order : int
+        The order of interaction to test up to. 
+    
+    Returns
+    -------
+    results : Dict
+        Dictionary of results. 
+    """
     # This is a simplified implementation of reference-free analysis
     # For a complete implementation, see the paper by Poelwijk et al. (2019)
     
     # Extract sequences and fitness values
     sequences = [seq.to_array() for seq in landscape.sequences]
+
     fitness_values = [landscape.get_fitness(seq) for seq in landscape.sequences]
     
     # Calculate global mean fitness
@@ -363,20 +381,45 @@ def _calculate_epistasis_reference_free(landscape, order=2, **kwargs):
     return result
 
 
-def _create_design_matrix(sequences, order):
-    """Create design matrix with interaction terms up to specified order."""
-    from sklearn.preprocessing import PolynomialFeatures
+def _create_design_matrix(sequences: np.ndarray,
+                          order: int) -> np.ndarray:
+    """
+    Function to create a design matrix of sequences up to a specified
+    order.
+
+    Parameters
+    ----------
+    sequences : np.ndarray
+        The sequences to include in the design matrix.
     
+    order : int
+        The order of interaction to test up to. 
+    """
     # Create polynomial features
     poly = PolynomialFeatures(degree=order, include_bias=True)
     X = poly.fit_transform(sequences)
     
     return X
 
+def _get_feature_names(n_features: int,
+                       order: int) -> List:
+    """
+    Function to get feature names for the Design matrix. 
 
-def _get_feature_names(n_features, order):
-    """Get feature names for design matrix."""
-    from sklearn.preprocessing import PolynomialFeatures
+    Parameters
+    ----------
+    n_features : int
+        The number of features. 
+    
+    order : int
+        The order to test epistasis up to in the deign matrix. 
+    
+    Returns
+    -------
+    readable_names : List
+        A list of human readable feature names that correspond to the
+        polynomial epistasis contributions. 
+    """
     
     # Create polynomial features
     poly = PolynomialFeatures(degree=order, include_bias=True)
@@ -400,8 +443,21 @@ def _get_feature_names(n_features, order):
     return readable_names
 
 
-def _calculate_epistasis_statistics(coefficients):
-    """Calculate summary statistics for epistasis coefficients."""
+def _calculate_epistasis_statistics(coefficients: Dict) -> Dict:
+    """
+    Function to calcaulte epistasis summary statistics. 
+
+    Parameters
+    ----------
+    coefficients : Dict
+        The coefficients dictionary output from an epistasis
+        decomposition function. 
+    
+    Returns
+    -------
+    Dict
+        Dictionary of summary statistics on the epistatic coefficients.
+    """
     # Remove intercept for statistics
     coef_values = [v for k, v in coefficients.items() if k != 'intercept']
     
@@ -421,177 +477,3 @@ def _calculate_epistasis_statistics(coefficients):
         'min': np.min(coef_values),
         'abs_mean': np.mean(np.abs(coef_values))
     }
-
-
-def epistasis_decomposition(landscape, method='walsh', order=None, **kwargs):
-    """
-    Decompose fitness into epistatic components.
-    
-    Parameters
-    ----------
-    landscape : FitnessLandscape
-        Fitness landscape to analyze.
-    method : str, optional
-        Method for calculating epistasis.
-    order : int or None, optional
-        Maximum order of epistasis to include.
-    **kwargs
-        Additional parameters for the method.
-        
-    Returns
-    -------
-    dict
-        Decomposition results.
-    """
-    # Calculate epistasis
-    epistasis = calculate_epistasis(landscape, order=order, method=method, **kwargs)
-    
-    # Extract sequences and fitness values
-    sequences = [seq.to_array() for seq in landscape.sequences]
-    fitness_values = [landscape.get_fitness(seq) for seq in landscape.sequences]
-    
-    # Initialize decomposition
-    decomposition = {
-        'observed': fitness_values,
-        'components': {},
-        'residuals': np.zeros_like(fitness_values)
-    }
-    
-    # Add components for each order
-    for o in range(order + 1 if order is not None else max(epistasis['by_order'].keys()) + 1):
-        if o not in epistasis['by_order']:
-            continue
-        
-        # Initialize component for this order
-        component = np.zeros_like(fitness_values)
-        
-        # Add contributions from this order
-        for term, value in epistasis['by_order'][o].items():
-            if term == 'intercept':
-                # Add intercept to all sequences
-                component += value
-            else:
-                # Add contribution only to matching sequences
-                if method in ['walsh', 'regression']:
-                    # Parse term format from these methods
-                    if '*' in term:
-                        # Regression format: "0*1*2"
-                        positions = [int(p) for p in term.split('*')]
-                        for i, seq in enumerate(sequences):
-                            if all(seq[p] == 1 for p in positions):
-                                component[i] += value
-                    else:
-                        # Walsh format: "0,1,2"
-                        positions = [int(p) for p in term.split(',')]
-                        for i, seq in enumerate(sequences):
-                            if all(seq[p] == 1 for p in positions):
-                                component[i] += value
-                else:
-                    # Parse term format from ensemble/reference_free methods
-                    # Format: "0:1,1:0,2:1" (position:value pairs)
-                    conditions = []
-                    for part in term.split(','):
-                        if ':' in part:
-                            pos, val = part.split(':')
-                            conditions.append((int(pos), int(val)))
-                    
-                    for i, seq in enumerate(sequences):
-                        if all(seq[pos] == val for pos, val in conditions):
-                            component[i] += value
-        
-        # Add component to decomposition
-        decomposition['components'][o] = component
-        
-        # Update residuals
-        decomposition['residuals'] = fitness_values - sum(decomposition['components'].values())
-    
-    # Calculate variance explained by each order
-    total_variance = np.var(fitness_values)
-    variance_explained = {}
-    
-    for o, component in decomposition['components'].items():
-        variance_explained[o] = np.var(component) / total_variance
-    
-    decomposition['variance_explained'] = variance_explained
-    decomposition['total_variance'] = total_variance
-    decomposition['residual_variance'] = np.var(decomposition['residuals'])
-    
-    return decomposition
-
-
-def epistasis_statistics(landscape, method='walsh', order=None, **kwargs):
-    """
-    Calculate statistics of epistatic effects.
-    
-    Parameters
-    ----------
-    landscape : FitnessLandscape
-        Fitness landscape to analyze.
-    method : str, optional
-        Method for calculating epistasis.
-    order : int or None, optional
-        Maximum order of epistasis to include.
-    **kwargs
-        Additional parameters for the method.
-        
-    Returns
-    -------
-    dict
-        Statistics of epistatic effects.
-    """
-    # Calculate epistasis
-    epistasis = calculate_epistasis(landscape, order=order, method=method, **kwargs)
-    
-    # Initialize statistics
-    statistics = {
-        'by_order': {},
-        'overall': epistasis['statistics']
-    }
-    
-    # Calculate statistics for each order
-    for o, coeffs in epistasis['by_order'].items():
-        if o == 0:
-            # Skip intercept
-            continue
-        
-        values = list(coeffs.values())
-        
-        if not values:
-            continue
-        
-        statistics['by_order'][o] = {
-            'mean': np.mean(values),
-            'std': np.std(values),
-            'max': np.max(values),
-            'min': np.min(values),
-            'abs_mean': np.mean(np.abs(values)),
-            'count': len(values)
-        }
-    
-    # Calculate proportion of significant interactions
-    if 'threshold' in kwargs:
-        threshold = kwargs['threshold']
-        
-        significant_counts = {}
-        total_counts = {}
-        
-        for o, coeffs in epistasis['by_order'].items():
-            if o == 0:
-                continue
-            
-            values = list(coeffs.values())
-            
-            if not values:
-                continue
-            
-            significant = sum(1 for v in values if abs(v) > threshold)
-            significant_counts[o] = significant
-            total_counts[o] = len(values)
-        
-        statistics['significant'] = {
-            'counts': significant_counts,
-            'totals': total_counts,
-            'proportions': {o: significant_counts[o] / total_counts[o] for o in significant_counts}
-        }
-    
-    return statistics

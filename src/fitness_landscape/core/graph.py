@@ -1,33 +1,26 @@
-"""
-Graph representations and operations for fitness landscapes.
-
-This module provides functions for creating and manipulating graph representations
-of fitness landscapes using NetworkX.
-"""
-
 import numpy as np
 import networkx as nx
-from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable
+from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
 from .sequence import Sequence, sequence_distance
 
 
-def create_hamming_graph(sequences, fitness_values=None, weight_by_fitness=False, **kwargs):
+def create_hamming_graph(sequences: List[Sequence],
+                         fitness_values: Union[np.ndarray, List] = None,
+                         weight_by_fitness: bool = False) -> nx.Graph:
     """
-    Create a Hamming graph from sequences and fitness values.
-    
-    In a Hamming graph, nodes represent sequences and edges connect sequences
-    that differ by exactly one position (Hamming distance = 1).
+    Create a Hamming graph from sequences and fitness values. In a
+    Hamming graph, nodes represent sequences and edges connect
+    sequences that differ by exactly one position (Hamming
+    distance = 1).
     
     Parameters
     ----------
     sequences : list of Sequence or array-like
         Sequences to connect.
-    fitness_values : array-like or None, optional
+    fitness_values : array-like
         Fitness values corresponding to sequences.
-    weight_by_fitness : bool, optional
+    weight_by_fitness : bool, default = `False`
         Whether to weight edges by fitness differences.
-    **kwargs
-        Additional parameters for graph creation.
         
     Returns
     -------
@@ -65,32 +58,30 @@ def create_hamming_graph(sequences, fitness_values=None, weight_by_fitness=False
                     G.add_edge(i, j, weight=weight, distance=dist)
                 else:
                     G.add_edge(i, j, weight=1.0, distance=dist)
-    
     return G
 
-
-def create_knn_graph(sequences, fitness_values=None, k=5, metric='hamming', 
-                    weight_by_distance=True, **kwargs):
+def create_knn_graph(sequences: List[Sequence],
+                     k: int,
+                     fitness_values: Union[List, np.ndarray] = None,
+                     metric: Literal['hamming'] = 'hamming', 
+                    weight_by_distance: bool = True, **kwargs) -> nx.Graph:
     """
-    Create a k-nearest neighbor graph.
-    
-    In a KNN graph, nodes represent sequences and edges connect each sequence
-    to its k nearest neighbors according to the specified distance metric.
+    Create a k-nearest neighbor graph. In a KNN graph, nodes represent
+    sequences and edges connect each sequence to its k nearest
+    neighbors according to the specified distance metric.
     
     Parameters
     ----------
     sequences : list of Sequence or array-like
         Sequences to connect.
-    fitness_values : array-like or None, optional
-        Fitness values corresponding to sequences.
-    k : int, optional
+    k : int
         Number of neighbors.
+    fitness_values : array-like or None
+        Fitness values corresponding to sequences.
     metric : str, optional
-        Distance metric ('hamming', 'euclidean', etc.)
-    weight_by_distance : bool, optional
+        Distance metric ('hamming') // More to add
+    weight_by_distance : bool, default=`True`
         Whether to weight edges by distance.
-    **kwargs
-        Additional parameters.
         
     Returns
     -------
@@ -140,67 +131,3 @@ def create_knn_graph(sequences, fitness_values=None, k=5, metric='hamming',
     return G
 
 
-def graph_properties(graph, properties=None):
-    """
-    Calculate graph properties relevant to fitness landscapes.
-    
-    Parameters
-    ----------
-    graph : networkx.Graph
-        Graph to analyze.
-    properties : list or None, optional
-        Properties to calculate. If None, calculate all properties.
-        
-    Returns
-    -------
-    dict
-        Dictionary of graph properties.
-    """
-    if properties is None:
-        properties = ['degree', 'clustering', 'path_length', 'components', 'density']
-    
-    results = {}
-    
-    for prop in properties:
-        if prop == 'degree':
-            # Calculate degree statistics
-            degrees = [d for _, d in graph.degree()]
-            results['degree'] = {
-                'mean': np.mean(degrees),
-                'std': np.std(degrees),
-                'min': np.min(degrees),
-                'max': np.max(degrees)
-            }
-        
-        elif prop == 'clustering':
-            # Calculate clustering coefficient
-            results['clustering'] = nx.average_clustering(graph)
-        
-        elif prop == 'path_length':
-            # Calculate average shortest path length
-            if nx.is_connected(graph):
-                results['path_length'] = nx.average_shortest_path_length(graph)
-            else:
-                # Calculate for largest connected component
-                largest_cc = max(nx.connected_components(graph), key=len)
-                subgraph = graph.subgraph(largest_cc)
-                results['path_length'] = nx.average_shortest_path_length(subgraph)
-                results['path_length_note'] = 'Calculated for largest connected component'
-        
-        elif prop == 'components':
-            # Calculate connected components
-            components = list(nx.connected_components(graph))
-            results['components'] = {
-                'count': len(components),
-                'largest_size': len(max(components, key=len)),
-                'sizes': [len(c) for c in components]
-            }
-        
-        elif prop == 'density':
-            # Calculate graph density
-            results['density'] = nx.density(graph)
-        
-        else:
-            raise ValueError(f"Unsupported property: {prop}")
-    
-    return results

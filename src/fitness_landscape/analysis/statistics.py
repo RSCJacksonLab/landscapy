@@ -1,17 +1,13 @@
-"""
-Statistical analysis for fitness landscapes.
-
-This module provides functions for statistical analysis of fitness landscapes,
-including distribution analysis, correlation analysis, and hypothesis testing.
-"""
-
 import numpy as np
 import scipy.stats as stats
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable
 from ..core.landscape import FitnessLandscape
+from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.metrics import mean_squared_error, r2_score
 
-
-def analyze_fitness_distribution(landscape, **kwargs):
+def analyze_fitness_distribution(landscape: FitnessLandscape,
+                                 **kwargs) -> Dict:
     """
     Analyze the distribution of fitness values in a landscape.
     
@@ -19,8 +15,6 @@ def analyze_fitness_distribution(landscape, **kwargs):
     ----------
     landscape : FitnessLandscape
         Fitness landscape to analyze.
-    **kwargs
-        Additional parameters.
         
     Returns
     -------
@@ -81,7 +75,9 @@ def analyze_fitness_distribution(landscape, **kwargs):
     }
 
 
-def correlation_analysis(landscape, features, **kwargs):
+def correlation_analysis(landscape: FitnessLandscape,
+                         features: Dict,
+                         **kwargs) -> Dict:
     """
     Analyze correlations between sequence features and fitness.
     
@@ -91,8 +87,6 @@ def correlation_analysis(landscape, features, **kwargs):
         Fitness landscape to analyze.
     features : dict
         Dictionary mapping feature names to feature values for each sequence.
-    **kwargs
-        Additional parameters.
         
     Returns
     -------
@@ -167,28 +161,26 @@ def correlation_analysis(landscape, features, **kwargs):
     return results
 
 
-def regression_analysis(landscape, features, **kwargs):
+def regression_analysis(landscape: FitnessLandscape,
+                        features: Dict,
+                        **kwargs) -> Dict:
     """
-    Perform regression analysis to predict fitness from sequence features.
+    Perform regression analysis to predict fitness from sequence
+    features.
     
     Parameters
     ----------
     landscape : FitnessLandscape
         Fitness landscape to analyze.
     features : dict
-        Dictionary mapping feature names to feature values for each sequence.
-    **kwargs
-        Additional parameters.
+        Dictionary mapping feature names to feature values for each
+        sequence.
         
     Returns
     -------
     dict
         Regression analysis results.
-    """
-    from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet
-    from sklearn.model_selection import train_test_split, cross_val_score
-    from sklearn.metrics import mean_squared_error, r2_score
-    
+    """    
     # Extract fitness values
     fitness_values = np.array([landscape.get_fitness(seq) for seq in landscape.sequences])
     
@@ -272,9 +264,13 @@ def regression_analysis(landscape, features, **kwargs):
     }
 
 
-def hypothesis_testing(landscape, groups, **kwargs):
+def hypothesis_testing(landscape: FitnessLandscape,
+                       groups: Dict,
+                       **kwargs) -> Dict:
     """
     Perform hypothesis tests to compare fitness between groups.
+    Performs battery of statistical tets on the fitnesses of
+    provided groups. 
     
     Parameters
     ----------
@@ -375,16 +371,21 @@ def hypothesis_testing(landscape, groups, **kwargs):
     return results
 
 
-def bootstrap_analysis(landscape, statistic_func, n_bootstrap=1000, **kwargs):
+def bootstrap_analysis(landscape: FitnessLandscape,
+                       statistic_func: Any,
+                       n_bootstrap: int = 1000,
+                       **kwargs) -> Dict:
     """
-    Perform bootstrap analysis to estimate confidence intervals.
+    Perform bootstrap analysis to estimate confidence intervals using a
+    statistic function.
     
     Parameters
     ----------
     landscape : FitnessLandscape
         Fitness landscape to analyze.
     statistic_func : callable
-        Function that calculates a statistic from fitness values.
+        Function that calculates a statistic from fitness values from a
+        single group.
     n_bootstrap : int, optional
         Number of bootstrap samples.
     **kwargs
@@ -408,7 +409,7 @@ def bootstrap_analysis(landscape, statistic_func, n_bootstrap=1000, **kwargs):
         # Sample with replacement
         sample = np.random.choice(fitness_values, size=len(fitness_values), replace=True)
         
-        # Calculate statistic
+        # Calculate statistic using the `statistic_func`.
         stat = statistic_func(sample, **kwargs)
         bootstrap_samples.append(stat)
     
@@ -427,9 +428,14 @@ def bootstrap_analysis(landscape, statistic_func, n_bootstrap=1000, **kwargs):
     }
 
 
-def permutation_test(landscape, groups, statistic_func, n_permutations=1000, **kwargs):
+def permutation_test(landscape: FitnessLandscape,
+                     groups: Dict,
+                     statistic_func: Any,
+                     n_permutations: int = 1000,
+                     **kwargs) -> Dict:
     """
-    Perform permutation test to assess significance.
+    Perform permutation test to assess significance between groups of
+    sequences provided as indices.
     
     Parameters
     ----------

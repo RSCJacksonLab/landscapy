@@ -9,11 +9,14 @@ import numpy as np
 import scipy.sparse as sp
 import torch
 import networkx as nx
-from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable
+from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
 from ..core.landscape import FitnessLandscape
 
 
-def eigenmode_decomposition(graph, k=None, backend='numpy'):
+def eigenmode_decomposition(graph: Union[nx.Graph, FitnessLandscape],
+                            k: int = None,
+                            matrix: Literal['adjacency', 'laplacian'] = 'laplacian',
+                            backend: Literal['numpy', 'torch'] = 'numpy'):
     """
     Compute eigenmode decomposition of a graph.
     
@@ -21,6 +24,9 @@ def eigenmode_decomposition(graph, k=None, backend='numpy'):
     ----------
     graph : networkx.Graph or FitnessLandscape
         Graph to decompose.
+    matrix : str, default = `laplacian`
+        The graph matrix to decompose. Either Laplacian matrix or the
+        adjacency matrix. 
     k : int or None, optional
         Number of eigenmodes to compute.
     backend : str, optional
@@ -39,30 +45,58 @@ def eigenmode_decomposition(graph, k=None, backend='numpy'):
     if not isinstance(graph, nx.Graph):
         raise TypeError("graph must be a NetworkX Graph or FitnessLandscape")
     
+    if matrix == 'adjacency':
     # Compute adjacency matrix
-    adjacency = nx.adjacency_matrix(graph)
+        eig_mat = nx.adjacency_matrix(graph)
+    
+    elif matrix == 'laplacian':
+        eig_mat = nx.laplacian_matrix(graph)
+
+    else:
+        raise ValueError(f"Unsupported matrix: {matrix}")
     
     # Compute eigenmode decomposition based on backend
     if backend == 'numpy':
-        return _eigenmode_decomposition_numpy(adjacency, k)
+        return _eigenmode_decomposition_numpy(eig_mat, k)
     elif backend == 'torch':
-        return _eigenmode_decomposition_torch(adjacency, k)
+        return _eigenmode_decomposition_torch(eig_mat, k)
     else:
         raise ValueError(f"Unsupported backend: {backend}")
 
 
-def _eigenmode_decomposition_numpy(adjacency, k=None):
-    """Compute eigenmode decomposition using NumPy."""
+def _eigenmode_decomposition_numpy(eig_mat, k=None) -> Tuple:
+    """
+    Helper function for eigenmode matrix decomposition using a numpy
+    backend. 
+
+    Parameters
+    ----------
+    eig_mat : np.ndarray
+        The matrix to decompose.
+    
+    k : int
+        The number of eigenmodes to factor.
+    
+    Returns
+    -------
+    eigenvalues : np.ndarray
+        The eig_mat eigenvalues.
+    
+    eigenvectors : np.ndarray
+        The eig_max eigenvectors.
+    """
     # Convert to dense matrix for eigendecomposition
-    adjacency_dense = adjacency.todense()
+    mat_dense = eig_mat.todense()
     
     # Compute eigendecomposition
-    if k is not None and k < adjacency_dense.shape[0]:
+    if k is not None and k < mat_dense.shape[0]:
         # Use sparse eigendecomposition for efficiency
-        eigenvalues, eigenvectors = sp.linalg.eigsh(adjacency, k=k, which='LM')
+        eigenvalues, eigenvectors = sp.linalg.eigsh(eig_mat,
+                                                    k=k,
+                                                    which='LM')
     else:
         # Compute full eigendecomposition
-        eigenvalues, eigenvectors = np.linalg.eigh(adjacency_dense)
+        eigenvalues, eigenvectors = np.linalg.eigh(mat_dense)
     
     # Sort eigenvalues and eigenvectors in descending order
     idx = np.argsort(eigenvalues)[::-1]
@@ -72,16 +106,42 @@ def _eigenmode_decomposition_numpy(adjacency, k=None):
     return eigenvalues, eigenvectors
 
 
-def _eigenmode_decomposition_torch(adjacency, k=None):
-    """Compute eigenmode decomposition using PyTorch."""
-    # Convert to dense matrix for eigendecomposition
-    adjacency_dense = adjacency.todense()
+def _eigenmode_decomposition_torch(eig_mat: Union[np.ndarray, torch.Tensor],
+                                   k: int=None,
+                                   return_torch: bool = True) -> Tuple[Union[np.ndarray, torch.Tensor], Union[np.ndarray, torch.Tensor]]:
+
+    """
+    Helper function to perform spectral decomposition usingthe torch
+    backend. 
+
+    Parameters
+    ----------
+    eig_mat: np.ndarray or torch.Tensor
+        The matrix to decompose. 
     
-    # Convert to PyTorch tensor
-    adjacency_tensor = torch.tensor(adjacency_dense, dtype=torch.float32)
+    k: int
+        The number of eigenmodes to compute.
+    
+    return_torch: bool, default=`True`
+        Boolean to return eigenvectors / eigenvalues a tensor.
+    
+    Returns
+    -------
+    eigenvalues : np.ndarray or torch.Tensor
+        The eig_matx eigenvalues
+    
+    eigenvectors : np.ndarray or torch.Tensor
+        The eig_mat eigenvectors.
+    """
+    if isinstance(eig_mat, np.ndarray):    
+
+        # Convert to dense matrix for eigendecomposition
+        mat_dense = eig_mat.todense()
+        # Convert to PyTorch tensor
+        mat_tensor = torch.tensor(mat_dense, dtype=torch.float32)
     
     # Compute eigendecomposition
-    eigenvalues, eigenvectors = torch.linalg.eigh(adjacency_tensor)
+    eigenvalues, eigenvectors = torch.linalg.eigh(mat_tensor)
     
     # Sort eigenvalues and eigenvectors in descending order
     idx = torch.argsort(eigenvalues, descending=True)
@@ -93,26 +153,32 @@ def _eigenmode_decomposition_torch(adjacency, k=None):
         eigenvalues = eigenvalues[:k]
         eigenvectors = eigenvectors[:, :k]
     
+    if not return_torch:
+
+        eigenvalues = eigenvalues.numpy()
+        eigenvectors = eigenvectors.numpy()
+
     return eigenvalues, eigenvectors
 
-
-def reconstruct_from_eigenmodes(eigenvectors, coefficients, backend='numpy'):
+def reconstruct_from_eigenmodes(eigenvectors: Union[np.ndarray, torch.Tensor],
+                                coefficients: Union[np.ndarray, torch.Tensor],
+                                backend: Literal['numpy', 'torch'] = 'numpy') -> Union[np.ndarray, torch.Tensor]:
     """
-    Reconstruct graph from eigenmodes and coefficients.
+    Function to reconstruct graph from eigenmodes and coefficients.
     
     Parameters
     ----------
-    eigenvectors : array-like
+    eigenvectors : np.ndarray or torch.Tensor
         Eigenvectors of the graph.
-    coefficients : array-like
+    coefficients : np.ndarray, torch.Tensor
         Coefficients for reconstruction.
-    backend : str, optional
+    backend : str
         Computational backend ('numpy', 'torch').
         
     Returns
     -------
     array-like
-        Reconstructed adjacency matrix.
+        Reconstructed matrix.
     """
     if backend == 'numpy':
         return _reconstruct_from_eigenmodes_numpy(eigenvectors, coefficients)
@@ -122,8 +188,25 @@ def reconstruct_from_eigenmodes(eigenvectors, coefficients, backend='numpy'):
         raise ValueError(f"Unsupported backend: {backend}")
 
 
-def _reconstruct_from_eigenmodes_numpy(eigenvectors, coefficients):
-    """Reconstruct graph from eigenmodes using NumPy."""
+def _reconstruct_from_eigenmodes_numpy(eigenvectors: np.ndarray,
+                                       coefficients: np.ndarray) -> np.ndarray:
+    """
+    Helper function to reconstruct a matrix from the the eigenvectors
+    and coefficients using the numpy backend. 
+
+    Parameters
+    ----------
+    eigenvectors : np.ndarray
+        The matrix eigenvectors. 
+    
+    coefficients : np.ndarray
+        The matrix eigenvalues. 
+    
+    Returns
+    -------
+    reconstruction : np.ndarray
+        The reconstructed matrix. 
+    """
     eigenvectors = np.asarray(eigenvectors)
     coefficients = np.asarray(coefficients)
     
@@ -137,11 +220,33 @@ def _reconstruct_from_eigenmodes_numpy(eigenvectors, coefficients):
     return reconstruction
 
 
-def _reconstruct_from_eigenmodes_torch(eigenvectors, coefficients):
-    """Reconstruct graph from eigenmodes using PyTorch."""
+def _reconstruct_from_eigenmodes_torch(eigenvectors: Union[np.ndarray, torch.Tensor],
+                                       coefficients: Union[np.ndarray, torch.Tensor],
+                                       return_torch: bool = False) -> Union[np.ndarray, torch.Tensor]:
+    """
+    Helper function to reconstruct a matrix from eigenvectors and
+    eigenvectors using the torch backend.
+
+    Parameters
+    ----------
+    eigenvectors : np.ndarray or torch.Tensor
+        The eigenvectors.
+    
+    eigenvalues : np.ndarray or torch.Tensor
+        The eigenvalues. 
+    
+    Returns
+    -------
+    reconstruction : torch.Tensor or np.ndarray
+        The reconstructed matrix. 
+    """
+    
+    if isinstance(eigenvectors, np.ndarray):
     # Convert to PyTorch tensors
-    eigenvectors = torch.tensor(eigenvectors, dtype=torch.float32)
-    coefficients = torch.tensor(coefficients, dtype=torch.float32)
+        eigenvectors = torch.tensor(eigenvectors, dtype=torch.float32)
+    
+    if isinstance(coefficients, np.ndarray):
+        coefficients = torch.tensor(coefficients, dtype=torch.float32)
     
     # Reconstruct adjacency matrix
     reconstruction = torch.zeros((eigenvectors.shape[0], eigenvectors.shape[0]))
@@ -150,12 +255,17 @@ def _reconstruct_from_eigenmodes_torch(eigenvectors, coefficients):
         outer_product = torch.outer(eigenvectors[:, i], eigenvectors[:, i])
         reconstruction += coef * outer_product
     
+    if not return_torch:
+        reconstruction = reconstruction.numpy()
+
     return reconstruction
 
-
-def eigenmode_analysis(graph, k=None, backend='numpy'):
+def graph_spectral_analysis(graph: Union[nx.Graph, FitnessLandscape],
+                            k: int = None,
+                            matrix: Literal['adjacency', 'laplacian'] = 'laplacian',
+                            backend: Literal['numpy', 'torch'] = 'numpy') -> Dict:
     """
-    Analyze eigenmodes of a graph.
+    Analyze the eigenmodes of a graph.
     
     Parameters
     ----------
@@ -163,17 +273,18 @@ def eigenmode_analysis(graph, k=None, backend='numpy'):
         Graph to analyze.
     k : int or None, optional
         Number of eigenmodes to analyze.
-    backend : str, optional
+    matrix : str, default = `laplacian`
+        The matrix to decompose.
+    backend : str, default = `numpy`
         Computational backend ('numpy', 'torch').
         
     Returns
     -------
     dict
-        Analysis results including eigenvalues, participation ratios,
-        localization metrics, and node centralities.
+        Eigenspectral analysis results. 
     """
     # Compute eigenmode decomposition
-    eigenvalues, eigenvectors = eigenmode_decomposition(graph, k=k, backend=backend)
+    eigenvalues, eigenvectors = eigenmode_decomposition(graph, matrix=matrix, k=k, backend=backend)
     
     # Handle FitnessLandscape input
     if isinstance(graph, FitnessLandscape):
@@ -181,15 +292,31 @@ def eigenmode_analysis(graph, k=None, backend='numpy'):
     
     # Compute analysis metrics based on backend
     if backend == 'numpy':
-        return _eigenmode_analysis_numpy(graph, eigenvalues, eigenvectors)
+        return _eigenmode_analysis_numpy(eigenvalues, eigenvectors)
     elif backend == 'torch':
-        return _eigenmode_analysis_torch(graph, eigenvalues, eigenvectors)
+        return _eigenmode_analysis_torch(eigenvalues, eigenvectors)
     else:
         raise ValueError(f"Unsupported backend: {backend}")
 
 
-def _eigenmode_analysis_numpy(graph, eigenvalues, eigenvectors):
-    """Analyze eigenmodes using NumPy."""
+def _eigenmode_analysis_numpy(eigenvalues: np.ndarray,
+                              eigenvectors: np.ndarray) -> Dict:
+    """
+    Helper function to analyze eigenmodes using numpy backend.
+
+    Parameters
+    ----------
+    eigenvalues : np.ndarray
+        The eigenvalues. 
+    
+    eigenvectors : np.ndarray
+        The eigenvectors. 
+    
+    Returns
+    -------
+    results : Dict
+        The results dict of eigenmode analysis. 
+    """
     n_nodes = eigenvectors.shape[0]
     n_modes = eigenvectors.shape[1]
     
@@ -198,7 +325,7 @@ def _eigenmode_analysis_numpy(graph, eigenvalues, eigenvectors):
         'eigenvalues': eigenvalues,
         'participation_ratios': np.zeros(n_modes),
         'localization': np.zeros(n_modes),
-        'node_centralities': np.zeros((n_nodes, n_modes))
+        'node_centralities': np.zeros((n_nodes, n_modes)),
     }
     
     # Compute participation ratio and localization for each mode
@@ -234,15 +361,32 @@ def _eigenmode_analysis_numpy(graph, eigenvalues, eigenvectors):
     
     return results
 
+def _eigenmode_analysis_torch(eigenvalues: Union[np.ndarray, torch.Tensor],
+                              eigenvectors: Union[np.ndarray, torch.Tensor]) -> Dict:
+    """
+    Helper function to analyze eigenmodes using torch backend.
 
-def _eigenmode_analysis_torch(graph, eigenvalues, eigenvectors):
-    """Analyze eigenmodes using PyTorch."""
+    Parameters
+    ----------
+    eigenvalues : np.ndarray or torch.Tensor
+        The eigenvalues. 
+    
+    eigenvectors : np.ndarray or torch.Tensor
+        The eigenvectors. 
+    
+    Returns
+    -------
+    results : Dict
+        The results dict of eigenmode analysis. 
+    """
     n_nodes = eigenvectors.shape[0]
     n_modes = eigenvectors.shape[1]
     
     # Convert to NumPy for compatibility with NetworkX
-    eigenvalues_np = eigenvalues.cpu().numpy()
-    eigenvectors_np = eigenvectors.cpu().numpy()
+    if isinstance(eigenvalues, torch.Tensor):
+        eigenvalues_np = eigenvalues.cpu().numpy()
+    if isinstance(eigenvectors, torch.Tensor):
+        eigenvectors_np = eigenvectors.cpu().numpy()
     
     # Initialize results
     results = {
@@ -284,39 +428,3 @@ def _eigenmode_analysis_torch(graph, eigenvalues, eigenvectors):
     }
     
     return results
-
-
-def project_signal_on_eigenmodes(graph, signal, k=None, backend='numpy'):
-    """
-    Project a signal onto the eigenmodes of a graph.
-    
-    Parameters
-    ----------
-    graph : networkx.Graph or FitnessLandscape
-        Graph whose eigenmodes to use.
-    signal : array-like
-        Signal to project.
-    k : int or None, optional
-        Number of eigenmodes to use.
-    backend : str, optional
-        Computational backend ('numpy', 'torch').
-        
-    Returns
-    -------
-    tuple
-        (eigenvalues, eigenvectors, projection_coefficients)
-    """
-    # Compute eigenmode decomposition
-    eigenvalues, eigenvectors = eigenmode_decomposition(graph, k=k, backend=backend)
-    
-    # Project signal onto eigenmodes
-    if backend == 'numpy':
-        signal = np.asarray(signal)
-        projection = np.dot(eigenvectors.T, signal)
-    elif backend == 'torch':
-        signal = torch.tensor(signal, dtype=torch.float32)
-        projection = torch.matmul(eigenvectors.T, signal)
-    else:
-        raise ValueError(f"Unsupported backend: {backend}")
-    
-    return eigenvalues, eigenvectors, projection
