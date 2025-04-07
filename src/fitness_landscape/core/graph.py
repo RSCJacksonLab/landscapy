@@ -129,5 +129,3 @@ def create_knn_graph(sequences: List[Sequence],
             G.add_edge(i, j, weight=weight, distance=distances[i, j])
     
     return G
-
-

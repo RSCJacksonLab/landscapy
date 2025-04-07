@@ -172,3 +172,12 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Remove testing
+testing.ipynb
+
+# Temporarily remove examples
+examples/
+
+# Temporarily remove docs
+docs/

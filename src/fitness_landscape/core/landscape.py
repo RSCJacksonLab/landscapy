@@ -139,7 +139,7 @@ class FitnessLandscape:
             The signal vector.
         """
 
-        signal = np.array(self.get_fitness(sequence) for sequence in self.sequences)
+        signal = np.array([self.get_fitness(sequence) for sequence in self.sequences])
         return signal
         
     def set_fitness(self,

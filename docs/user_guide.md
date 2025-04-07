@@ -220,15 +220,6 @@ custom_graph = nx.Graph()
 landscape = FitnessLandscape(sequences, fitness_values, graph=custom_graph)
 ```
 
-## Examples
-
-For more detailed examples, see the `examples` directory in the package repository:
-
-- `basic_analysis.py`: Basic fitness landscape analysis
-- `walsh_transform_analysis.py`: Walsh-Hadamard transform examples
-- `graph_spectral_analysis.py`: Graph Fourier transform and eigenmode decomposition
-- `evolutionary_paths.py`: Evolutionary path analysis
-
 ## Further Reading
 
 For a complete reference of all functions and classes, see the [API Reference](api_reference.md).

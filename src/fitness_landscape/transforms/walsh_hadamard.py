@@ -56,7 +56,7 @@ def walsh_transform(landscape: FitnessLandscape,
         raise ValueError(f"Unsupported backend: {backend}")
 
 
-def _walsh_transform_numpy(sequence_matrix: np.ndarry,
+def _walsh_transform_numpy(sequence_matrix: np.ndarray,
                            fitness_values: np.ndarray,
                            order: int) -> np.ndarray:
     """
