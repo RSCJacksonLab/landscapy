@@ -128,6 +128,20 @@ class FitnessLandscape:
         else:
             raise KeyError(f"Sequence {sequence} not found in fitness landscape")
     
+    def get_signal(self) -> np.ndarray:
+        """
+        Method to retrieve the signal vector over all sequences in the
+        network graph. 
+
+        Returns
+        -------
+        signal : np.ndarray 
+            The signal vector.
+        """
+
+        signal = np.array(self.get_fitness(sequence) for sequence in self.sequences)
+        return signal
+        
     def set_fitness(self,
                     sequence: Union[Sequence, np.ndarray],
                     fitness: float) -> None:

@@ -56,7 +56,7 @@ def generate_RMF_landscape(N: int,
     
     return np.array(sequences), np.array(fitness_values)
 
-class NKFitnessLandscape(FitnessLandscape):
+class RMFFitnessLandscape(FitnessLandscape):
 
     """
     Rough-mount-fuji (RMF) Landscape FitnessLanscape subclass.
