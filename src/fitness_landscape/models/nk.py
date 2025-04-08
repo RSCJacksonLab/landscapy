@@ -8,7 +8,8 @@ def generate_NK_landscape(N: int,
                           alphabet_size: int = 2,
                           seed: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Generate all possible sequences and fitness values for an NK landscape.
+    Generate all possible sequences and fitness values for an NK
+    landscape.
 
     Parameters
     ----------
@@ -65,6 +66,23 @@ def generate_NK_landscape(N: int,
 
 
 class NKFitnessLandscape(FitnessLandscape):
+    """
+    NK Landscape FitnessLanscape subclass.
+
+    Attributes
+    ----------
+    N : int
+        Number of genes in each sequence.
+    K : int
+        Number of interactions per gene.
+    alleles : int, optional
+        Number of states per gene (default is 2 for binary sequences).
+    seed : int, optional
+        Random seed for reproducibility.
+    graph_type : str, default=`Hamming`
+        Graph type for creating the network representation ('hamming'
+        or 'knn').
+    """
 
     def __init__(self, N: int,
                  K: int,
@@ -72,22 +90,7 @@ class NKFitnessLandscape(FitnessLandscape):
                  seed: Optional[int] = None,
                  graph_type: str = 'hamming',
                  **kwargs):
-        """
-        NK Landscape FitnessLanscape subclass.
 
-        Attributes
-        ----------
-        N : int
-            Number of genes in each sequence.
-        K : int
-            Number of interactions per gene.
-        alleles : int, optional
-            Number of states per gene (default is 2 for binary sequences).
-        seed : int, optional
-            Random seed for reproducibility.
-        graph_type : str, default=`Hamming`
-            Graph type for creating the network representation ('hamming' or 'knn').
-        """
         sequences, fitness_values = generate_NK_landscape(N,
                                                           K,
                                                           alphabet_size=alphabet_size,

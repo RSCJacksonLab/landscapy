@@ -1,17 +1,57 @@
-"""
-Eigenmode decomposition implementations for fitness landscape analysis.
-
-This module provides functions for computing eigenmode decomposition of network structures,
-which allows analysis of fundamental patterns in fitness landscapes.
-"""
-
 import numpy as np
 import scipy.sparse as sp
 import torch
 import networkx as nx
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
-from ..core.landscape import FitnessLandscape
+from ..core.landscape import FitnessLandscape, DirectedFitnessLandscape
 
+
+def directed_eigenmode_decomposition(directed_landscape: DirectedFitnessLandscape,
+                                     k: int = None,
+                                     matrix: Literal['sym_laplacian', 'sym_transition'] = 'sym_laplacian',
+                                     backend: Literal['numpy', 'torch'] = 'numpy'):
+    """
+    Compute eigenmode decomposition of a directed graph. Matrices
+    must be symmetrical.
+    
+    Parameters
+    ----------
+    directed_landscape : DirectedFitnessLandscape
+        Directed graph to decompose.
+    matrix : str, default = `sym_laplacian`
+        The graph matrix to decompose. Either symmetric Laplacian
+        matrix or the symmetric transition matrix. 
+    k : int or None, optional
+        Number of eigenmodes to compute.
+    backend : str, optional
+        Computational backend ('numpy', 'torch').
+        
+    Returns
+    -------
+    tuple
+        (eigenvalues, eigenvectors)
+    """    
+    # Ensure graph is a NetworkX graph
+    if not isinstance(directed_landscape, DirectedFitnessLandscape):
+        raise TypeError("Landscape must be a `DirectedFitnessLandscape`")
+    
+    if matrix == 'sym_laplacian':
+    # Compute adjacency matrix
+        eig_mat = directed_landscape.directed_laplacian
+    
+    elif matrix == 'sym_transition':
+        eig_mat = directed_landscape.transition_matrix
+
+    else:
+        raise ValueError(f"Unsupported matrix: {matrix}")
+    
+    # Compute eigenmode decomposition based on backend
+    if backend == 'numpy':
+        return _eigenmode_decomposition_numpy(eig_mat, k)
+    elif backend == 'torch':
+        return _eigenmode_decomposition_torch(eig_mat, k)
+    else:
+        raise ValueError(f"Unsupported backend: {backend}")
 
 def eigenmode_decomposition(graph: Union[nx.Graph, FitnessLandscape],
                             k: int = None,
