@@ -2,7 +2,6 @@ from . import core
 from . import transforms
 from . import analysis
 from . import models
-from . import utils
 
 from .core.sequence import (
     Sequence,
@@ -25,7 +24,6 @@ __all__ = [
     'transforms',
     'analysis',
     'models',
-    'utils',
     'Sequence',
     'BinarySequence',
     'MultialleleSequence',
