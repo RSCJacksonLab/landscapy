@@ -1,5 +1,6 @@
 import numpy as np
 
+from collections.abc import Iterable
 from Levenshtein import distance as levenstein_distance
 from typing import List, Union, Optional, Dict, Literal
 
@@ -39,11 +40,11 @@ class Sequence:
     """
     
     def __init__(self,
-                 sequence: np.ndarray,
+                 sequence: Iterable,
                  alphabet: Optional[List] = None) -> None:
         
         self.sequence = np.asarray(list(sequence))
-        
+
         if alphabet is None:
             # Infer alphabet from unique values in sequence
             self.alphabet = sorted(set(self.sequence.flatten()))
@@ -195,7 +196,7 @@ class BinarySequence(Sequence):
             return self.sequence[idx]
     
     def hamming_distance(self,
-                         other) -> float:
+                         other) -> int:
         """
         Calculate Hamming distance using efficient bit operations.
         
@@ -212,7 +213,7 @@ class BinarySequence(Sequence):
         if isinstance(other, BinarySequence) and len(self) == len(other):
             # Use XOR and bit counting for efficiency
             xor_result = np.bitwise_xor(self._bit_array, other._bit_array)
-            return np.sum(np.unpackbits(xor_result)[:len(self)])
+            return int(np.sum(np.unpackbits(xor_result)[:len(self)]))
         else:
             # Fall back to standard implementation
             return super().distance(other, metric='hamming')
