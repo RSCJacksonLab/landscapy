@@ -1,5 +1,29 @@
 import numpy as np
-from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
+
+from collections.abc import Iterable
+from Levenshtein import distance as levenstein_distance
+from typing import List, Union, Optional, Dict, Literal
+
+
+def _compute_distance(seq1: np.ndarray,
+                      seq2: np.ndarray,
+                      metric: str) -> Union[int, float]:
+    if len(seq1) != len(seq2) and metric != 'levenshtein':
+        print(
+            f"Warning: Sequences are of different lengths "
+            f"({len(seq1)} {len(seq2)}). Levenshtein "
+            f"distance will be used instead of {metric}."
+        )
+        metric = 'levenshtein'
+
+    if metric == 'hamming':
+        return int(np.sum(seq1 != seq2))
+    elif metric == 'euclidean':
+        return float(np.sqrt(np.sum((seq1 - seq2) ** 2)))
+    elif metric == 'levenshtein':
+        return int(levenstein_distance("".join(map(str, seq1)), "".join(map(str, seq2))))
+    else:
+        raise ValueError(f"Unsupported distance metric: {metric}")
 
 
 class Sequence:
@@ -16,11 +40,11 @@ class Sequence:
     """
     
     def __init__(self,
-                 sequence: np.ndarray,
-                 alphabet: List=None) -> None:
+                 sequence: Iterable,
+                 alphabet: Optional[List] = None) -> None:
         
-        self.sequence = np.asarray(sequence)
-        
+        self.sequence = np.asarray(list(sequence))
+
         if alphabet is None:
             # Infer alphabet from unique values in sequence
             self.alphabet = sorted(set(self.sequence.flatten()))
@@ -37,7 +61,9 @@ class Sequence:
         return self.sequence[idx]
     
     def __eq__(self,
-               other) -> np.ndarray:
+               other) -> bool:
+        if len(self) != len(other):
+            return False
         if isinstance(other, Sequence):
             return np.array_equal(self.sequence, other.sequence)
         return np.array_equal(self.sequence, np.asarray(other))
@@ -46,35 +72,19 @@ class Sequence:
         return f"{self.__class__.__name__}({self.sequence})"
     
     def distance(self,
-                 other,
-                 metric: Literal ['hamming', 'euclidean'] = 'hamming'):
+                 other: Union['Sequence', np.ndarray],
+                 metric: Literal['hamming', 'euclidean', 'levenshtein'] = 'hamming') -> Union[int, float]:
         """
         Calculate distance between this sequence and another.
-        
-        Parameters
-        ----------
-        other : Sequence or array-like
-            Sequence to compare with.
-        metric : str, optional
-            Distance metric ('hamming', 'euclidean', etc.)
-            
-        Returns
-        -------
-        float
-            Distance between sequences.
         """
         other_seq = other.sequence if isinstance(other, Sequence) else np.asarray(other)
-        
-        if metric == 'hamming':
-            return np.sum(self.sequence != other_seq)
-        elif metric == 'euclidean':
-            return np.sqrt(np.sum((self.sequence - other_seq) ** 2))
-        else:
-            raise ValueError(f"Unsupported distance metric: {metric}")
+        self_seq = np.asarray(self.sequence)
+        return _compute_distance(self_seq, other_seq, metric)
+
     
     def mutate(self,
-               positions: Union[int, List] = None,
-               values: List = None):
+               positions: Optional[Union[int, List]] = None,
+               values: Optional[List] = None):
         """
         Create a mutated copy of the sequence.
         
@@ -124,7 +134,7 @@ class Sequence:
         return self.sequence.copy()
     
     def to_one_hot(self,
-                   alphabet_map: Dict = None) -> np.ndarray:
+                   alphabet_map: Optional[Dict] = None) -> np.ndarray:
         """
         Convert sequence to one-hot encoding.
         
@@ -186,7 +196,7 @@ class BinarySequence(Sequence):
             return self.sequence[idx]
     
     def hamming_distance(self,
-                         other) -> float:
+                         other) -> int:
         """
         Calculate Hamming distance using efficient bit operations.
         
@@ -203,7 +213,7 @@ class BinarySequence(Sequence):
         if isinstance(other, BinarySequence) and len(self) == len(other):
             # Use XOR and bit counting for efficiency
             xor_result = np.bitwise_xor(self._bit_array, other._bit_array)
-            return np.sum(np.unpackbits(xor_result)[:len(self)])
+            return int(np.sum(np.unpackbits(xor_result)[:len(self)]))
         else:
             # Fall back to standard implementation
             return super().distance(other, metric='hamming')
@@ -247,8 +257,8 @@ class MultialleleSequence(Sequence):
 def generate_sequences(length: int,
                        alphabet: Union[List, np.ndarray],
                        strategy: Literal['complete', 'mutational', 'random'] = 'complete',
-                       n: int = None,
-                       seed: int = None) -> List:
+                       n: Optional[int] = None,
+                       seed: Optional[int] = None) -> List:
     """
     Generate sequences based on a generation strategy.
     
@@ -333,36 +343,17 @@ def generate_sequences(length: int,
         raise ValueError(f"Unsupported strategy: {strategy}")
 
 
-def sequence_distance(seq1: Union[Sequence, np.ndarray],
-                      seq2: Union[Sequence, np.ndarray],
-                      metric: Literal['hamming', 'euclidean'] = 'hamming') -> Union[float, int]:
+def sequence_distance(seq_1: Union[Sequence, np.ndarray],
+                      seq_2: Union[Sequence, np.ndarray],
+                      metric: Literal['hamming', 'euclidean', 'levenshtein'] = 'hamming') -> Union[int, float]:
     """
     Function to calculate distance between sequences.
-    
-    Parameters
-    ----------
-    seq1, seq2 : Sequence or array-like
-        Sequences to compare.
-    metric : str, optional
-        Distance metric ('hamming', 'euclidean', etc.)
-        
-    Returns
-    -------
-    float
-        Distance between sequences.
     """
-    if isinstance(seq1, Sequence):
-        return seq1.distance(seq2, metric=metric)
-    elif isinstance(seq2, Sequence):
-        return seq2.distance(seq1, metric=metric)
+    if isinstance(seq_1, Sequence):
+        return seq_1.distance(seq_2, metric)
+    elif isinstance(seq_2, Sequence):
+        return seq_2.distance(seq_1, metric)
     else:
-        # Convert to numpy arrays
-        array1 = np.asarray(seq1)
-        array2 = np.asarray(seq2)
-        
-        if metric == 'hamming':
-            return np.sum(array1 != array2)
-        elif metric == 'euclidean':
-            return np.sqrt(np.sum((array1 - array2) ** 2))
-        else:
-            raise ValueError(f"Unsupported distance metric: {metric}")
+        array1 = np.asarray(seq_1)
+        array2 = np.asarray(seq_2)
+        return _compute_distance(array1, array2, metric)
