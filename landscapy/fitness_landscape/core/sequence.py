@@ -4,6 +4,27 @@ from Levenshtein import distance as levenstein_distance
 from typing import List, Union, Optional, Dict, Literal
 
 
+def _compute_distance(seq1: np.ndarray,
+                      seq2: np.ndarray,
+                      metric: str) -> Union[int, float]:
+    if len(seq1) != len(seq2) and metric != 'levenshtein':
+        print(
+            f"Warning: Sequences are of different lengths "
+            f"({len(seq1)} {len(seq2)}). Levenshtein "
+            f"distance will be used instead of {metric}."
+        )
+        metric = 'levenshtein'
+
+    if metric == 'hamming':
+        return int(np.sum(seq1 != seq2))
+    elif metric == 'euclidean':
+        return float(np.sqrt(np.sum((seq1 - seq2) ** 2)))
+    elif metric == 'levenshtein':
+        return int(levenstein_distance("".join(map(str, seq1)), "".join(map(str, seq2))))
+    else:
+        raise ValueError(f"Unsupported distance metric: {metric}")
+
+
 class Sequence:
     """
     Base class for sequence representations.
@@ -50,43 +71,15 @@ class Sequence:
         return f"{self.__class__.__name__}({self.sequence})"
     
     def distance(self,
-                 other,
-                 metric: Literal['hamming', 'euclidean', 'levenshtein'] = 'hamming'):
+                 other: Union['Sequence', np.ndarray],
+                 metric: Literal['hamming', 'euclidean', 'levenshtein'] = 'hamming') -> Union[int, float]:
         """
         Calculate distance between this sequence and another.
-        
-        Parameters
-        ----------
-        other : Sequence or array-like
-            Sequence to compare with.
-        metric : str, optional
-            Distance metric ('hamming', 'euclidean', 'levenshtein')
-            
-        Returns
-        -------
-        float
-            Distance between sequences.
         """
         other_seq = other.sequence if isinstance(other, Sequence) else np.asarray(other)
-        self_seq = self.sequence
+        self_seq = np.asarray(self.sequence)
+        return _compute_distance(self_seq, other_seq, metric)
 
-        # check sequence of the same length
-        if len(self_seq) != len(other_seq) and metric != 'levenshtein':
-            print(
-                f"Warning: Sequences are of different lengths " \
-                f"({len(self_seq)} {len(other_seq)}). Leventshtein " \
-                f"distance will be used instead of {metric}."
-            )
-            metric = 'levenshtein'
-
-        if metric == 'hamming':
-            return np.sum(self.sequence != other_seq)
-        elif metric == 'euclidean':
-            return np.sqrt(np.sum((self.sequence - other_seq) ** 2))
-        elif metric == 'levenshtein':
-            return levenstein_distance("".join(self.sequence), "".join(other_seq))
-        else:
-            raise ValueError(f"Unsupported distance metric: {metric}")
     
     def mutate(self,
                positions: Optional[Union[int, List]] = None,
@@ -351,43 +344,15 @@ def generate_sequences(length: int,
 
 def sequence_distance(seq_1: Union[Sequence, np.ndarray],
                       seq_2: Union[Sequence, np.ndarray],
-                      metric: Literal['hamming', 'euclidean', 'levenshtein'] = 'hamming') -> Union[float, int]:
+                      metric: Literal['hamming', 'euclidean', 'levenshtein'] = 'hamming') -> Union[int, float]:
     """
     Function to calculate distance between sequences.
-    
-    Parameters
-    ----------
-    seq1, seq2 : Sequence or array-like
-        Sequences to compare.
-    metric : str, optional, default = 'hamming'
-        Distance metric ('hamming', 'euclidean', 'levenshtein')
-        
-    Returns
-    -------
-    float
-        Distance between sequences.
     """
-    if len(seq_1) != len(seq_2) and metric != 'levenshtein':
-            print(
-                f"Warning: Sequences are of different lengths " \
-                f"({len(seq_1)} {len(seq_2)}). Leventshtein " \
-                f"distance will be used instead of {metric}."
-            )
-            metric = 'levenshtein'
     if isinstance(seq_1, Sequence):
-        return seq_1.distance(seq_2, metric=metric)
+        return seq_1.distance(seq_2, metric)
     elif isinstance(seq_2, Sequence):
-        return seq_2.distance(seq_1, metric=metric)
+        return seq_2.distance(seq_1, metric)
     else:
-        # Convert to numpy arrays
         array1 = np.asarray(seq_1)
         array2 = np.asarray(seq_2)
-        
-        if metric == 'hamming':
-            return np.sum(array1 != array2)
-        elif metric == 'euclidean':
-            return np.sqrt(np.sum((array1 - array2) ** 2))
-        elif metric == 'levenshtein':
-            return levenstein_distance("".join(seq_1), "".join(seq_2))
-        else:
-            raise ValueError(f"Unsupported distance metric: {metric}")
+        return _compute_distance(array1, array2, metric)
