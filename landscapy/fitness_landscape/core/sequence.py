@@ -39,7 +39,9 @@ class Sequence:
         return self.sequence[idx]
     
     def __eq__(self,
-               other) -> np.ndarray:
+               other) -> bool:
+        if len(self) != len(other):
+            return False
         if isinstance(other, Sequence):
             return np.array_equal(self.sequence, other.sequence)
         return np.array_equal(self.sequence, np.asarray(other))
@@ -87,8 +89,8 @@ class Sequence:
             raise ValueError(f"Unsupported distance metric: {metric}")
     
     def mutate(self,
-               positions: Union[int, List] = None,
-               values: List = None):
+               positions: Optional[Union[int, List]] = None,
+               values: Optional[List] = None):
         """
         Create a mutated copy of the sequence.
         
@@ -138,7 +140,7 @@ class Sequence:
         return self.sequence.copy()
     
     def to_one_hot(self,
-                   alphabet_map: Dict = None) -> np.ndarray:
+                   alphabet_map: Optional[Dict] = None) -> np.ndarray:
         """
         Convert sequence to one-hot encoding.
         
@@ -261,8 +263,8 @@ class MultialleleSequence(Sequence):
 def generate_sequences(length: int,
                        alphabet: Union[List, np.ndarray],
                        strategy: Literal['complete', 'mutational', 'random'] = 'complete',
-                       n: int = None,
-                       seed: int = None) -> List:
+                       n: Optional[int] = None,
+                       seed: Optional[int] = None) -> List:
     """
     Generate sequences based on a generation strategy.
     
