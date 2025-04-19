@@ -59,13 +59,23 @@ class FitnessLandscape:
             fitness values indexed matched to the sequences.
         
         """
-        # Convert sequences to Sequence objects if they aren't already
-        self.sequences = []
-        for seq in sequences:
-            if isinstance(seq, Sequence):
-                self.sequences.append(seq)
-            else:
-                self.sequences.append(Sequence(seq))
+        # Temp storage: sequence tuple -> list of fitness values
+        fitness_map = {}
+
+        for seq, fitness in zip(sequences, fitness_values):
+            # Convert to Sequence if not already
+            seq_obj = seq if isinstance(seq, Sequence) else Sequence(seq)
+            seq_tuple = tuple(seq_obj.to_array())
+            fitness_map.setdefault(seq_tuple, []).append(float(fitness))
+
+        # Average duplicates
+        self.fitness_values = {
+            seq_tuple: np.mean(fit_list)
+            for seq_tuple, fit_list in fitness_map.items()
+        }
+
+        # Store as Sequence objects
+        self.sequences = [Sequence(list(seq_tuple)) for seq_tuple in self.fitness_values]
         
         # Create mapping from sequences to fitness values
         self.fitness_values = {}
