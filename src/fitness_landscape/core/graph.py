@@ -64,7 +64,7 @@ def create_knn_graph(sequences: List[Sequence],
                      k: int,
                      fitness_values: Union[List, np.ndarray] = None,
                      metric: Literal['hamming'] = 'hamming', 
-                    weight_by_distance: bool = True, **kwargs) -> nx.Graph:
+                     weight_by_distance: bool = True, **kwargs) -> nx.Graph:
     """
     Create a k-nearest neighbor graph. In a KNN graph, nodes represent
     sequences and edges connect each sequence to its k nearest

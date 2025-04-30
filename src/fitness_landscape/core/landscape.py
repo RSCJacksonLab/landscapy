@@ -4,8 +4,123 @@ from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, 
 from .sequence import Sequence, BinarySequence, MultialleleSequence, sequence_distance
 from .graph import create_hamming_graph
 import scipy.linalg as la
+from abc import ABC, abstractmethod
 
-class FitnessLandscape:
+class GraphLandscapeBase(ABC):
+    """
+    Abstract base class for directed and undirected fitness landscapes.
+    Implements standard class methods.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def get_fitness(self,
+                    sequence: Union[Sequence, np.ndarray]) -> float:
+        """
+        Method to return fitness value for a sequence.
+        
+        Parameters
+        ----------
+        sequence : Sequence or array-like
+            Sequence to retrieve fitness for.
+            
+        Returns
+        -------
+        float
+            Fitness value.
+        """
+        if not isinstance(sequence, Sequence):
+            sequence = Sequence(sequence)
+        
+        seq_tuple = tuple(sequence.to_array())
+        
+        
+        assert hasattr(self, 'fitness_values'), \
+        "Fitness landscape must have constructed fitness_values."
+
+        if seq_tuple in self.fitness_values:
+            return self.fitness_values[seq_tuple]
+        else:
+            raise KeyError(f"Sequence {sequence} not found in fitness landscape")
+    
+    def get_signal(self) -> np.ndarray:
+        """
+        Method to retrieve the signal vector over all sequences in the
+        network graph. 
+
+        Returns
+        -------
+        signal : np.ndarray 
+            The signal vector.
+        """
+
+        assert hasattr(self, 'fitness_values'), \
+        "Fitness landscape must have constructed sequences."
+        
+        signal = np.array([self.get_fitness(sequence) for sequence in self.sequences])
+        return signal
+    
+    def get_signal(self) -> np.ndarray:
+        """
+        Method to retrieve the signal vector over all sequences in the
+        network graph. 
+
+        Returns
+        -------
+        signal : np.ndarray 
+            The signal vector.
+        """
+
+        assert hasattr(self, 'fitness_values'), \
+        "Fitness landscape must have constructed sequences."
+
+        signal = np.array([self.get_fitness(sequence) for sequence in self.sequences])
+        return signal
+    
+    @abstractmethod
+    def init_from_sequences(self):
+        pass
+
+    @abstractmethod
+    def init_from_graph(self):
+        pass
+    
+    @classmethod
+    def from_graph(cls,
+                   graph: Union[nx.Graph, nx.DiGraph],
+                   **kwargs):
+        """
+        Create landscape from directed graph representation.
+        
+        Parameters
+        ----------
+        graph : nx.Graph or
+            Graph representation of the landscape.
+            
+        Returns
+        -------
+        FitnessLandscape
+            Fitness landscape.
+        """
+        return cls(graph=graph, **kwargs)
+    
+    def __len__(self):
+        return len(self.sequences)
+    
+    def __getitem__(self, idx):
+        return self.sequences[idx], self.get_fitness(self.sequences[idx])
+    
+    def __iter__(self):
+        for seq in self.sequences:
+            yield seq, self.get_fitness(seq)
+    
+    def __repr__(self):
+        return f"{self.__class__.__name__}(n_sequences={len(self.sequences)})"
+
+    
+
+class FitnessLandscape(GraphLandscapeBase):
     """
     Base class for fitness landscapes.
     
@@ -34,9 +149,9 @@ class FitnessLandscape:
         self.graph_type = graph_type
         
         if sequences is not None and fitness_values is not None:
-            self._init_from_sequences(sequences, fitness_values)
+            self.init_from_sequences(sequences, fitness_values)
         elif graph is not None:
-            self._init_from_graph(graph)
+            self.init_from_graph(graph)
         else:
             raise ValueError("Either sequences and fitness_values or graph must be provided")
         
@@ -44,7 +159,7 @@ class FitnessLandscape:
         if self.graph is None and graph_type is not None:
             self.to_graph(graph_type=graph_type, **kwargs)
     
-    def _init_from_sequences(self,
+    def init_from_sequences(self,
                              sequences,
                              fitness_values) -> None:
         """
@@ -75,7 +190,7 @@ class FitnessLandscape:
             seq_tuple = tuple(seq.to_array())
             self.fitness_values[seq_tuple] = float(fitness)
     
-    def _init_from_graph(self,
+    def init_from_graph(self,
                          graph: nx.Graph):
         """
         Initialise fitness landscape class from networkX graph. 
@@ -103,78 +218,7 @@ class FitnessLandscape:
                 
                 if 'fitness' in data:
                     self.fitness_values[seq_tuple] = float(data['fitness'])
-    
-    def get_fitness(self,
-                    sequence: Union[Sequence, np.ndarray]) -> float:
-        """
-        Method to return fitness value for a sequence.
         
-        Parameters
-        ----------
-        sequence : Sequence or array-like
-            Sequence to retrieve fitness for.
-            
-        Returns
-        -------
-        float
-            Fitness value.
-        """
-        if not isinstance(sequence, Sequence):
-            sequence = Sequence(sequence)
-        
-        seq_tuple = tuple(sequence.to_array())
-        
-        if seq_tuple in self.fitness_values:
-            return self.fitness_values[seq_tuple]
-        else:
-            raise KeyError(f"Sequence {sequence} not found in fitness landscape")
-    
-    def get_signal(self) -> np.ndarray:
-        """
-        Method to retrieve the signal vector over all sequences in the
-        network graph. 
-
-        Returns
-        -------
-        signal : np.ndarray 
-            The signal vector.
-        """
-
-        signal = np.array([self.get_fitness(sequence) for sequence in self.sequences])
-        return signal
-        
-    def set_fitness(self,
-                    sequence: Union[Sequence, np.ndarray],
-                    fitness: float) -> None:
-        """
-        Method to set fitness value for a sequence.
-        
-        Parameters
-        ----------
-        sequence : Sequence or array-like
-            Sequence to set fitness for.
-        fitness : float
-            Fitness value.
-        """
-        if not isinstance(sequence, Sequence):
-            sequence = Sequence(sequence)
-        
-        # Add to sequences if not already present
-        if sequence not in self.sequences:
-            self.sequences.append(sequence)
-        
-        # Update fitness value
-        seq_tuple = tuple(sequence.to_array())
-        self.fitness_values[seq_tuple] = float(fitness)
-        
-        # Update graph if it exists
-        if self.graph is not None:
-            # Find node corresponding to sequence
-            for node, data in self.graph.nodes(data=True):
-                if 'sequence' in data and np.array_equal(data['sequence'], sequence.to_array()):
-                    self.graph.nodes[node]['fitness'] = float(fitness)
-                    break
-    
     def to_graph(self,
                  graph_type: Literal['hamming', 'knn'],
                  **kwargs) -> nx.Graph:
@@ -206,40 +250,8 @@ class FitnessLandscape:
         
         return self.graph
     
-    @classmethod
-    def from_graph(cls,
-                   graph: nx.Graph,
-                   **kwargs):
-        """
-        Create landscape from graph representation.
-        
-        Parameters
-        ----------
-        graph : networkx.Graph
-            Graph representation of the landscape.
-            
-        Returns
-        -------
-        FitnessLandscape
-            Fitness landscape.
-        """
-        return cls(graph=graph, **kwargs)
-    
-    def __len__(self):
-        return len(self.sequences)
-    
-    def __getitem__(self, idx):
-        return self.sequences[idx], self.get_fitness(self.sequences[idx])
-    
-    def __iter__(self):
-        for seq in self.sequences:
-            yield seq, self.get_fitness(seq)
-    
-    def __repr__(self):
-        return f"{self.__class__.__name__}(n_sequences={len(self.sequences)})"
 
-
-class DirectedFitnessLandscape:
+class DirectedFitnessLandscape(GraphLandscapeBase):
     """
     Base class for directed fitness landscapes. Supports causal,
     non-stationary relationship between nodes.
@@ -255,16 +267,14 @@ class DirectedFitnessLandscape:
     
     def __init__(self, #TODO: Extend support beyond constructing the DirectedFitnessLandscape from an initialised DiGraph. 
                  digraph: nx.DiGraph,
+                 laplacian: Literal['directed', 'zero_padded', 'None'],
                  **kwargs) -> None:
         
         self.digraph = None
-        self._init_from_digraph(digraph)
+        self.init_from_graph(digraph)
 
-        # Compute transition matrices and symmetrical Laplacian.
-        self._compute_directed_laplacian()
-    
-    def _init_from_digraph(self,
-                         digraph: nx.DiGraph):
+    def init_from_graph(self,
+                        digraph: nx.DiGraph):
         """
         Initialise fitness landscape class from networkX directed
         graph. 
@@ -292,65 +302,27 @@ class DirectedFitnessLandscape:
                 
                 if 'fitness' in data:
                     self.fitness_values[seq_tuple] = float(data['fitness'])
-
-
-    def _compute_transition_matrix(self) -> None:
+    
+    def compute_directed_laplacian(self,
+                                   teleport_dampened: bool = True,
+                                   epsilon: float = 1e-8) -> None:
         """
-        Method to compute the transition matrix P from a
-        directed graph. Computed from the successors of a node.
-        Self-loops are added to terminal sinks in the directed graph
-        such that rows sum to 1.
-        """
+        Method to compute the symmetrical Laplacian by converting the
+        weighted inner product space of the transition matrix into a
+        conventional Euclidean inner product space. If the graph is
+        acycic, the transition matrix must be dampened with node
+        teleporation to ensure a postivie semi-definite Laplacian.
 
-        landscape = self.digraph
+        Parameters
+        ----------
+        teleport_dampened : bool, default=`True`
+            Boolean to connect all nodes with a low 'teleportation'
+            probability (epsilon). If `teleport_dampened` is `False`,
+            the DiGraph must be strongly connected, otherwise the
+            laplacian will not be positive semi-definite.
         
-        nodes = list(landscape.nodes())
-        n = len(nodes)
-        node_index = {node: i for i, node in enumerate(nodes)}
-        P = np.zeros((n, n))
-        for node in nodes:
-            i = node_index[node]
-            successors = list(landscape.successors(node))
-            if len(successors) == 0:
-                
-                # For sinks, add a self-loop so the row sums to 1.
-                P[i, i] = 1.0
-            else:
-                for succ in successors:
-                    j = node_index[succ]
-                    P[i, j] = 1.0 / len(successors)
-        
-        self.transition_matrix = P
-        self._transition_node_index = node_index
-
-    def _compute_stationary_distribution(self) -> None:
-        """
-        Function to compute the stationary distrbution of a
-        row-stochastic transition matrix, where the stationary
-        distribution is defined as pi^T P = pi^T. By this definition,
-        these are the eigenvectors that correspond to an eigenvalue
-        of 1.
-        """
-
-        if not hasattr(self, 'transition_matrix'):
-            self._compute_transition_matrix()
-
-        # Spectral decomposition of P^T.
-        vals, vecs = la.eig(self.transition_matrix.T)
-
-        # Find the index of the eigenvalue closest to 1.
-        idx = np.argmin(np.abs(vals - 1))
-        pi = np.real(vecs[:, idx])
-        
-        # Ensure non-negativity and normalize.
-        pi = np.abs(pi)
-        pi = pi / np.sum(pi)
-        self.pi = pi
-
-    def _compute_directed_laplacian(self) -> None:
-        """
-        Method to compute a symmetrical Laplacian that can be spectrally
-        decomposed into an eigenfunction. 
+        epsilon : float, default=`1e-8`
+            The teleportation probability.
         """
 
         # Constructs the matrix phi, which
@@ -367,11 +339,98 @@ class DirectedFitnessLandscape:
         # f{\prime} = \Phi^{1/2} f, where f{\prime} is the euclidean
         # transformed inner product space.
 
-        if not hasattr(self, 'pi'):
-            self._compute_stationary_distribution()
+        # NOTE: this only works if the graph is strongly connected.
+
+
+        def _compute_transition_matrix(digraph: nx.DiGraph) -> Tuple[np.ndarray, Dict]:
+            """
+            Method to compute the transition matrix P from a
+            directed graph. Computed from the successors of a node.
+            Self-loops are added to terminal sinks in the directed graph
+            such that rows sum to 1.
+
+            Parameters
+            ----------
+            digraph : nx.DiGraph
+                The landscape DAG.
+            
+            Returns
+            -------
+            P : np.ndarray
+                the row-stohcastic transition matrix. 
         
-        pi = self.pi
-        P = self.transition_matrix
+            node_index : Dict
+                The node : index dictionary.
+            """
+            
+            nodes = list(digraph.nodes())
+            n = len(nodes)
+            node_index = {node: i for i, node in enumerate(nodes)}
+            P = np.zeros((n, n))
+            for node in nodes:
+                i = node_index[node]
+                successors = list(digraph.successors(node))
+                if len(successors) == 0:
+                    
+                    # For sinks, add a self-loop so the row sums to 1.
+                    P[i, i] = 1.0
+                else:
+                    for succ in successors:
+                        j = node_index[succ]
+                        P[i, j] = 1.0 / len(successors)
+            
+            return P, node_index
+
+        def _compute_stationary_distribution(P: np.ndarray) -> np.ndarray:
+            """
+            Function to compute the stationary distrbution of a
+            row-stochastic transition matrix, where the stationary
+            distribution is defined as pi^T P = pi^T. By this definition,
+            these are the eigenvectors that correspond to an eigenvalue
+            of 1.
+
+            Parameters
+            ----------
+            P : np.ndarray
+                The transition matrix.
+            
+            Returns
+            -------
+            pi : np.ndarray
+                The stationary distribution of the transition matrix.
+            """
+
+            if not hasattr(self, 'transition_matrix'):
+                self._compute_transition_matrix()
+
+            # Spectral decomposition of P^T.
+            vals, vecs = la.eig(self.transition_matrix.T)
+
+            # Find the index of the eigenvalue closest to 1.
+            idx = np.argmin(np.abs(vals - 1))
+            pi = np.real(vecs[:, idx])
+            
+            # Ensure non-negativity and normalize.
+            pi = np.abs(pi)
+            pi = pi / np.sum(pi)
+            return pi
+
+        ####
+
+        digraph = self.digraph
+        P, node_index = _compute_transition_matrix(digraph)
+        self._node_index = node_index
+        
+        # Ensure strong connectivity if teleport dampened.
+        if teleport_dampened:
+            n = P.shape[0]
+            Q = np.ones((n, n)) / n  # uniform teleportation matrix
+            P = (1 - epsilon) * P + epsilon * Q
+        self._directed_transition_matrix = P
+
+        pi = _compute_stationary_distribution(P=P)
+        self._directed_stationary_distributipn = pi
+
         n = P.shape[0]
         
         # Form the diagonal matrix phi and its square-root and inverse square-root.
@@ -389,94 +448,3 @@ class DirectedFitnessLandscape:
         L = np.eye(n) - S
         
         self.directed_laplacian = L
-
-    
-    def get_fitness(self,
-                    sequence: Union[Sequence, np.ndarray]) -> float:
-        """
-        Method to return fitness value for a sequence.
-        
-        Parameters
-        ----------
-        sequence : Sequence or array-like
-            Sequence to retrieve fitness for.
-            
-        Returns
-        -------
-        float
-            Fitness value.
-        """
-        if not isinstance(sequence, Sequence):
-            sequence = Sequence(sequence)
-        
-        seq_tuple = tuple(sequence.to_array())
-        
-        if seq_tuple in self.fitness_values:
-            return self.fitness_values[seq_tuple]
-        else:
-            raise KeyError(f"Sequence {sequence} not found in fitness landscape")
-        
-    def set_fitness(self,
-                    sequence: Union[Sequence, np.ndarray],
-                    fitness: float) -> None:
-        """
-        Method to set fitness value for a sequence.
-        
-        Parameters
-        ----------
-        sequence : Sequence or array-like
-            Sequence to set fitness for.
-        fitness : float
-            Fitness value.
-        """
-        if not isinstance(sequence, Sequence):
-            sequence = Sequence(sequence)
-        
-        # Add to sequences if not already present
-        if sequence not in self.sequences:
-            self.sequences.append(sequence)
-        
-        # Update fitness value
-        seq_tuple = tuple(sequence.to_array())
-        self.fitness_values[seq_tuple] = float(fitness)
-        
-        # Update graph if it exists
-        if self.graph is not None:
-            # Find node corresponding to sequence
-            for node, data in self.graph.nodes(data=True):
-                if 'sequence' in data and np.array_equal(data['sequence'], sequence.to_array()):
-                    self.graph.nodes[node]['fitness'] = float(fitness)
-                    break
-        
-
-    @classmethod
-    def from_digraph(cls,
-                   graph: nx.DiGraph,
-                   **kwargs):
-        """
-        Create landscape from directed graph representation.
-        
-        Parameters
-        ----------
-        graph : networkx.Graph
-            Graph representation of the landscape.
-            
-        Returns
-        -------
-        FitnessLandscape
-            Fitness landscape.
-        """
-        return cls(graph=graph, **kwargs)
-    
-    def __len__(self):
-        return len(self.sequences)
-    
-    def __getitem__(self, idx):
-        return self.sequences[idx], self.get_fitness(self.sequences[idx])
-    
-    def __iter__(self):
-        for seq in self.sequences:
-            yield seq, self.get_fitness(seq)
-    
-    def __repr__(self):
-        return f"{self.__class__.__name__}(n_sequences={len(self.sequences)})"
