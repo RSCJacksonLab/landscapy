@@ -1,108 +1,128 @@
 import numpy as np
 import networkx as nx
-from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
-from .sequence import Sequence, BinarySequence, MultialleleSequence, sequence_distance
+from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal,  Protocol, runtime_checkable, Hashable
+from dataclasses import dataclass
+from .sequence import BaseNumpySequence, make_sequence
 from .graph import create_hamming_graph
 import scipy.linalg as la
 from abc import ABC, abstractmethod
+from pydantic import BaseModel, Field, validator, conlist, ValidationError  
+from .graph import create_knn_graph, create_hamming_graph
+from .digraph import ASRLandscapeConstructor
+from cogent3 import make_aligned_seqs
 
-class GraphLandscapeBase(ABC):
+
+class NodeModel(BaseModel):
+    sequence: BaseNumpySequence
+    fitness: Union[float, None] = np.nan
+    gapped_arr: np.ndarray = Field(..., repr=False)
+    ungapped_arr: np.ndarray = Field(..., repr=False)
+
+    @validator("gapped_arr")
+    def _check_gap(cls, v):
+        if v.ndim != 2 or v.shape[1] != 21:
+            raise ValueError("gapped_arr must be (L,21)")
+        return v
+
+    @validator("ungapped_arr")
+    def _check_ungap(cls, v):
+        if v.ndim != 2 or v.shape[1] != 20:
+            raise ValueError("ungapped_arr must be (L,20)")
+        return v
+
+SeqKey = tuple[str, ...]
+
+@runtime_checkable
+class _GraphLike(Protocol):
+    def nodes(
+        self, data: bool = ...
+    ) -> Iterable[tuple[Hashable, dict]]: ...
+
+@dataclass(slots=True)
+class _Record:
+    sequence: BaseNumpySequence
+    fitness: float
+    gapped_arr: np.ndarray | None = None
+    ungapped_arr: np.ndarray | None = None
+
+class BaseGraphLandscape(ABC):
     """
     Abstract base class for directed and undirected fitness landscapes.
     Implements standard class methods.
     """
+    graph: _GraphLike
+    sequences: list[BaseNumpySequence]
+    _records: Dict[SeqKey, _Record] 
+    graph_type: Literal['hamming', 'knn'] # TODO: Add other graph types? 
 
     def __init__(self) -> None:
-        super().__init__()
+        self.sequences = []
+        self._records = {}
+        self.graph_type = None
 
     def get_fitness(self,
-                    sequence: Union[Sequence, np.ndarray]) -> float:
+                    sequence,
+                    *,
+                    default: Union[float, None] = None) -> float:
         """
-        Method to return fitness value for a sequence.
-        
-        Parameters
-        ----------
-        sequence : Sequence or array-like
-            Sequence to retrieve fitness for.
-            
-        Returns
-        -------
-        float
-            Fitness value.
+        Method to retrieve the fitness of a sequence.
         """
-        if not isinstance(sequence, Sequence):
-            sequence = Sequence(sequence)
-        
-        seq_tuple = tuple(sequence.to_array())
-        
-        
-        assert hasattr(self, 'fitness_values'), \
-        "Fitness landscape must have constructed fitness_values."
 
-        if seq_tuple in self.fitness_values:
-            return self.fitness_values[seq_tuple]
-        else:
-            raise KeyError(f"Sequence {sequence} not found in fitness landscape")
-    
+        key = tuple(make_sequence(sequence).to_array())
+        try:
+            return self._records[key].fitness
+        except KeyError:
+            if default is None:
+                raise
+            return default
+
     def get_signal(self) -> np.ndarray:
         """
-        Method to retrieve the signal vector over all sequences in the
-        network graph. 
-
-        Returns
-        -------
-        signal : np.ndarray 
-            The signal vector.
+        Method to retrieve the graph signal vector.
         """
+        return np.fromiter(
+            (rec.fitness for rec in self._records.values()), float, len(self._records)
+        )
+    
+    def _init_from_pairs(self,
+                         seqs,
+                         fits):
+        for seq, fit in zip(seqs, fits):
+            s = make_sequence(seq)
+            self.sequences.append(s)
+            self._records[tuple(s.to_array())] = _Record(seq=s, fitness=float(fit))
 
-        assert hasattr(self, 'fitness_values'), \
-        "Fitness landscape must have constructed sequences."
+    def _init_from_graph(self, graph: _GraphLike) -> None:
+        self.graph = graph
+        for node, data in graph.nodes(data=True):
+            try:
+                model = NodeModel(**data)
+            except ValidationError as err:
+                raise ValueError(f"Node {node!r}: {err}") from None
+
+            seq = make_sequence(model.sequence)
+            rec = _Record(
+                seq=seq,
+                fitness=float(model.fitness),
+                gapped_arr=getattr(model, "gapped_arr", None),
+                ungapped_arr=getattr(model, "ungapped_arr", None),
+            )
+            self.sequences.append(seq)
+            self._records[tuple(seq.to_array())] = rec
+
+    @abstractmethod
+    def _to_graph(self):
+        """
+        Abstract graph constructor method.
+        """
         
-        signal = np.array([self.get_fitness(sequence) for sequence in self.sequences])
-        return signal
-    
-    def get_signal(self) -> np.ndarray:
-        """
-        Method to retrieve the signal vector over all sequences in the
-        network graph. 
-
-        Returns
-        -------
-        signal : np.ndarray 
-            The signal vector.
-        """
-
-        assert hasattr(self, 'fitness_values'), \
-        "Fitness landscape must have constructed sequences."
-
-        signal = np.array([self.get_fitness(sequence) for sequence in self.sequences])
-        return signal
-    
-    @abstractmethod
-    def init_from_sequences(self):
         pass
 
-    @abstractmethod
-    def init_from_graph(self):
-        pass
-    
     @classmethod
     def from_graph(cls,
-                   graph: Union[nx.Graph, nx.DiGraph],
+                   graph: _GraphLike,
                    **kwargs):
-        """
-        Create landscape from directed graph representation.
-        
-        Parameters
-        ----------
-        graph : nx.Graph or
-            Graph representation of the landscape.
-            
-        Returns
-        -------
-        FitnessLandscape
-            Fitness landscape.
-        """
+
         return cls(graph=graph, **kwargs)
     
     def __len__(self):
@@ -120,7 +140,7 @@ class GraphLandscapeBase(ABC):
 
     
 
-class FitnessLandscape(GraphLandscapeBase):
+class FitnessLandscape(BaseGraphLandscape):
     """
     Base class for fitness landscapes.
     
@@ -137,11 +157,14 @@ class FitnessLandscape(GraphLandscapeBase):
     """
     
     def __init__(self,
-                 sequences: np.ndarray = None,
-                 fitness_values: np.ndarray = None,
                  graph: nx.Graph = None,
+                 sequences: List[BaseNumpySequence] = None,
+                 fitness_values: np.ndarray = None,
+                 *,
                  graph_type: Literal['hamming'] = 'hamming',
                  **kwargs) -> None:
+        
+        super().__init__()
         
         self.sequences = []
         self.fitness_values = {}
@@ -149,78 +172,18 @@ class FitnessLandscape(GraphLandscapeBase):
         self.graph_type = graph_type
         
         if sequences is not None and fitness_values is not None:
-            self.init_from_sequences(sequences, fitness_values)
+            self._init_from_pairs(sequences, fitness_values)
         elif graph is not None:
-            self.init_from_graph(graph)
+            self._init_from_graph(graph)
         else:
             raise ValueError("Either sequences and fitness_values or graph must be provided")
         
         # Create graph if not provided
         if self.graph is None and graph_type is not None:
-            self.to_graph(graph_type=graph_type, **kwargs)
+            self._to_graph(graph_type=graph_type, **kwargs)
     
-    def init_from_sequences(self,
-                             sequences,
-                             fitness_values) -> None:
-        """
-        Initialise fitness landscape from sequences and fitness
-        values. 
-
-        Parameters
-        ----------
-        sequences : np.ndarray
-            Sequences in the fitness landscape.
-        
-        fitness_values : np.ndarray
-            fitness values indexed matched to the sequences.
-        
-        """
-        # Convert sequences to Sequence objects if they aren't already
-        self.sequences = []
-        for seq in sequences:
-            if isinstance(seq, Sequence):
-                self.sequences.append(seq)
-            else:
-                self.sequences.append(Sequence(seq))
-        
-        # Create mapping from sequences to fitness values
-        self.fitness_values = {}
-        for seq, fitness in zip(self.sequences, fitness_values):
-            # Use tuple representation as dictionary key
-            seq_tuple = tuple(seq.to_array())
-            self.fitness_values[seq_tuple] = float(fitness)
     
-    def init_from_graph(self,
-                         graph: nx.Graph):
-        """
-        Initialise fitness landscape class from networkX graph. 
-
-        Parameters
-        ----------
-        graph : nx.Graph
-            The initialised network Graph fitness landscape.
-        """
-        self.graph = graph
-        
-        # Extract sequences and fitness values from graph
-        self.sequences = []
-        self.fitness_values = {}
-        
-        for node, data in graph.nodes(data=True):
-            if 'sequence' in data:
-                seq = data['sequence']
-                if not isinstance(seq, Sequence):
-                    seq = Sequence(seq)
-                self.sequences.append(seq)
-                
-                # Use tuple representation as dictionary key
-                seq_tuple = tuple(seq.to_array())
-                
-                if 'fitness' in data:
-                    self.fitness_values[seq_tuple] = float(data['fitness'])
-        
-    def to_graph(self,
-                 graph_type: Literal['hamming', 'knn'],
+    def _to_graph(self,
                  **kwargs) -> nx.Graph:
         """
         Method to convert fitness landscape to a network graph.
@@ -239,19 +202,17 @@ class FitnessLandscape(GraphLandscapeBase):
         networkx.Graph
             Graph representation of the landscape.
         """
-        if graph_type == 'hamming':
-            
+        if self.graph_type == 'hamming':
             self.graph = create_hamming_graph(self.sequences, list(self.fitness_values.values()), **kwargs)
-        elif graph_type == 'knn':
-            from .graph import create_knn_graph
-            self.graph = create_knn_graph(self.sequences, list(self.fitness_values.values()), **kwargs)
-        else:
-            raise ValueError(f"Unsupported graph type: {graph_type}")
         
-        return self.graph
+        elif self.graph_type == 'knn':
+            self.graph = create_knn_graph(self.sequences, list(self.fitness_values.values()), **kwargs)
+        
+        else:
+            raise ValueError(f"Unsupported graph type: {self.graph_type}")
     
 
-class DirectedFitnessLandscape(GraphLandscapeBase):
+class DirectedFitnessLandscape(BaseGraphLandscape):
     """
     Base class for directed fitness landscapes. Supports causal,
     non-stationary relationship between nodes.
@@ -265,44 +226,34 @@ class DirectedFitnessLandscape(GraphLandscapeBase):
         Fitness values corresponding to sequences.
     """
     
-    def __init__(self, #TODO: Extend support beyond constructing the DirectedFitnessLandscape from an initialised DiGraph. 
+    def __init__(self,
                  digraph: nx.DiGraph,
-                 laplacian: Literal['directed', 'zero_padded', 'None'],
+                 sequences: List[BaseNumpySequence],
+                 fitness_values: np.ndarray = None,
+                 *,
+                 laplacian: Union[Literal['directed'], None] = None,
+                 graph_type: Literal['phylogenetic_directed'] = 'phylogenetic_directed',
                  **kwargs) -> None:
         
-        self.digraph = None
-        self.init_from_graph(digraph)
 
-    def init_from_graph(self,
-                        digraph: nx.DiGraph):
-        """
-        Initialise fitness landscape class from networkX directed
-        graph. 
-
-        Parameters
-        ----------
-        digraph : nx.DiGraph
-            The initialised network DiGraph fitness landscape.
-        """
-        self.digraph = digraph
+        super().__init__()
         
-        # Extract sequences and fitness values from graph
         self.sequences = []
         self.fitness_values = {}
+        self.graph = None
+        self.graph_type = graph_type
         
-        for node, data in digraph.nodes(data=True):
-            if 'sequence' in data:
-                seq = data['sequence']
-                if not isinstance(seq, Sequence):
-                    seq = Sequence(seq)
-                self.sequences.append(seq)
-                
-                # Use tuple representation as dictionary key
-                seq_tuple = tuple(seq.to_array())
-                
-                if 'fitness' in data:
-                    self.fitness_values[seq_tuple] = float(data['fitness'])
-    
+        if sequences is not None and fitness_values is not None:
+            self._init_from_pairs(sequences, fitness_values)
+        elif digraph is not None:
+            self._init_from_graph(digraph)
+        else:
+            raise ValueError("Either sequences and fitness_values or graph must be provided")
+        
+        # Create graph if not provided
+        if self.graph is None and graph_type is not None:
+            self._to_graph(graph_type=graph_type, **kwargs)
+
     def compute_directed_laplacian(self,
                                    teleport_dampened: bool = True,
                                    epsilon: float = 1e-8) -> None:
@@ -417,7 +368,7 @@ class DirectedFitnessLandscape(GraphLandscapeBase):
 
         ####
 
-        digraph = self.digraph
+        digraph = self.graph
         P, node_index = _compute_transition_matrix(digraph)
         self._node_index = node_index
         
@@ -447,4 +398,36 @@ class DirectedFitnessLandscape(GraphLandscapeBase):
         # The directed Laplacian.
         L = np.eye(n) - S
         
-        self.directed_laplacian = L
+        return L
+    
+    def _alignment_from_sequences(self,
+                                  *,
+                                  moltype="protein"):
+        """
+
+        """
+        if hasattr(self, "graph") and self.graph is not None:
+            data = {
+                str(node): str(d["sequence"])              # Sequence objects stringify fine
+                for node, d in self.graph.nodes(data=True)
+                if "sequence" in d
+            }
+        else:
+            data = {f"seq_{i}": str(seq) for i, seq in enumerate(self.sequences)}
+
+        return make_aligned_seqs(data=data, moltype=moltype)
+
+    def _to_graph(self, **kwargs):
+
+        # build Alignment on the fly
+        aln = self._alignment_from_sequences(moltype=kwargs.get("moltype", "protein"))
+
+        constructor = ASRLandscapeConstructor(
+            alignment=aln,
+            _reconstruct_phylogeny=True,
+            _reconstruct_ancestral_states=True,
+            **kwargs,
+        )
+        self.graph = constructor.construct_dag()
+        self._init_from_graph(self.graph)
+        
