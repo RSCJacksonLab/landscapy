@@ -3,6 +3,7 @@ import networkx as nx
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
 from .sequence import Sequence, sequence_distance
 
+# Simple graph constructors
 
 def create_hamming_graph(sequences: List[Sequence],
                          fitness_values: Union[np.ndarray, List] = None,

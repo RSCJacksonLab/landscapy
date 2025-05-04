@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="landscapy",
-    version="0.1.0",  # Updated version to reflect new features
+    version="0.2.0",  # version 0.2 updated API for directed graphs and cogent3 data structures.
     author="Fitness Landscape Team",
     author_email="example@example.com",
     description="A package for analyzing fitness landscapes modeled as network graphs",
@@ -32,6 +32,10 @@ setup(
         "matplotlib>=3.3.0",
         "scikit-learn>=0.24.0",
         "torch>=1.7.0",
+        "cogent3==2025.3.22a4", 
+        "piqtree>=0.4.0",
+        "pydantic==4.11.0" 
+        # TODO: Add soft sequence alignment
     ],
     extras_require={
         "dev": [
