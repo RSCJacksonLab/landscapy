@@ -98,7 +98,7 @@ class NormalGamma:
         )
 
 
-class BlueprintAligner:
+class RJMCMCAligner:
     """
     Reversible jump MCMC alignment of directed graphs. Implemented
     from https://www.nature.com/articles/s41467-025-59077-7.
