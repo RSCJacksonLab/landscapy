@@ -34,7 +34,7 @@ class DirectedSuperscape:
                  # Method does not suppoer undirected graphs (yet).
                  landscapes: List[Union[DirectedFitnessLandscape, _GraphLike]],
                  *,
-                 graph_aligner: Literal['RJ_MCMC'],
+                 graph_aligner: Literal['RJ_MCMC'] = 'RJ_MCMC',
                  **sampler_kwargs) -> None:
         
         self.landscapes = landscapes
