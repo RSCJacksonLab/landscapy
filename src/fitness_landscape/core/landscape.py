@@ -10,6 +10,8 @@ from pydantic import BaseModel, Field, validator, conlist, ValidationError
 from .graph import create_knn_graph, create_hamming_graph
 from .digraph import ASRLandscapeConstructor
 from cogent3 import make_aligned_seqs
+from ..embedding.soft_embedding import ESMEmbedder
+import inspect
 
 
 class NodeModel(BaseModel):
@@ -58,7 +60,9 @@ class BaseGraphLandscape(ABC):
     def __init__(self) -> None:
         self.sequences = []
         self._records = {}
-        self.graph_type = None
+        self.graph_type = None,
+        
+        self._emb_arr_key: str = 'emb_arr'
 
     def get_fitness(self,
                     sequence,
@@ -110,6 +114,28 @@ class BaseGraphLandscape(ABC):
             self.sequences.append(seq)
             self._records[tuple(seq.to_array())] = rec
 
+
+    def compute_node_embeddings(self,
+                                model_name: str = None,
+                                batch_size: int = None) -> None:
+        """
+        Method to get node embeddings from soft sequence OHE. Inplace
+        node attribute updates.
+        """
+
+        if not hasattr(self, 'emb_model'):
+            
+            self.emb_model = ESMEmbedder(model_name=model_name)
+
+        ohe_arr = np.stack([node['ungapped_arr'] for node in self.graph.nodes(data=True)])
+
+        emb_arr = self.emb_model.embed_relaxed_seqs(relaxed_seqs=ohe_arr,
+                                                batch_size=batch_size)
+        
+        # Iterate through nodes and update data attributes.
+        for node, arr in zip(self.graph.nodes(), emb_arr):
+            self.graph[node][self._emb_arr_key] = arr
+
     @abstractmethod
     def _to_graph(self):
         """
@@ -117,6 +143,27 @@ class BaseGraphLandscape(ABC):
         """
         
         pass
+
+    @staticmethod
+    def _split_kwargs(callable_a: Any,
+                      callable_b: Any,
+                      kwargs: Dict[str, Any]) -> tuple[dict, dict]:
+
+        sig_a = inspect.signature(callable_a)
+        sig_b = inspect.signature(callable_b)
+        a_names = set(sig_a.parameters) - {"self"}
+        b_names = set(sig_b.parameters) - {"self"}
+
+        kw_a, kw_b = {}, {}
+        for k, v in kwargs.items():
+            if k in a_names and k in b_names:
+                raise TypeError(f"Ambiguous kwarg '{k}' valid for both functions")
+            if k in a_names:
+                kw_a[k] = v
+            elif k in b_names:
+                kw_b[k] = v
+
+        return kw_a, kw_b
 
     @classmethod
     def from_graph(cls,
@@ -162,6 +209,7 @@ class FitnessLandscape(BaseGraphLandscape):
                  fitness_values: np.ndarray = None,
                  *,
                  graph_type: Literal['hamming'] = 'hamming',
+                 emb_nodes: bool = True,
                  **kwargs) -> None:
         
         super().__init__()
@@ -178,11 +226,18 @@ class FitnessLandscape(BaseGraphLandscape):
         else:
             raise ValueError("Either sequences and fitness_values or graph must be provided")
         
+        # Split kwargs
+        build_kwargs, emb_kwargs = self._split_kwargs(callable_a=self._to_graph,
+                                                      callable_b=self.compute_node_embeddings,
+                                                      kwargs=kwargs)
         # Create graph if not provided
         if self.graph is None and graph_type is not None:
-            self._to_graph(graph_type=graph_type, **kwargs)
-    
-    
+            self._to_graph(graph_type=graph_type, **build_kwargs)
+
+        # Compute nodes
+        if emb_nodes:
+            self.compute_node_embeddings(**emb_kwargs)
+                
     def _to_graph(self,
                  **kwargs) -> nx.Graph:
         """
@@ -232,6 +287,7 @@ class DirectedFitnessLandscape(BaseGraphLandscape):
                  fitness_values: np.ndarray = None,
                  *,
                  laplacian: Union[Literal['directed'], None] = None,
+                 emb_nodes: bool = True,
                  graph_type: Literal['phylogenetic_directed'] = 'phylogenetic_directed',
                  **kwargs) -> None:
         
@@ -250,9 +306,19 @@ class DirectedFitnessLandscape(BaseGraphLandscape):
         else:
             raise ValueError("Either sequences and fitness_values or graph must be provided")
         
+        
+        # Split kwargs
+        build_kwargs, emb_kwargs = self._split_kwargs(callable_a=self._to_graph,
+                                                      callable_b=self.compute_node_embeddings,
+                                                      kwargs=kwargs)
+
         # Create graph if not provided
         if self.graph is None and graph_type is not None:
-            self._to_graph(graph_type=graph_type, **kwargs)
+            self._to_graph(graph_type=graph_type, **build_kwargs)
+
+                # Compute nodes
+        if emb_nodes:
+            self.compute_node_embeddings(**emb_kwargs)
 
     def compute_directed_laplacian(self,
                                    teleport_dampened: bool = True,
