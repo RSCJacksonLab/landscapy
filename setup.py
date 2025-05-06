@@ -22,8 +22,7 @@ setup(
         "Intended Audience :: Science/Research",
         "Topic :: Scientific/Engineering :: Bio-Informatics",
     ],
-    package_dir={"": "src"},
-    packages=find_packages(where="src"),
+    packages=find_packages(),
     python_requires=">=3.7",
     install_requires=[
         "numpy>=1.19.0",

@@ -1,4 +1,3 @@
-"
 Landscapy: Fitness Landscape Analysis
 =================================
 
