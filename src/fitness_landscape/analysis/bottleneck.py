@@ -53,8 +53,6 @@ def cheeger_sweep_cut(
         "h_upper_bound": upper
     }
 
-# TODO: Cheeger energy bounding
-
 def _vol(graph: nx.Graph,
          weight_key: str = None) -> float:
     """
@@ -130,7 +128,5 @@ def cheeger_energy_bound(G: nx.Graph,
         "vol_s": vol_S
     }
     
-
-
 #TODO: OR negative curvature
 
