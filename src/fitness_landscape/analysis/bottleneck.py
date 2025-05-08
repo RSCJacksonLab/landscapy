@@ -53,15 +53,84 @@ def cheeger_sweep_cut(
         "h_upper_bound": upper
     }
 
-def compute_cheeger_energy_floor() -> Dict:
+# TODO: Cheeger energy bounding
+
+def _vol(graph: nx.Graph,
+         weight_key: str = None) -> float:
+    """
+    Helper function to sum the volume of a graph. 
+    Parameters
+    -----------
+    graph : nx.Graph    
+        The graph to analyze.
+    
+    weight_key : str, default=`None`
+        The attribute key edge wweights are stored under.
+    
+    Returns
+    -------
+    float 
+        The volume of the graph.
+    """
+    return sum(dict(graph.degree(weight=weight_key)).values())
+
+
+def _internal_edge_weight(graph: nx.Graph,
+                          weight_key: str = None) -> float:
     """
     
+    Helper function to sum the total weight of edges in the graph.
+    
+    Parameters
+    -----------
+    graph : nx.Graph
+        The graph to analyze.
+    
+    weight_key : str, default=`None`
+        The attribute key edhe weights are stored under.
+    
+    Returns
+    -------
+    float
+        The sum of internal weights.
     """
+    return sum(d.get(weight_key, 1.0) for *_, d in graph.edges(data=True))
+
+
+def cheeger_energy_bound(G: nx.Graph,
+                         min_delta : float = None,
+                         weight_key: str = None ) -> Dict[str, float]:
+    """
+    """
+    h_S = cheeger_sweep_cut(G, weight_key)['h_approx']
+    vol_S = _vol(G, weight_key)
+    W_int = _internal_edge_weight(G, weight_key)
+
+    # If no minimum value, no deterministic lower bound and instead
+    # an expected energy based on a uniform distribution of threshold
+    # values in the open interval [0,1].
+
+    if min_delta is None:
+        E_lower = (11.0 / 72.0) * h_S * vol_S
+    
+    
+    # If there is a minimum value for difference in the survived graph
+    # and unobsered graph, determine the bound. 
+    else:
+        E_lower = 0.5 * (min_delta ** 2) * h_S * vol_S
+
+    # Upper bound is always the ceiling of all edges at a maximum
+    # squared difference of 1 (i.e., the binary case).
+    E_upper = W_int 
+
+    return {
+        "energy_lower_bound": E_lower,
+        "energy_upper_bound": E_upper,
+        "h_approx": h_S,
+        "vol_s": vol_S
+    }
     
 
-
-
-#TODO: DE floor from Cheeger
 
 #TODO: OR negative curvature
 
