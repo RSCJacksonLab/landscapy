@@ -236,8 +236,7 @@ class BaseNumpySequence(_C3Sequence):
 
 class BinarySequence(BaseNumpySequence):
     """
-    Binary {0,1} sequence with bit‑wise Hamming distance optimisation.
-    
+    Binary {0,1} sequence with bit-wise Hamming distance optimisation.
     """
 
     def __init__(self, sequence: _SeqConvertible):
@@ -255,6 +254,17 @@ class BinarySequence(BaseNumpySequence):
             xor = np.bitwise_xor(self._packed, other._packed)
             return int(np.sum(np.unpackbits(xor)[: len(self)]))
         return super().distance(other, metric="hamming")
+
+class MultialleleSequence(BaseNumpySequence):
+    """
+    A sequence with multiple alleles at each position.
+    """
+
+    def __init__(self, sequence: _SeqConvertible, alphabet: Iterable):
+        arr = _to_numpy(sequence)
+        if not set(arr).issubset(set(alphabet)):
+            raise ValueError("MultialleleSequence accepts only symbols from the alphabet")
+        super().__init__(arr, alphabet=alphabet, moltype=None)
 
 
 class SoftSequence(BaseNumpySequence):
@@ -391,3 +401,4 @@ def sequence_distance(seq1: Union[BaseNumpySequence, np.ndarray],
             return np.sqrt(np.sum((array1 - array2) ** 2))
         else:
             raise ValueError(f"Unsupported distance metric: {metric}")
+
