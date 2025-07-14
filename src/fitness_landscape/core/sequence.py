@@ -260,12 +260,15 @@ class MultialleleSequence(BaseNumpySequence):
     A sequence with multiple alleles at each position.
     """
 
-    def __init__(self, sequence: _SeqConvertible, alphabet: Iterable):
+    def __init__(self,
+                 sequence: _SeqConvertible,
+                 alphabet: Iterable):
         arr = _to_numpy(sequence)
         if not set(arr).issubset(set(alphabet)):
             raise ValueError("MultialleleSequence accepts only symbols from the alphabet")
-        super().__init__(arr, alphabet=alphabet, moltype=None)
-
+        super().__init__(arr,
+                         alphabet=alphabet,
+                         moltype=None)
 
 class SoftSequence(BaseNumpySequence):
     """
@@ -402,3 +405,33 @@ def sequence_distance(seq1: Union[BaseNumpySequence, np.ndarray],
         else:
             raise ValueError(f"Unsupported distance metric: {metric}")
 
+def generate_sequences(length: int,
+                       alphabet: List) -> List[BaseNumpySequence]:
+    """
+    Function to generate all combinatorial sequences of a set length
+    with a given alphabet of characters. 
+
+    Parameters
+    ----------
+    length : int
+        The length of combinatorial sequences to produce. 
+
+    alphabet : List
+        The list of characters in the alphabet. 
+    
+    Returns
+    -------
+    sequences : List
+        List of `BaseNumpySequence` objects.
+    """
+    if length == 0:
+        return []
+    if length == 1:
+        return [BaseNumpySequence([s]) for s in alphabet]
+    sequences = []
+    for s in alphabet:
+        for sub_sequence in generate_sequences(length - 1, alphabet):
+            sequences.append(BaseNumpySequence([s] + sub_sequence.to_array().tolist()))
+    return sequences
+
+# TODO: Functional code to convert BaseNumpySequence class to Binary or multiallelic.
