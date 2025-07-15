@@ -2,8 +2,9 @@ import numpy as np
 import torch
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
 from ..core.landscape import FitnessLandscape
-from ..core.sequence import Sequence, BinarySequence, generate_sequences
+from ..core.sequence import BaseNumpySequence, BinarySequence, generate_sequences
 
+#TODO: Make sure WHT takes only binary sequences
 
 def walsh_transform(landscape: FitnessLandscape,
                     order: int = None,
@@ -231,7 +232,7 @@ def _inverse_walsh_transform_numpy(coefficients: np.ndarray,
         sequences = np.array([seq.to_array() for seq in sequences])
     else:
         # Convert sequences to numpy array if needed
-        if isinstance(sequences[0], Sequence):
+        if isinstance(sequences[0], BaseNumpySequence):
             sequences = np.array([seq.to_array() for seq in sequences])
         else:
             sequences = np.asarray(sequences)
@@ -294,7 +295,7 @@ def _inverse_walsh_transform_torch(coefficients: Union[torch.Tensor, np.ndarray]
         sequences = torch.tensor([seq.to_array() for seq in sequences], dtype=torch.float32)
     else:
         # Convert sequences to torch tensor if needed
-        if isinstance(sequences[0], Sequence):
+        if isinstance(sequences[0], BaseNumpySequence):
             sequences = torch.tensor([seq.to_array() for seq in sequences], dtype=torch.float32)
         else:
             sequences = torch.tensor(sequences, dtype=torch.float32)

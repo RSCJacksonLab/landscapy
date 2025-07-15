@@ -6,7 +6,7 @@ from .sequence import BaseNumpySequence, make_sequence
 from .graph import create_hamming_graph
 import scipy.linalg as la
 from abc import ABC, abstractmethod
-from pydantic import BaseModel, Field, validator, conlist, ValidationError  
+from pydantic import BaseModel, Field, validator, ValidationError, ConfigDict
 from .graph import create_knn_graph, create_hamming_graph
 from .digraph import ASRLandscapeConstructor
 from cogent3 import make_aligned_seqs
@@ -15,6 +15,7 @@ import inspect
 
 
 class NodeModel(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
     sequence: BaseNumpySequence
     fitness: Union[float, None] = np.nan
     gapped_arr: np.ndarray = Field(..., repr=False)

@@ -32,7 +32,7 @@ setup(
         "matplotlib>=3.3.0",
         "scikit-learn>=0.24.0",
         "torch>=1.7.0",
-        "transformers>=4.53.2"
+        "transformers>=4.53.2",
         "cogent3==2025.3.22a4", 
         "piqtree>=0.4.0",
         "pydantic==2.11.7" 

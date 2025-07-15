@@ -1,11 +1,11 @@
 import numpy as np
 import networkx as nx
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
-from .sequence import Sequence, sequence_distance
+from .sequence import BaseNumpySequence, sequence_distance
 
 # Simple graph constructors
 
-def create_hamming_graph(sequences: List[Sequence],
+def create_hamming_graph(sequences: List[BaseNumpySequence],
                          fitness_values: Union[np.ndarray, List] = None,
                          weight_by_fitness: bool = False) -> nx.Graph:
     """
@@ -33,8 +33,8 @@ def create_hamming_graph(sequences: List[Sequence],
     
     # Add nodes with sequence and fitness attributes
     for i, seq in enumerate(sequences):
-        if not isinstance(seq, Sequence):
-            seq = Sequence(seq)
+        if not isinstance(seq, BaseNumpySequence):
+            seq = BaseNumpySequence(seq)
         
         # Add node with sequence attribute
         G.add_node(i, sequence=seq.to_array())
@@ -61,7 +61,7 @@ def create_hamming_graph(sequences: List[Sequence],
                     G.add_edge(i, j, weight=1.0, distance=dist)
     return G
 
-def create_knn_graph(sequences: List[Sequence],
+def create_knn_graph(sequences: List[BaseNumpySequence],
                      k: int,
                      fitness_values: Union[List, np.ndarray] = None,
                      metric: Literal['hamming'] = 'hamming', 
@@ -94,8 +94,8 @@ def create_knn_graph(sequences: List[Sequence],
     
     # Add nodes with sequence and fitness attributes
     for i, seq in enumerate(sequences):
-        if not isinstance(seq, Sequence):
-            seq = Sequence(seq)
+        if not isinstance(seq, BaseNumpySequence):
+            seq = BaseNumpySequence(seq)
         
         # Add node with sequence attribute
         G.add_node(i, sequence=seq.to_array())

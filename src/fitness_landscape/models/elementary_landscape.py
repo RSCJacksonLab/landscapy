@@ -1,8 +1,6 @@
-import numpy as np
-import networkx as nx
-from typing import Optional, Tuple, List
+from typing import Optional, List
 from ..core.landscape import FitnessLandscape
-from ..core.sequence import Sequence
+from ..core.sequence import BaseNumpySequence
 from ..core.graph import create_knn_graph
 from ..analysis.eigenmode import eigenmode_decomposition
 
@@ -18,7 +16,7 @@ class ElementaryFitnessLandscape(FitnessLandscape):
     """
 
     def __init__(self,
-                 sequences: List[Sequence],
+                 sequences: List[BaseNumpySequence],
                  j: int,
                  k: int,
                  seed: Optional[int] = None,
