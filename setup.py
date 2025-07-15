@@ -6,7 +6,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 setup(
     name="landscapy",
     version="0.2.0",  # version 0.2 updated API for directed graphs and cogent3 data structures.
-    author="Fitness Landscape Team",
+    author="Matthew A. Spence",
     author_email="matthew.spence@anu.edu.au",
     description="A package for analyzing fitness landscapes modeled as network graphs",
     long_description=long_description,
