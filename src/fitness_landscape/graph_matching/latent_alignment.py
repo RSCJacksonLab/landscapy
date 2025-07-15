@@ -5,7 +5,7 @@ from typing import List, Optional, Tuple, Union, Dict
 import numpy as np
 import networkx as nx
 from scipy.special import gammaln
-from isorank import cosine_similarity_matrix
+from .isorank import cosine_similarity_matrix
 import scipy.optimize  # heavy but only occasional
 
 # Hyper parameter containers
@@ -218,70 +218,78 @@ class RJMCMCAligner:
         self._stored_pi: List[List[np.ndarray]] = [[] for _ in range(self.K)]
 
     #  Likelihood / posterior helpers
-    def _energy(self) -> float:
 
+    def _log_prior(self) -> float:
         """
-        Method to compute statistical energy as negative log posterior.
+        Calculates the log-prior probability of the blueprint graph.
+        This includes the size penalty for the number of latent slots.
 
         Returns
         -------
-        float
-            The weighted or binary statistical energy.
+        size_penalty : float
+            The log prior penalty on latent graph size. 
         """
+        
+        # Log prior penalty on size only applied after burn in.
+        size_penalty = 0.0 if self._in_growth_phase else self.birth_gamma * self.NL
+        # TODO: add more complex priors to penalize edge density, etc. 
+        
+        return -size_penalty
 
+    def _energy(self) -> float:
+        """
+        Method to compute statistical energy as the negative log
+        posterior. The negative Log Posterior is equal to
+        `-(Log-Likelihood + Log-Prior)`, where log prior is defined
+        outside of the energy functions.
+        """
         if self.binary_mode:
-            return self._energy_binary()
-        return self._energy_weighted()
+            log_likelihood = self._energy_binary()
+        else:
+            log_likelihood = self._energy_weighted()
+
+        log_prior = self._log_prior()
+
+        # The energy is the negative log posterior.
+        return -(log_likelihood + log_prior)
 
     # binary edges
     def _energy_binary(self) -> float:
         """
-        Method to compute the binary edge (i.e., unweighted) energy. If
-        in burn-in, the size is not penalised and the prior if a death /
-        node contraction event is functionally null.
-
-        Returns
-        -------
-        float
-            the energy for a binary edge summed with the size penality
-            for bith and death events.
+        Method to compute the binary edge log-likelihood.
         """
         O11 = O10 = O01 = O00 = 0
         for k, (pk, Wk) in enumerate(zip(self.perm, self.W)):
+            
+            # Ensure L is up-to-date for the calculation
             Lk = self.L[np.ix_(pk, pk)]
             A = (Wk > 0.5).astype(int)
             O11 += (A & Lk).sum()
             O10 += (A & ~Lk).sum()
             O01 += (~A & Lk).sum()
             O00 += (~A & ~Lk).sum()
-        log_like = -self.bb.log_marginal(O11, O10, O01, O00)
-        size_penalty = 0.0 if self._in_growth_phase else self.birth_gamma * self.NL
         
-        return log_like + size_penalty
+        # Returns the log marginal likelihood, NOT the energy.
+        # Energy is computed on the `_energy` method.
+        return self.bb.log_marginal(O11, O10, O01, O00)
 
     # weighted edges
     def _energy_weighted(self) -> float:
         """
-        Method to compute the weighted edge energy. If in burn-in, the
-        size is not penalised and the prior if a death / node
-        ontraction event is functionally null.
-
-        Returns
-        -------
-        float
-            the energy for a weighred edge summed with the size penalty
-            for bith and death events.
+        Method to compute the weighted edge log-likelihood.
         """
         logp = 0.0
         for k, (pk, Wk) in enumerate(zip(self.perm, self.W)):
+            
+            # Ensure L is up-to-date for the calculation
             Lk = self.L[np.ix_(pk, pk)].astype(bool)
             present = Wk[Lk]
             absent  = Wk[~Lk]
-            logp -= self.ng.log_marginal(present)
-            logp -= self.ng.log_marginal(absent)
-        size_penalty = 0.0 if self._in_growth_phase else self.birth_gamma * self.NL
+            logp += self.ng.log_marginal(present)
+            logp += self.ng.log_marginal(absent)
         
-        return logp + size_penalty
+        # Returns the log marginal likelihood, NOT the energy.
+        return logp
 
     #  Blueprint update and attribute similarity helpers
     def _majority_blueprint(self) -> np.ndarray:
@@ -308,7 +316,8 @@ class RJMCMCAligner:
 
     # cosine similarity attr‑vs‑latent slot
     def _attr_cosine(self,
-                     k: int) -> np.ndarray:
+                     k: int,
+                     _eps: float = 1e-9) -> np.ndarray:
         """
         Method to compute cosine similarity between observed nodes and
         latent slots.
@@ -334,11 +343,15 @@ class RJMCMCAligner:
             if slot >= 0:
                 blue_mu[slot] += Xk[v]
                 cnt[slot] += 1
+        
+        # Avoid division by zero for empty slots
         cnt[cnt == 0] = 1
         blue_mu /= cnt[:, None]
-        x_norm = np.linalg.norm(Xk, axis=1, keepdims=True) + 1e-9
-        b_norm = np.linalg.norm(blue_mu, axis=1, keepdims=True) + 1e-9
-        return (Xk / x_norm) @ (blue_mu / b_norm).T  # (n_k × NL)
+        
+        # Add epsilon for numerical stability
+        x_norm = np.linalg.norm(Xk, axis=1, keepdims=True) + _eps
+        b_norm = np.linalg.norm(blue_mu, axis=1, keepdims=True) + _eps
+        return (Xk / x_norm) @ (blue_mu / b_norm).T
 
     #  MCMC moves
     # elementary swap
@@ -526,7 +539,10 @@ class RJMCMCAligner:
         """
         Main method to sample the MCMC.
         """
+        # Initial blueprint and energy calculation
+        self.L = self._majority_blueprint()
         cur_E = self._energy()
+        
         total_steps = self.burn_in + self.samples * self.thin
         
         self._in_growth_phase = True
@@ -536,32 +552,42 @@ class RJMCMCAligner:
 
             move_type = self.rng.random()
             accepted = False
+            
             if move_type < self.birth_death_prob:
-                # birth/death 20 % of the time #TODO: Update to hyperparameter
                 if self.rng.random() < 0.5:
-                    # Birth
+                    
+                    # Birth proposal
                     prev_state = (self.NL, [p.copy() for p in self.perm], self.L.copy())
                     if self._birth():
+                        
+                        # The blueprint is updated implicitly within _birth by padding
                         new_E = self._energy()
-                        log_acc = -(new_E - cur_E)  # symmetric proposals approx.
-                        if np.log(self.rng.random()) < log_acc:
+                        log_acc_prob = cur_E - new_E
+                        if np.log(self.rng.random()) < log_acc_prob:
                             cur_E = new_E
                             accepted = True
                         else:
-                            self.NL, self.perm, self.L = prev_state  # revert
+                            
+                            # Revert state if not accepted
+                            self.NL, self.perm, self.L = prev_state
                 else:
-                    # Death
+                    
+                    # Death proposal
                     prev_state = (self.NL, [p.copy() for p in self.perm], self.L.copy())
                     if self._death():
+                        
+                        # The blueprint is updated implicitly within _death
                         new_E = self._energy()
-                        log_acc = -(new_E - cur_E)
-                        if np.log(self.rng.random()) < log_acc:
+                        log_acc_prob = cur_E - new_E
+                        if np.log(self.rng.random()) < log_acc_prob:
                             cur_E = new_E
                             accepted = True
                         else:
+                            
+                            # Revert state if not accepted
                             self.NL, self.perm, self.L = prev_state
             else:
-                # permutation moves
+                # Permutation move proposal
                 k = self.rng.integers(self.K)
                 if move_type < 0.6:
                     prop = self._proposal_swap(k)
@@ -569,20 +595,35 @@ class RJMCMCAligner:
                     prop = self._proposal_cycle3(k)
                 else:
                     prop = self._proposal_resample(k)
+
                 if prop is not None:
+                    # Store the previous state
                     prev_pk = self.perm[k].copy()
+                    
+                    # Propose the new permutation
                     self.perm[k] = prop if isinstance(prop, np.ndarray) else prop[2]
+                    
+                    # blueprint MUST be re-calculated based on the new
+                    # permutation before calculating the energy of the proposed state.
+                    self.L = self._majority_blueprint()
                     new_E = self._energy()
-                    # attribute/topology proposal weight (symmetric approx.)
-                    accept = new_E < cur_E or self.rng.random() < np.exp(cur_E - new_E)
-                    if accept:
-                        cur_E = new_E; accepted = True
+                    
+                    # Standard Metropolis-Hastings acceptance criterion
+                    log_acc_prob = cur_E - new_E
+                    if np.log(self.rng.random()) < log_acc_prob:
+                        
+                        # Accept the move
+                        cur_E = new_E
+                        accepted = True
                     else:
+                        # If rejected, revert the permutation to its previous state.
                         self.perm[k] = prev_pk
-            # blueprint update every sweep of max(n_k)
-            if step % max(self.n) == 0:
-                self.L = self._majority_blueprint()
-            # store after burn‑in
+            
+            # Ensure the blueprint always matches the current accepted permutation state.
+            if not accepted and move_type >= self.birth_death_prob:
+                 self.L = self._majority_blueprint()
+
+            # Store the state after burn-in and thinning
             if step >= self.burn_in and (step - self.burn_in) % self.thin == 0:
                 self._stored_L.append(self.L.copy())
                 for k in range(self.K):
