@@ -2,36 +2,36 @@ from . import core
 from . import transforms
 from . import analysis
 from . import models
-from . import utils
 
-from .core.sequence import (
-    Sequence,
+from .core import (
+    FitnessLandscape,
+    DirectedFitnessLandscape,
+    BaseNumpySequence,
     BinarySequence,
     MultialleleSequence,
     generate_sequences,
-    sequence_distance
-)
-
-from .core.landscape import FitnessLandscape
-
-from .core.graph import (
+    sequence_distance,
     create_hamming_graph,
     create_knn_graph,
+    ASRLandscapeConstructor,
+
 )
 
-__version__ = '0.1.0'
+__version__ = '0.2.0'
+
 __all__ = [
     'core',
     'transforms',
     'analysis',
     'models',
-    'utils',
-    'Sequence',
+    'BaseNumpySequence',
     'BinarySequence',
     'MultialleleSequence',
     'generate_sequences',
     'sequence_distance',
     'FitnessLandscape',
+    'DirectedFitnessLandscape',
+    'ASRLandscapeConstructor',
     'create_hamming_graph',
     'create_knn_graph',
 ]

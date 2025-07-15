@@ -78,3 +78,12 @@ License
 -------
 MIT License
 """
+
+Authors
+-------
+Matthew A Spence
+Dana S Matthews
+Mahakaran Sandu 
+Colin J Jackson
+James Nichols
+Barnabas Gall

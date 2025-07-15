@@ -1,5 +1,5 @@
 from .sequence import (
-    Sequence,
+    BaseNumpySequence,
     BinarySequence,
     MultialleleSequence,
     generate_sequences,
@@ -7,21 +7,30 @@ from .sequence import (
 )
 
 from .landscape import (
-    FitnessLandscape
+    FitnessLandscape,
+    DirectedFitnessLandscape
 )
+
 
 from .graph import (
     create_hamming_graph,
     create_knn_graph,
 )
 
+from .digraph import (
+    ASRLandscapeConstructor,
+
+)
+
 __all__ = [
-    'Sequence',
+    'BaseNumpySequence',
     'BinarySequence',
     'MultialleleSequence',
     'generate_sequences',
     'sequence_distance',
     'FitnessLandscape',
+    'DirectedFitnessLandscape',
+    'ASRLandscapeConstructor',
     'create_hamming_graph',
     'create_knn_graph',
 ]
