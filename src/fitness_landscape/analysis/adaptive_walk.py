@@ -2,13 +2,13 @@ import numpy as np
 import networkx as nx
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
 from ..core.landscape import FitnessLandscape
-from ..core.sequence import Sequence
+from ..core.sequence import BaseNumpySequence
 from ..core.graph import create_hamming_graph
 from logging import Logger
 
 def find_greedy_accessible_paths(landscape: FitnessLandscape, 
-                                 start_sequence: Sequence,
-                                 end_sequence: Sequence,
+                                 start_sequence: BaseNumpySequence,
+                                 end_sequence: BaseNumpySequence,
                                  **kwargs) -> Dict:
     """
     Function to find all fitness greedy paths between two sequences.
@@ -225,7 +225,7 @@ def analyze_path_accessibility(landscape: FitnessLandscape,
     }
 
 def calculate_basin_of_attraction(landscape: FitnessLandscape,
-                                  local_optimum: Sequence,
+                                  local_optimum: BaseNumpySequence,
                                   **kwargs) -> Dict:
     """
     Calculate the characteristics of a basin of attraction around a
@@ -337,7 +337,7 @@ def calculate_basin_of_attraction(landscape: FitnessLandscape,
     }
 
 def adaptive_walk_stochastic(landscape: FitnessLandscape,
-                             start_sequence: Sequence=None,
+                             start_sequence: BaseNumpySequence=None,
                              max_steps: int=100,
                              strategy: Literal['greedy', 'random_improvement']='greedy') -> Dict:
     """
