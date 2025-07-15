@@ -7,7 +7,7 @@ setup(
     name="landscapy",
     version="0.2.0",  # version 0.2 updated API for directed graphs and cogent3 data structures.
     author="Fitness Landscape Team",
-    author_email="example@example.com",
+    author_email="matthew.spence@anu.edu.au",
     description="A package for analyzing fitness landscapes modeled as network graphs",
     long_description=long_description,
     long_description_content_type="text/markdown",
