@@ -94,7 +94,7 @@ class BaseGraphLandscape(ABC):
         for seq, fit in zip(seqs, fits):
             s = make_sequence(seq)
             self.sequences.append(s)
-            self._records[tuple(s.to_array())] = _Record(seq=s, fitness=float(fit))
+            self._records[tuple(s.to_array())] = _Record(sequence=s, fitness=float(fit))
 
     def _init_from_graph(self, graph: _GraphLike) -> None:
         self.graph = graph
@@ -214,8 +214,6 @@ class FitnessLandscape(BaseGraphLandscape):
         
         super().__init__()
         
-        self.sequences = []
-        self.fitness_values = {}
         self.graph = None
         self.graph_type = graph_type
         

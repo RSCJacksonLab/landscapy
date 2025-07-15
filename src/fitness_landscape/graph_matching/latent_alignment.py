@@ -618,10 +618,7 @@ class RJMCMCAligner:
                     else:
                         # If rejected, revert the permutation to its previous state.
                         self.perm[k] = prev_pk
-            
-            # Ensure the blueprint always matches the current accepted permutation state.
-            if not accepted and move_type >= self.birth_death_prob:
-                 self.L = self._majority_blueprint()
+                        self.L = self._majority_blueprint()
 
             # Store the state after burn-in and thinning
             if step >= self.burn_in and (step - self.burn_in) % self.thin == 0:

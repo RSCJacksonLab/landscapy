@@ -130,3 +130,7 @@ def create_knn_graph(sequences: List[Sequence],
             G.add_edge(i, j, weight=weight, distance=distances[i, j])
     
     return G
+
+#TODO: Evolutionary velocity connectivity
+#TODO: TDA persistant homology connectivity
+#TODO: density dependent kNN connectivity
