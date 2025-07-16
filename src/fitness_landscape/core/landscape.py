@@ -128,7 +128,7 @@ class BaseGraphLandscape(ABC):
             
             self.emb_model = ESMEmbedder(model_name=model_name)
 
-        ohe_arr = np.stack([node['ungapped_arr'] for node in self.graph.nodes(data=True)])
+        ohe_arr = np.stack([node[1]['ungapped_arr'] for node in self.graph.nodes(data=True)])
 
         emb_arr = self.emb_model.embed_relaxed_seqs(relaxed_seqs=ohe_arr,
                                                 batch_size=batch_size)
