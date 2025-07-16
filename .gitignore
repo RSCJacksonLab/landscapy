@@ -175,6 +175,7 @@ cython_debug/
 
 # Remove testing
 testing.ipynb
+testing/
 
 # Temporarily remove examples
 examples/

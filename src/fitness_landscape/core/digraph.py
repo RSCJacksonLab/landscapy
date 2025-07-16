@@ -11,7 +11,8 @@ from cogent3.util.table import Table
 from .sequence import SoftSequence, BaseNumpySequence
 
 PROT = get_moltype("protein")
-ALPHABET_21 = list(PROT.alphabet) + ["gap"]   
+PROT_20 = [aa for aa in PROT.alphabet if aa != 'U']
+ALPHABET_21 = PROT_20 + ["gap"]
 
 class ASRLandscapeConstructor:
     """
@@ -260,10 +261,17 @@ class ASRLandscapeConstructor:
             )
 
         for anc in set(G.nodes) - set(self.tip_names):
-            post = self.asr_posterior_arr[anc]              # (L, 20) AA posterior
-            gap  = self.node_likelihoods[anc]               # (L, 2)  gap posterior
-            gapped_post = np.hstack([post, gap])            # (L, 21)
-
+            
+            # (L, 20) AA posterior
+            post = np.array(self.asr_posterior_arr[anc])
+            
+            # (L, 2)  gap posterior
+            gap  = self.node_likelihoods[anc]
+            
+            # (L, 21)
+            #Use conditional probability logic to combine.
+            gapped_post = SoftSequence.compute_conditional_gap_dist(aa_post_dist=post,
+                                                                    gap_post_dist=gap)        
             soft_seq = SoftSequence(
                 aa_posterior=post,
                 gap_posterior=self.node_likelihoods[anc],

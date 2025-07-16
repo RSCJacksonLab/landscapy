@@ -107,7 +107,7 @@ class BaseGraphLandscape(ABC):
 
             seq = make_sequence(model.sequence)
             rec = _Record(
-                seq=seq,
+                sequence=seq,
                 fitness=float(model.fitness),
                 gapped_arr=getattr(model, "gapped_arr", None),
                 ungapped_arr=getattr(model, "ungapped_arr", None),
@@ -281,8 +281,8 @@ class DirectedFitnessLandscape(BaseGraphLandscape):
     """
     
     def __init__(self,
-                 digraph: nx.DiGraph,
-                 sequences: List[BaseNumpySequence],
+                 digraph: nx.DiGraph = None,
+                 sequences: List[BaseNumpySequence] = None,
                  fitness_values: np.ndarray = None,
                  *,
                  laplacian: Union[Literal['directed'], None] = None,

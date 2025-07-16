@@ -60,7 +60,7 @@ class BaseNumpySequence(_C3Sequence):
             alphabet = sorted({*self._np})
         self.alphabet: List[str] = list(alphabet)
 
-        super().__init__("".join(self._np.tolist()), moltype=moltype) # Initialise Cogent3 Sequence class from string.
+        super().__init__("".join(self._np.tolist()))#, moltype=moltype) # Initialise Cogent3 Sequence class from string.
 
     # Legacy public attribute used by existing analyses
     # Provide a read‑only view named `sequence` so code that calls
@@ -70,12 +70,12 @@ class BaseNumpySequence(_C3Sequence):
     
     @property
     def sequence(self) -> np.ndarray:
-        """Legacy accessor – identical to :pyattr:`ndarray` (read‑only NumPy view)."""
+        """Legacy accessor - identical to :pyattr:`ndarray` (read only NumPy view)."""
         return self._np
 
     @property
     def ndarray(self) -> np.ndarray:
-        """A **view** (read‑only) of the internal 1‑D NumPy array."""
+        """A **view** (read only) of the internal 1D NumPy array."""
         return self._np
 
     # Provide legacy alias used by existing codebase
@@ -231,7 +231,7 @@ class BaseNumpySequence(_C3Sequence):
             filtered = np.hstack([filtered, post[keep_mask, gap_idx + 1 :]])
 
         # renormalise row–wise
-        filtered /= filtered.sum(axis=1, keepdims=True)
+        filtered = filtered / filtered.sum(axis=1, keepdims=True)
         return filtered
 
 class BinarySequence(BaseNumpySequence):
