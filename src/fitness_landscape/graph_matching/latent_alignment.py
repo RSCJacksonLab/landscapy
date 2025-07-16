@@ -268,18 +268,17 @@ class RJMCMCAligner:
         """
         O11 = O10 = O01 = O00 = 0
         for k, (pk, Wk) in enumerate(zip(self.perm, self.W)):
-            
-            # Ensure L is up-to-date for the calculation
-            Lk = self.L[np.ix_(pk, pk)]
-            A = (Wk > 0.5).astype(int)
-            O11 += (A & Lk).sum()
-            O10 += (A & ~Lk).sum()
-            O01 += (~A & Lk).sum()
-            O00 += (~A & ~Lk).sum()
-        
-        # Returns the log marginal likelihood, NOT the energy.
-        # Energy is computed on the `_energy` method.
+
+            A_bool = (Wk > 0.5)
+            Lk_bool = self.L[np.ix_(pk, pk)].astype(bool)
+
+            O11 += (A_bool & Lk_bool).sum()   # True positive (present in both)
+            O10 += (A_bool & ~Lk_bool).sum()  # False positive (present in A, not L)
+            O01 += (~A_bool & Lk_bool).sum()  # False negative (not in A, present in L)
+            O00 += (~A_bool & ~Lk_bool).sum() # True negative (not in either)
+
         return self.bb.log_marginal(O11, O10, O01, O00)
+        
 
     # weighted edges
     def _energy_weighted(self) -> float:
