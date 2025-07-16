@@ -88,14 +88,17 @@ class NormalGamma:
         mean = x.mean()
         ss   = ((x - mean) ** 2).sum()
         return (
-            0.5 * np.log(self.kappa0 / (self.kappa0 + n))
-            + self.alpha0 * np.log(self.beta0)
-            - (self.alpha0 + 0.5 * n) * np.log(
-                self.beta0 + 0.5 * ss + (self.kappa0 * n * (mean - self.mu0) ** 2) / (2 * (self.kappa0 + n))
-            )
-            + np.log(np.math.gamma(self.alpha0 + 0.5 * n))
-            - np.log(np.math.gamma(self.alpha0))
+        0.5 * np.log(self.kappa0 / (self.kappa0 + n))
+        + self.alpha0 * np.log(self.beta0)
+        - (self.alpha0 + 0.5 * n) * np.log(
+            self.beta0 + 0.5 * ss + (self.kappa0 * n * (mean - self.mu0) ** 2) / (2 * (self.kappa0 + n))
         )
+        + gammaln(self.alpha0 + 0.5 * n)
+        - gammaln(self.alpha0)
+    )
+
+
+
 
 
 class RJMCMCAligner:
@@ -161,6 +164,11 @@ class RJMCMCAligner:
         self.burn_in, self.samples, self.thin, self.birth_death_prob = burn_in, samples, thin, birth_death_prob
         self.birth_gamma = birth_prior_gamma
 
+        # Burn in housekeeping.
+        self._in_growth_phase = False
+        self.trace_E = []
+        self.trace_NL = []
+        
         # hyper‑priors
         self.bb = bernoulli_beta or BernoulliBeta()
         self.ng = normal_gamma or NormalGamma()
@@ -545,10 +553,13 @@ class RJMCMCAligner:
         
         total_steps = self.burn_in + self.samples * self.thin
         
-        self._in_growth_phase = True
         for step in range(total_steps):
-            if step == self.burn_in:
-                self._in_growth_phase = False
+            if step > self.burn_in:
+                self._in_growth_phase = True
+            
+            # Update trace
+            self.trace_E.append(cur_E)
+            self.trace_NL.append(self.NL)
 
             move_type = self.rng.random()
             accepted = False

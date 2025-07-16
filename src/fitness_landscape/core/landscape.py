@@ -63,6 +63,7 @@ class BaseGraphLandscape(ABC):
         self._records = {}
         self.graph_type = None,
         
+        self._res_emb_arr_key: str = 'residue_emb_arr'
         self._emb_arr_key: str = 'emb_arr'
 
     def get_fitness(self,
@@ -134,8 +135,15 @@ class BaseGraphLandscape(ABC):
                                                 batch_size=batch_size)
         
         # Iterate through nodes and update data attributes.
-        for node, arr in zip(self.graph.nodes(), emb_arr):
-            self.graph[node][self._emb_arr_key] = arr
+        for node_identifier, embedding_array in zip(self.graph.nodes(), emb_arr):
+            # Update attribute in the node data.
+            
+            # Store residue-wise embeddings.
+            self.graph.nodes[node_identifier][self._res_emb_arr_key] = embedding_array
+            
+            # Pool and store sequence-wise embeddings.
+            pooled_array = np.mean(embedding_array, axis=0)
+            self.graph.nodes[node_identifier][self._emb_arr_key] = pooled_array
 
     @abstractmethod
     def _to_graph(self):
