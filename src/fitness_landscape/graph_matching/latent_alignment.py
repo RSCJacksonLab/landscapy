@@ -143,7 +143,7 @@ class RJMCMCAligner:
     def __init__(self,
                  graphs: List[nx.DiGraph],
                  *,
-                 alpha: float = 0,
+                 alpha: float = 0.5,
                  bernoulli_beta: Optional[BernoulliBeta] = None,
                  normal_gamma: Optional[NormalGamma] = None,
                  birth_prior_gamma: float = 0.05,
@@ -219,7 +219,7 @@ class RJMCMCAligner:
                     pk[i] = free_slots.pop(0)
 
         # first blueprint 
-        self.L = self._majority_blueprint() #TODO: Base off IsoRank blueprint. 
+        self.L = self._gibbs_sample_blueprint() #TODO: Base off IsoRank blueprint. 
 
         # bookkeeping of MCMC trace
         self._stored_L: List[np.ndarray] = []
@@ -244,21 +244,38 @@ class RJMCMCAligner:
         
         return -size_penalty
 
+    def _energy_attributes(self) -> float:
+        """
+        """
+        attr_log_likelihood = 0.0
+        for k in range(self.K):
+            cos_sim_matrix = self._attr_cosine(k)
+            for node_idx, latent_slot in enumerate(self.perm[k]):
+                if latent_slot >= 0:
+                    attr_log_likelihood += cos_sim_matrix[node_idx, latent_slot]
+        return attr_log_likelihood
+
     def _energy(self) -> float:
         """
         Method to compute statistical energy as the negative log
-        posterior. The negative Log Posterior is equal to
-        `-(Log-Likelihood + Log-Prior)`, where log prior is defined
-        outside of the energy functions.
+        posterior, now balancing topology and attribute similarity.
         """
         if self.binary_mode:
-            log_likelihood = self._energy_binary()
+            topo_log_likelihood = self._energy_binary()
         else:
-            log_likelihood = self._energy_weighted()
+            topo_log_likelihood = self._energy_weighted()
 
+        attr_log_likelihood = self._energy_attributes()
+
+        # Combine the likelihoods using alpha.
+        # alpha = 1.0 means topology only.
+        # alpha = 0.0 means attributes only.
+        if self.alpha < 0.0 or self.alpha > 1.0:
+            raise ValueError("alpha must be between 0 and 1")
+
+        log_likelihood = (self.alpha * topo_log_likelihood) + ((1 - self.alpha) * attr_log_likelihood)
         log_prior = self._log_prior()
 
-        # The energy is the negative log posterior.
         return -(log_likelihood + log_prior)
 
     # binary edges
@@ -298,6 +315,7 @@ class RJMCMCAligner:
         # Returns the log marginal likelihood, NOT the energy.
         return logp
 
+    # TODO: remove method when confirmed that Gibbs sampling is better.
     #  Blueprint update and attribute similarity helpers
     def _majority_blueprint(self) -> np.ndarray:
         """
@@ -318,6 +336,54 @@ class RJMCMCAligner:
             counts += tmp
         L[counts > self.K / 2] = 1
         # Forbid self edges
+        np.fill_diagonal(L, 0)
+        return L
+    
+    # Theoretically stronger Gibb's sampling blueprint. Don't use _majority_blueprint.
+
+    def _gibbs_sample_blueprint(self) -> np.ndarray:
+        """
+        """
+        L = np.zeros((self.NL, self.NL), dtype=int)
+
+        # Iterate over the upper triangle of the adjacency matrix
+        for i in range(self.NL):
+            for j in range(i + 1, self.NL):
+            
+                o11, o10, o01, o00 = 0, 0, 0, 0
+
+                # Aggregate evidence from all observed graphs
+                for k, (pk, Wk) in enumerate(zip(self.perm, self.W)):
+                    node_i_idx = np.where(pk == i)[0]
+                    node_j_idx = np.where(pk == j)[0]
+
+                    edge_exists_in_A = False
+                    if node_i_idx.size > 0 and node_j_idx.size > 0:
+                        # If both slots are occupied in this graph, check for the edge
+                        node_i, node_j = node_i_idx[0], node_j_idx[0]
+                        edge_exists_in_A = Wk[node_i, node_j] > 0.5
+
+                    if edge_exists_in_A:
+                        o11 += 1  # for the L_ij=1 model
+                        o10 += 1  # for the L_ij=0 model
+                    else:
+                        # This is a "success" if we hypothesize L_ij=0.
+                        o01 += 1  # for the L_ij=1 model
+                        o00 += 1  # for the L_ij=0 model
+
+                # Calculate log marginals.
+                log_p_D_given_Lij1 = self.bb.log_marginal(o11, 0, o01, 0)
+                log_p_D_given_Lij0 = self.bb.log_marginal(0, o10, 0, o00)
+
+                log_odds = log_p_D_given_Lij1 - log_p_D_given_Lij0
+                prob_edge_exists = 1.0 / (1.0 + np.exp(-log_odds))
+                
+                if self.rng.random() < prob_edge_exists:
+                    # TODO: update logic for directed graph.
+
+                    L[i, j] = 1
+                    L[j, i] = 1
+
         np.fill_diagonal(L, 0)
         return L
 
@@ -547,7 +613,8 @@ class RJMCMCAligner:
         Main method to sample the MCMC.
         """
         # Initial blueprint and energy calculation
-        self.L = self._majority_blueprint()
+        
+        self.L = self._gibbs_sample_blueprint()
         cur_E = self._energy()
         
         total_steps = self.burn_in + self.samples * self.thin
@@ -615,7 +682,8 @@ class RJMCMCAligner:
                     
                     # blueprint MUST be re-calculated based on the new
                     # permutation before calculating the energy of the proposed state.
-                    self.L = self._majority_blueprint()
+                    
+                    self.L = self._gibbs_sample_blueprint()
                     new_E = self._energy()
                     
                     # Standard Metropolis-Hastings acceptance criterion
@@ -628,7 +696,7 @@ class RJMCMCAligner:
                     else:
                         # If rejected, revert the permutation to its previous state.
                         self.perm[k] = prev_pk
-                        self.L = self._majority_blueprint()
+                        self.L = self._gibbs_sample_blueprint()
 
             # Store the state after burn-in and thinning
             if step >= self.burn_in and (step - self.burn_in) % self.thin == 0:
@@ -637,19 +705,50 @@ class RJMCMCAligner:
                     self._stored_pi[k].append(self.perm[k].copy())
 
     # Main public methods
+    # def latent_blueprint_graph(self) -> nx.DiGraph:
+    #     """
+    #     Method to return the latent blueprint graph as the mean of the
+    #     sampled posterior.
+
+    #     Returns
+    #     -------
+    #     nx.DiGraph
+    #         The mean of the latent posterior. 
+    #     """
+    #     if not self._stored_L:
+    #         raise RuntimeError("Run sample() first.")
+    #     Lavg = np.mean(self._stored_L, axis=0)
+    #     Lbin = (Lavg >= 0.5).astype(int)
+    #     return nx.from_numpy_array(Lbin, create_using=nx.DiGraph)
+
     def latent_blueprint_graph(self) -> nx.DiGraph:
         """
-        Method to return the latent blueprint graph as the mean of the
-        sampled posterior.
+        Method to return the latent blueprint graph by correctly averaging
+        the posterior samples, even when the number of latent nodes changes.
 
         Returns
         -------
         nx.DiGraph
-            The mean of the latent posterior. 
+            The mean of the latent posterior.
         """
         if not self._stored_L:
             raise RuntimeError("Run sample() first.")
-        Lavg = np.mean(self._stored_L, axis=0)
+
+        max_nl = 0
+        for l_matrix in self._stored_L:
+            if l_matrix.shape[0] > max_nl:
+                max_nl = l_matrix.shape[0]
+
+        if max_nl == 0:
+            return nx.DiGraph()
+
+        tally_matrix = np.zeros((max_nl, max_nl))
+        num_samples = len(self._stored_L)
+        for l_matrix in self._stored_L:
+            current_nl = l_matrix.shape[0]
+            tally_matrix[:current_nl, :current_nl] += l_matrix
+
+        Lavg = tally_matrix / num_samples
         Lbin = (Lavg >= 0.5).astype(int)
         return nx.from_numpy_array(Lbin, create_using=nx.DiGraph)
 
@@ -681,6 +780,50 @@ class RJMCMCAligner:
                 Pkl /= len(self._stored_pi[k])
                 probs[(k, l)] = Pkl
         return probs
+    
+    # Mapping of latent slot to input nodes.
+    def get_node_to_latent_mapping(self) -> Dict[int, np.ndarray]:
+            """
+            """
+            if not any(self._stored_pi):
+                raise RuntimeError("Run sample() first.")
+
+            # Determine the maximum number of latent nodes to define the matrix size
+            max_nl = 0
+            for l_matrix in self._stored_L:
+                if l_matrix.shape[0] > max_nl:
+                    max_nl = l_matrix.shape[0]
+
+            if max_nl == 0:
+                return {k: np.array([]) for k in range(self.K)}
+
+            num_samples = len(self._stored_pi[0])
+        
+            prob_mapping = {}
+
+            # For each original graph
+            for k in range(self.K):
+                num_nodes_in_k = self.n[k]
+                # Create a tally matrix: rows are original nodes, columns are latent slots
+                tally_matrix = np.zeros((num_nodes_in_k, max_nl))
+
+                # Go through each stored sample
+                for s in range(num_samples):
+                    # Get the permutation for this graph at this sample step
+                    pk = self._stored_pi[k][s]
+                    
+                    # For each node in the original graph
+                    for node_idx, latent_slot in enumerate(pk):
+                        if latent_slot >= 0:
+                            # Increment the count for this node mapping to this latent slot
+                            tally_matrix[node_idx, latent_slot] += 1
+                
+                # Normalize the tally by the number of samples to get the probability
+                prob_mapping[k] = tally_matrix / num_samples
+                
+            return prob_mapping
+
+
 
 #TODO: update to FAISS to scale > 1e4
 def auto_anchors_by_cosine( graphs: List[nx.DiGraph],
