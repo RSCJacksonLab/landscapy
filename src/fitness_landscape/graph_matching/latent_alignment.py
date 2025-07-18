@@ -270,8 +270,31 @@ class RJMCMCAligner:
                         break
                     pk[i] = free_slots.pop(0)
 
+        def _compute_Ck(pk: np.ndarray,
+                        Wk: csr_matrix) -> np.ndarray:
+            """
+            """
+            NL = self.NL
+            rows, cols = Wk.nonzero()
+            ik = pk[rows]; jk = pk[cols]
+            mask = (ik >= 0) & (jk >= 0)
+            flat = ik[mask] * NL + jk[mask]
+            return np.bincount(flat, minlength=NL*NL).reshape(NL, NL)
+
+        self._compute_Ck = _compute_Ck
+        
+        # per‐graph counts
+        self.C_k: List[np.ndarray] = [
+            self._compute_Ck(pk, Wk) for pk, Wk in zip(self.perm, self.W)
+        ]
+        
+        # global sum (shape‐safe rebuild)
+        self.C_global = self.C_k[0].copy()
+        for Ck in self.C_k[1:]:
+            self.C_global += Ck
+
         # first blueprint 
-        self.L = self._gibbs_sample_blueprint() #TODO: Base off IsoRank blueprint. 
+        self.L = self._gibbs_sample_blueprint()
 
         # bookkeeping of MCMC trace
         self._stored_L: List[np.ndarray] = []
@@ -348,7 +371,8 @@ class RJMCMCAligner:
     def _energy_binary(self) -> float:
         """
         Method to compute the binary edge log-likelihood using the
-        Bernoulli-beta prior. Optimized for sparse matrices.
+        Bernoulli-beta prior. Uses precomputed global counts to scale
+        in O(1).
         
         Returns
         -------
@@ -356,25 +380,10 @@ class RJMCMCAligner:
             The log likelihood of the binary edges given the latent
             graph.
         """
-        o11 = 0
-        o10 = 0
-        NL = self.NL
-        for pk, Wk in zip(self.perm, self.W):
-
-            # only iterate actual edges
-            rows, cols = Wk.nonzero()
-            ik = pk[rows]
-            jk = pk[cols]
-
-            # only count if both endpoints are assigned
-            mask = (ik >= 0) & (jk >= 0)
-            ik = ik[mask]
-            jk = jk[mask]
-
-            # check blueprint adjacency
-            hit = self.L[ik, jk].astype(bool)
-            o11 += int(hit.sum())
-            o10 += int((~hit).sum())
+        # use precomputed global counts
+        M   = int(self.C_global.sum())
+        o11 = int((self.C_global * self.L).sum()) # kept edges
+        o10 = M - o11 # dropped edges
         return self.bb.log_marginal_edges(o11, o10)
 
     
@@ -654,7 +663,27 @@ class RJMCMCAligner:
 
         # assign permutation
         self.perm[k][i] = s
+
+        # First, recompute the count matrix for the graph 'k' where the birth occurred.
+        # This will be created with the new, larger dimension (self.NL).
+        self.C_k[k] = self._compute_Ck(self.perm[k], self.W[k])
+        
+        # Next, pad all *other* per-graph count matrices to match the new dimension.
+        for idx in range(len(self.C_k)):
+            if self.C_k[idx].shape[0] < self.NL:
+                self.C_k[idx] = np.pad(self.C_k[idx], ((0, 1), (0, 1)), constant_values=0)
+
+        # Now that all matrices in self.C_k are consistent, rebuild the global sum.
+        self.C_global = np.sum(self.C_k, axis=0)
+
+        # sanity check
+        for idx, Ck in enumerate(self.C_k):
+            assert Ck.shape == (self.NL, self.NL), (
+                f"_birth: C_k[{idx}] has shape {Ck.shape}, expected {(self.NL,self.NL)}"
+            )
+        
         return True
+
 
     def _death(self) -> bool:
         """
@@ -678,6 +707,23 @@ class RJMCMCAligner:
             mask = pk == s
             pk[mask] = -1
             pk[pk > s] -= 1
+
+        # Shrink all per-graph count matrices to new NL
+        for idx in range(len(self.C_k)):
+            Ck = self.C_k[idx]
+            # drop row s and col s
+            self.C_k[idx] = np.delete(np.delete(Ck, s, axis=0), s, axis=1)
+
+        # rebuild global sum in a shape-safe way
+        self.C_global = self.C_k[0].copy()
+        for Ck in self.C_k[1:]:
+            self.C_global += Ck
+
+        # sanity check
+        for idx, Ck in enumerate(self.C_k):
+            assert Ck.shape == (self.NL, self.NL), (
+                f"_death: C_k[{idx}] has shape {Ck.shape}, expected {(self.NL,self.NL)}"
+            )
         return True
 
     #  Convenience helpers
@@ -760,7 +806,8 @@ class RJMCMCAligner:
                     self.proposal_counts["birth"] += 1 
                     
                     # Birth proposal
-                    prev_state = (self.NL, [p.copy() for p in self.perm], self.L.copy())
+                    prev_state = (self.NL, [p.copy() for p in self.perm], self.L.copy(), [c.copy() for c in self.C_k], self.C_global.copy())
+
                     if self._birth():
                         
                         # The blueprint is updated implicitly within _birth resampling.
@@ -776,12 +823,14 @@ class RJMCMCAligner:
                         else:
                             
                             # Revert state if not accepted
-                            self.NL, self.perm, self.L = prev_state
+                            self.NL, self.perm, self.L, self.C_k, self.C_global = prev_state
+
                 else:
                     
                     # Death proposal
                     self.proposal_counts["death"] += 1
-                    prev_state = (self.NL, [p.copy() for p in self.perm], self.L.copy())
+                    prev_state = (self.NL, [p.copy() for p in self.perm], self.L.copy(), [c.copy() for c in self.C_k], self.C_global.copy())
+
                     if self._death():
                         
                         # The blueprint is updated implicitly within _death
@@ -796,7 +845,7 @@ class RJMCMCAligner:
                         else:
                             
                             # Revert state if not accepted
-                            self.NL, self.perm, self.L = prev_state
+                            self.NL, self.perm, self.L, self.C_k, self.C_global = prev_state
             else:
                 # Permutation move proposal
                 k = self.rng.integers(self.K)
@@ -811,15 +860,22 @@ class RJMCMCAligner:
                     prop = self._proposal_resample(k)
 
                 if prop is not None:
-                    # Store the previous state
+
+                    # Use global counts to scale in O(1)
                     prev_pk = self.perm[k].copy()
+                    prev_Ck = self.C_k[k].copy()
+
+                    new_pk = prop if isinstance(prop, np.ndarray) else prop[2]
+                    # recompute only graph k's counts
+                    new_Ck = self._compute_Ck(new_pk, self.W[k])
+                    # update the global sum
+                    self.C_global += (new_Ck - prev_Ck)
+
+                    # tentatively install the new permutation amd counts
+                    self.perm[k] = new_pk
+                    self.C_k[k]  = new_Ck
                     
-                    # Propose the new permutation
-                    self.perm[k] = prop if isinstance(prop, np.ndarray) else prop[2]
-                    
-                    # blueprint MUST be re-calculated based on the new
-                    # permutation before calculating the energy of the proposed state.
-                    
+                    # (re‐)sample blueprint if needed
                     self.L = self._gibbs_sample_blueprint()
                     new_E = self._energy()
                     
@@ -840,9 +896,12 @@ class RJMCMCAligner:
                             self.accept_counts["resample"] += 1
                     
                     else:
-                        # If rejected, revert the permutation to its previous state.
-                        self.perm[k] = prev_pk
+                        # revert swap and counts on rejection
+                        self.perm[k]   = prev_pk
+                        self.C_k[k]    = prev_Ck
+                        self.C_global -= (new_Ck - prev_Ck)
                         self.L = self._gibbs_sample_blueprint()
+
 
             # Store the state after burn-in and thinning
             if step >= self.burn_in and (step - self.burn_in) % self.thin == 0:
