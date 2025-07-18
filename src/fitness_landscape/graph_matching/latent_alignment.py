@@ -170,6 +170,8 @@ class RJMCMCAligner:
         The edge attribute dictionary  weight key.
     emb_key : str, default=`emb_arr`
         The node attribute dictionary embedding array key.
+    directed : bool, default=`True`
+        Boolean to indicate whether the graphs are directed.
     seed : int
         The random state.
     """
@@ -189,6 +191,7 @@ class RJMCMCAligner:
                  cosine_anchor_threshold: float = 0.95,
                  weight_key: str = 'weight',
                  emb_key: str = 'emb_arr',
+                 directed: bool = True,
                  seed: Union[int, None] = None) -> None:
         
         self.rng = np.random.default_rng(seed)
@@ -197,6 +200,7 @@ class RJMCMCAligner:
         self.K = len(graphs)
         self.burn_in, self.samples, self.thin, self.birth_death_prob = burn_in, samples, thin, birth_death_prob
         self.birth_gamma = birth_prior_gamma
+        self.directed = directed
 
         # Burn in housekeeping.
         self._in_growth_phase = False
@@ -410,7 +414,8 @@ class RJMCMCAligner:
     def _gibbs_sample_blueprint(self) -> np.ndarray:
         """
         Method to sample the blueprint graph using Gibbs sampling. 
-        Theoretically stronger than the majority consensus.
+        Theoretically stronger than the majority consensus. Different
+        methods implemented for directed and undirected graphs.
 
         Returns
         -------
@@ -418,23 +423,45 @@ class RJMCMCAligner:
             The sampled adjacency matrix of the latent blueprint graph.
         """
         L = np.zeros((self.NL, self.NL), dtype=int)
-        for i in range(self.NL):
-            for j in range(i+1, self.NL):
-                # count how many input graphs actually have that edge
-                m = 0
-                for pk, Wk in zip(self.perm, self.W):
-                    idx_i = np.where(pk == i)[0]
-                    idx_j = np.where(pk == j)[0]
-                    if idx_i.size and idx_j.size and Wk[idx_i[0], idx_j[0]] > 0.5:
-                        m += 1
+        
+        # Undirected edges.
+        if not self.directed:
+            for i in range(self.NL):
+                for j in range(i+1, self.NL):
+                    # count how many input graphs actually have that edge
+                    m = 0
+                    for pk, Wk in zip(self.perm, self.W):
+                        idx_i = np.where(pk == i)[0]
+                        idx_j = np.where(pk == j)[0]
+                        if idx_i.size and idx_j.size and Wk[idx_i[0], idx_j[0]] > 0.5:
+                            m += 1
 
-                # posterior edge‐prob under Beta(alpha1, alpha0)
-                a_post = self.bb.alpha1 + m
-                b_post = self.bb.alpha0 + (self.K - m)
-                p_keep = a_post / (a_post + b_post)
+                    # posterior edge‐prob under Beta(alpha1, alpha0)
+                    a_post = self.bb.alpha1 + m
+                    b_post = self.bb.alpha0 + (self.K - m)
+                    p_keep = a_post / (a_post + b_post)
 
-                if self.rng.random() < p_keep:
-                    L[i, j] = L[j, i] = 1
+                    if self.rng.random() < p_keep:
+                        L[i, j] = L[j, i] = 1
+        
+        # Directed edges.
+        else:
+            for i in range(self.NL):
+                for j in range(self.NL):
+                    if i == j:
+                        continue
+                    m_ij = 0
+                    for pk, Wk in zip(self.perm, self.W):
+                        idx_i = np.where(pk == i)[0]
+                        idx_j = np.where(pk == j)[0]
+                        if idx_i.size and idx_j.size and Wk[idx_i[0], idx_j[0]] > 0.5:
+                            m_ij += 1
+                # Beta‐posterior
+                    a_post = self.bb.alpha1 + m_ij
+                    b_post = self.bb.alpha0 + (self.K - m_ij)
+                    p_keep = a_post / (a_post + b_post)
+                    if self.rng.random() < p_keep:
+                        L[i, j] = 1
 
         np.fill_diagonal(L, 0)
         return L
