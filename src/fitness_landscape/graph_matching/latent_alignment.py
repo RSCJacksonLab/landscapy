@@ -7,7 +7,8 @@ import numpy as np
 import networkx as nx
 from scipy.special import gammaln
 from .isorank import cosine_similarity_matrix
-import scipy.optimize  # heavy but only occasional
+import scipy.optimize
+import numba
 
 # Hyper parameter containers
 @dataclass
@@ -211,6 +212,10 @@ class RJMCMCAligner:
         self.accept_counts = {"swap":0, "cycle3":0, "resample":0, "birth":0, "death":0}
         self.proposal_counts = self.accept_counts.copy()
 
+        # Chain book keeping.
+        self._stored_L: List[np.ndarray] = []
+        self._stored_pi: List[List[np.ndarray]] = [[] for _ in range(self.K)]
+
         
         # hyper‑priors
         self.bb = bernoulli_beta or BernoulliBeta()
@@ -270,38 +275,42 @@ class RJMCMCAligner:
                         break
                     pk[i] = free_slots.pop(0)
 
-        def _compute_Ck(pk: np.ndarray,
-                        Wk: csr_matrix) -> np.ndarray:
-            """
-            """
-            NL = self.NL
-            rows, cols = Wk.nonzero()
-            ik = pk[rows]; jk = pk[cols]
-            mask = (ik >= 0) & (jk >= 0)
-            flat = ik[mask] * NL + jk[mask]
-            return np.bincount(flat, minlength=NL*NL).reshape(NL, NL)
-
-        self._compute_Ck = _compute_Ck
-        
-        # per‐graph counts
+        # per-graph counts
         self.C_k: List[np.ndarray] = [
             self._compute_Ck(pk, Wk) for pk, Wk in zip(self.perm, self.W)
         ]
-        
-        # global sum (shape‐safe rebuild)
-        self.C_global = self.C_k[0].copy()
-        for Ck in self.C_k[1:]:
-            self.C_global += Ck
 
-        # first blueprint 
-        self.L = self._gibbs_sample_blueprint()
+        # global sum (vectorized)
+        self.C_global = np.sum(self.C_k, axis=0)
 
-        # bookkeeping of MCMC trace
-        self._stored_L: List[np.ndarray] = []
-        self._stored_pi: List[List[np.ndarray]] = [[] for _ in range(self.K)]
+        # Initialize L as an empty blueprint.
+        self.L = np.zeros((self.NL, self.NL), dtype=int)
+
+    # Compute counts with JIT-compatible static method.
+    @staticmethod
+    @numba.jit(nopython=True)
+    def _compute_Ck_static(pk: np.ndarray,
+                           rows: np.ndarray,
+                           cols: np.ndarray, NL: int) -> np.ndarray:
+        """
+        """
+        ik = pk[rows]
+        jk = pk[cols]
+        mask = (ik >= 0) & (jk >= 0)
+        flat = ik[mask] * NL + jk[mask]
+        # np.bincount is tricky with Numba, so we simulate it with a loop
+        counts = np.zeros(NL * NL, dtype=np.int64)
+        for i in flat:
+            counts[i] += 1
+        return counts.reshape(NL, NL)
+
+    def _compute_Ck(self, pk: np.ndarray, Wk: csr_matrix) -> np.ndarray:
+        """
+        """
+        rows, cols = Wk.nonzero()
+        return self._compute_Ck_static(pk, rows, cols, self.NL)
 
     #  Likelihood / posterior helpers
-
     def _log_prior(self) -> float:
         """
         Calculates the log-prior probability of the blueprint graph.
@@ -331,10 +340,22 @@ class RJMCMCAligner:
         """
         attr_log_likelihood = 0.0
         for k in range(self.K):
+            
+            # Get the permutation and cosine similarity for the current graph
+            pk = self.perm[k]
             cos_sim_matrix = self._attr_cosine(k)
-            for node_idx, latent_slot in enumerate(self.perm[k]):
-                if latent_slot >= 0:
-                    attr_log_likelihood += cos_sim_matrix[node_idx, latent_slot]
+
+            # Create a mask for assigned nodes (slot >= 0)
+            assigned_mask = pk >= 0
+
+            # Get the indices of the assigned nodes
+            node_indices = np.where(assigned_mask)[0]
+
+            # Get the corresponding latent slot assignments
+            slot_indices = pk[assigned_mask]
+
+            attr_log_likelihood += cos_sim_matrix[node_indices, slot_indices].sum()
+
         return attr_log_likelihood
 
     def _energy(self) -> float:
@@ -450,24 +471,8 @@ class RJMCMCAligner:
             The sampled adjacency matrix of the latent blueprint graph.
         """
         NL, K = self.NL, self.K
-        C = np.zeros((NL, NL), dtype=int)
-
-        for pk, Wk in zip(self.perm, self.W):
-            # nonzero() only visits actual edges
-            rows, cols = Wk.nonzero()
-            ik = pk[rows]
-            jk = pk[cols]
-            # only count if both endpoints assigned
-            mask = (ik >= 0) & (jk >= 0)
-            flat = ik[mask] * NL + jk[mask]
-            
-            # bincount over flattened (i,j) pairs
-            counts = np.bincount(flat, minlength=NL*NL).reshape(NL, NL)
-            
-            if not self.directed:
-                # force symmetry
-                counts = np.triu(counts, 1) + np.triu(counts, 1).T
-            C += counts
+        # Use the pre-computed global counts
+        C = self.C_global 
 
         # posterior edge‐keep probabilities
         a_post = self.bb.alpha1 + C
