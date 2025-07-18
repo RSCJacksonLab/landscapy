@@ -422,46 +422,37 @@ class RJMCMCAligner:
         L : np.ndarray
             The sampled adjacency matrix of the latent blueprint graph.
         """
-        L = np.zeros((self.NL, self.NL), dtype=int)
-        
-        # Undirected edges.
-        if not self.directed:
-            for i in range(self.NL):
-                for j in range(i+1, self.NL):
-                    # count how many input graphs actually have that edge
-                    m = 0
-                    for pk, Wk in zip(self.perm, self.W):
-                        idx_i = np.where(pk == i)[0]
-                        idx_j = np.where(pk == j)[0]
-                        if idx_i.size and idx_j.size and Wk[idx_i[0], idx_j[0]] > 0.5:
-                            m += 1
+        NL, K = self.NL, self.K
+        # Build a count matrix C where
+        # C[i,j] = number of graphs in which latent‐slot i to j is observed.
+        C = np.zeros((NL, NL), dtype=int)
+        for pk, Wk in zip(self.perm, self.W):
+            # permutation pk: shape (n_k,) with values in [0..NL-1]
+            # (n_k x NL) one‐hot
+            P = np.zeros((pk.size, NL), dtype=int)
+            rows = np.arange(pk.size)
+            P[rows, pk] = 1
 
-                    # posterior edge‐prob under Beta(alpha1, alpha0)
-                    a_post = self.bb.alpha1 + m
-                    b_post = self.bb.alpha0 + (self.K - m)
-                    p_keep = a_post / (a_post + b_post)
+            A = (Wk > 0.5).astype(int)  # adjacency in graph k
+            if self.directed:
+                C += P.T @ A @ P
+            else:
+                # make A symmetric and only accumulate upper‐triangular once
+                A2 = np.triu(A, 1) + np.triu(A, 1).T
+                C += P.T @ A2 @ P
 
-                    if self.rng.random() < p_keep:
-                        L[i, j] = L[j, i] = 1
-        
-        # Directed edges.
+        # Compute posterior keep‐probabilities for each (i,j)
+        a_post = self.bb.alpha1 + C
+        b_post = self.bb.alpha0 + (K - C)
+        P_keep = a_post / (a_post + b_post)
+
+        # Sample edges
+        U = self.rng.random((NL, NL))
+        if self.directed:
+            L = (U < P_keep).astype(int)
         else:
-            for i in range(self.NL):
-                for j in range(self.NL):
-                    if i == j:
-                        continue
-                    m_ij = 0
-                    for pk, Wk in zip(self.perm, self.W):
-                        idx_i = np.where(pk == i)[0]
-                        idx_j = np.where(pk == j)[0]
-                        if idx_i.size and idx_j.size and Wk[idx_i[0], idx_j[0]] > 0.5:
-                            m_ij += 1
-                # Beta‐posterior
-                    a_post = self.bb.alpha1 + m_ij
-                    b_post = self.bb.alpha0 + (self.K - m_ij)
-                    p_keep = a_post / (a_post + b_post)
-                    if self.rng.random() < p_keep:
-                        L[i, j] = 1
+            mask = np.triu(U < P_keep, 1)
+            L = mask.astype(int) + mask.T.astype(int)
 
         np.fill_diagonal(L, 0)
         return L
