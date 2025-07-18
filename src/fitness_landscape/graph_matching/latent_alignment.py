@@ -477,24 +477,31 @@ class RJMCMCAligner:
             embeddings in the blueprint graph and the observed node
             embeddings.
         """
-        pk = self.perm[k]
-        Xk = self.X[k]
-        d = Xk.shape[1]
-        blue_mu = np.zeros((self.NL, d))
-        cnt = np.zeros(self.NL)
-        for v, slot in enumerate(pk):
-            if slot >= 0:
-                blue_mu[slot] += Xk[v]
-                cnt[slot] += 1
-        
-        # Avoid division by zero for empty slots
-        cnt[cnt == 0] = 1
-        blue_mu /= cnt[:, None]
-        
-        # Add epsilon for numerical stability
+        pk, Xk = self.perm[k], self.X[k] # (n_k,), (n_k, d)
+        NL, d = self.NL, Xk.shape[1]
+
+        # Accumulate slot‐means in one pass
+        blue_mu = np.zeros((NL, d), float)
+        counts  = np.zeros(NL,    int)
+
+        mask = pk >= 0
+        np.add.at(blue_mu, pk[mask], Xk[mask])
+        counts[pk[mask]] += 1
+
+        # avoid division by zero
+        counts = counts.astype(float)
+        counts[counts == 0] = 1.0
+        blue_mu /= counts[:, None] # (NL, d)
+
+        # Normalize
         x_norm = np.linalg.norm(Xk, axis=1, keepdims=True) + _eps
         b_norm = np.linalg.norm(blue_mu, axis=1, keepdims=True) + _eps
-        return (Xk / x_norm) @ (blue_mu / b_norm).T
+
+        Xn = Xk / x_norm # (n_k, d)
+        Bn = blue_mu / b_norm # (NL, d)
+
+        # Dot‐product all at once
+        return Xn @ Bn.T 
 
     #  MCMC moves
     # elementary swap
