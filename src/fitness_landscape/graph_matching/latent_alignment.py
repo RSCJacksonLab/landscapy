@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from scipy.sparse import csr_matrix
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union, Dict
 import numpy as np
@@ -224,13 +225,18 @@ class RJMCMCAligner:
         self.V: List[List] = [list(G.nodes()) for G in graphs]
         self.n: List[int] = [len(vs) for vs in self.V]
 
-        # adjacency / weight matrices
-        self.W: List[np.ndarray] = []  # may be binary or real‑valued
+        # adjacency / weight matrices — store binary adjacency in CSR for sparse ops        
+        self.W: List[csr_matrix] = []
         for G, vs in zip(graphs, self.V):
-
-            Wk = nx.to_numpy_array(G, nodelist=vs, weight=weight_key, nonedge=0.0)
-            self.W.append(Wk)
-        self.binary_mode = all(np.isin(Wk, [0.0, 1.0]).all() for Wk in self.W)
+            dense = nx.to_numpy_array(G, nodelist=vs, weight=weight_key, nonedge=0.0)
+            if np.isin(dense, [0.0,1.0]).all():
+                binarized = (dense > 0.5).astype(np.int8)
+            else:
+                binarized = (dense > 0).astype(np.int8)
+            self.W.append(csr_matrix(binarized))
+        
+        # everything in W is now 0/1 CSR
+        self.binary_mode = True   
 
         # embeddings
         self.X = [np.vstack([np.asarray(G.nodes[v][emb_key], float) for v in vs]) for G, vs in zip(graphs, self.V)]
@@ -342,7 +348,7 @@ class RJMCMCAligner:
     def _energy_binary(self) -> float:
         """
         Method to compute the binary edge log-likelihood using the
-        Bernoulli-beta prior.
+        Bernoulli-beta prior. Optimized for sparse matrices.
         
         Returns
         -------
@@ -350,15 +356,27 @@ class RJMCMCAligner:
             The log likelihood of the binary edges given the latent
             graph.
         """
-        # only look at present‐edge counts
         o11 = 0
         o10 = 0
+        NL = self.NL
         for pk, Wk in zip(self.perm, self.W):
-            A = (Wk > 0.5)
-            Lk = self.L[np.ix_(pk, pk)].astype(bool)
-            o11 += (A & Lk).sum()      # present in both
-            o10 += (A & ~Lk).sum()     # present in A, missing in L
+
+            # only iterate actual edges
+            rows, cols = Wk.nonzero()
+            ik = pk[rows]
+            jk = pk[cols]
+
+            # only count if both endpoints are assigned
+            mask = (ik >= 0) & (jk >= 0)
+            ik = ik[mask]
+            jk = jk[mask]
+
+            # check blueprint adjacency
+            hit = self.L[ik, jk].astype(bool)
+            o11 += int(hit.sum())
+            o10 += int((~hit).sum())
         return self.bb.log_marginal_edges(o11, o10)
+
     
     # weighted edges
     def _energy_weighted(self) -> float:
@@ -423,36 +441,37 @@ class RJMCMCAligner:
             The sampled adjacency matrix of the latent blueprint graph.
         """
         NL, K = self.NL, self.K
-        # Build a count matrix C where
-        # C[i,j] = number of graphs in which latent‐slot i to j is observed.
         C = np.zeros((NL, NL), dtype=int)
+
         for pk, Wk in zip(self.perm, self.W):
-            # permutation pk: shape (n_k,) with values in [0..NL-1]
-            # (n_k x NL) one‐hot
-            P = np.zeros((pk.size, NL), dtype=int)
-            rows = np.arange(pk.size)
-            P[rows, pk] = 1
+            # nonzero() only visits actual edges
+            rows, cols = Wk.nonzero()
+            ik = pk[rows]
+            jk = pk[cols]
+            # only count if both endpoints assigned
+            mask = (ik >= 0) & (jk >= 0)
+            flat = ik[mask] * NL + jk[mask]
+            
+            # bincount over flattened (i,j) pairs
+            counts = np.bincount(flat, minlength=NL*NL).reshape(NL, NL)
+            
+            if not self.directed:
+                # force symmetry
+                counts = np.triu(counts, 1) + np.triu(counts, 1).T
+            C += counts
 
-            A = (Wk > 0.5).astype(int)  # adjacency in graph k
-            if self.directed:
-                C += P.T @ A @ P
-            else:
-                # make A symmetric and only accumulate upper‐triangular once
-                A2 = np.triu(A, 1) + np.triu(A, 1).T
-                C += P.T @ A2 @ P
-
-        # Compute posterior keep‐probabilities for each (i,j)
+        # posterior edge‐keep probabilities
         a_post = self.bb.alpha1 + C
         b_post = self.bb.alpha0 + (K - C)
         P_keep = a_post / (a_post + b_post)
 
-        # Sample edges
+        # vectorized Bernoulli draws
         U = self.rng.random((NL, NL))
         if self.directed:
             L = (U < P_keep).astype(int)
         else:
-            mask = np.triu(U < P_keep, 1)
-            L = mask.astype(int) + mask.T.astype(int)
+            m = np.triu(U < P_keep, 1)
+            L = m.astype(int) + m.T.astype(int)
 
         np.fill_diagonal(L, 0)
         return L
