@@ -61,7 +61,25 @@ class BernoulliBeta:
                            o_success: int,
                            o_fail: int) -> float:
         """
+        Log marginal method for binary edges, removing the true
+        negatives due to inherent sparsity of phylogenetic trees.
+
+
+        Parameters
+        ----------
+        o_success : int
+            The number of edges present in both the latent and the
+            observed graph.
         
+        o_fail : int
+            The number of edges present in the observed graph but
+            absent in the latent graph.
+        
+        Returns
+        -------
+        float
+            The log marginal likelihood of the observed edges given
+            the latent graph.
         """
         a_post = self.alpha1 + o_success
         b_post = self.alpha0 + o_fail
@@ -71,6 +89,7 @@ class BernoulliBeta:
             - gammaln(self.alpha1 + self.alpha0))
         )
 
+#TODO: Test NormalGamma.
 @dataclass
 class NormalGamma:
     """
@@ -115,10 +134,6 @@ class NormalGamma:
         + gammaln(self.alpha0 + 0.5 * n)
         - gammaln(self.alpha0)
     )
-
-
-
-
 
 class RJMCMCAligner:
     """
@@ -273,6 +288,13 @@ class RJMCMCAligner:
 
     def _energy_attributes(self) -> float:
         """
+        Method to compute the log likelihood of the attribute.
+
+        Returns
+        -------
+        attr_log_likelihood : float
+            The log likelihood of the attributes given the latent
+            slots.
         """
         attr_log_likelihood = 0.0
         for k in range(self.K):
@@ -286,6 +308,12 @@ class RJMCMCAligner:
         """
         Method to compute statistical energy as the negative log
         posterior, now balancing topology and attribute similarity.
+
+        Returns
+        -------
+        float
+            The negative log posterior probability of the latent
+            graph given the observed graphs.
         """
         if self.binary_mode:
             topo_log_likelihood = self._energy_binary()
@@ -308,6 +336,16 @@ class RJMCMCAligner:
     # binary edges
 
     def _energy_binary(self) -> float:
+        """
+        Method to compute the binary edge log-likelihood using the
+        Bernoulli-beta prior.
+        
+        Returns
+        -------
+        float
+            The log likelihood of the binary edges given the latent
+            graph.
+        """
         # only look at present‐edge counts
         o11 = 0
         o10 = 0
@@ -318,28 +356,17 @@ class RJMCMCAligner:
             o10 += (A & ~Lk).sum()     # present in A, missing in L
         return self.bb.log_marginal_edges(o11, o10)
     
-    # def _energy_binary(self) -> float:
-    #     """
-    #     Method to compute the binary edge log-likelihood.
-    #     """
-    #     O11 = O10 = O01 = O00 = 0
-    #     for k, (pk, Wk) in enumerate(zip(self.perm, self.W)):
-
-    #         A_bool = (Wk > 0.5)
-    #         Lk_bool = self.L[np.ix_(pk, pk)].astype(bool)
-
-    #         O11 += (A_bool & Lk_bool).sum()   # True positive (present in both)
-    #         O10 += (A_bool & ~Lk_bool).sum()  # False positive (present in A, not L)
-    #         O01 += (~A_bool & Lk_bool).sum()  # False negative (not in A, present in L)
-    #         O00 += (~A_bool & ~Lk_bool).sum() # True negative (not in either)
-
-        return self.bb.log_marginal(O11, O10, O01, O00)
-        
-
     # weighted edges
     def _energy_weighted(self) -> float:
         """
-        Method to compute the weighted edge log-likelihood.
+        Method to compute the weighted edge log-likelihood using the
+        normal-gamma prior.
+
+        Returns
+        -------
+        float
+            The log likelihood of the weighted edges given the latent
+            graph.
         """
         logp = 0.0
         for k, (pk, Wk) in enumerate(zip(self.perm, self.W)):
@@ -356,6 +383,7 @@ class RJMCMCAligner:
 
     # TODO: remove method when confirmed that Gibbs sampling is better.
     #  Blueprint update and attribute similarity helpers
+
     def _majority_blueprint(self) -> np.ndarray:
         """
         Method to compute the consensus blueprint.
@@ -379,83 +407,15 @@ class RJMCMCAligner:
         return L
     
     # Theoretically stronger Gibb's sampling blueprint. Don't use _majority_blueprint.
-
-    # def _gibbs_sample_blueprint(self) -> np.ndarray:
-    #     """
-    #     """
-    #     L = np.zeros((self.NL, self.NL), dtype=int)
-
-    #     # Iterate over the upper triangle of the adjacency matrix
-    #     for i in range(self.NL):
-    #         for j in range(i + 1, self.NL):
-            
-    #             o11, o10, o01, o00 = 0, 0, 0, 0
-
-    #             # Aggregate evidence from all observed graphs
-    #             for k, (pk, Wk) in enumerate(zip(self.perm, self.W)):
-    #                 node_i_idx = np.where(pk == i)[0]
-    #                 node_j_idx = np.where(pk == j)[0]
-
-    #                 edge_exists_in_A = False
-    #                 if node_i_idx.size > 0 and node_j_idx.size > 0:
-    #                     # If both slots are occupied in this graph, check for the edge
-    #                     node_i, node_j = node_i_idx[0], node_j_idx[0]
-    #                     edge_exists_in_A = Wk[node_i, node_j] > 0.5
-
-    #                 if edge_exists_in_A:
-    #                     o11 += 1  # for the L_ij=1 model
-    #                     o10 += 1  # for the L_ij=0 model
-    #                 else:
-    #                     # This is a "success" if we hypothesize L_ij=0.
-    #                     o01 += 1  # for the L_ij=1 model
-    #                     o00 += 1  # for the L_ij=0 model
-
-    #             # Calculate log marginals.
-    #             log_p_D_given_Lij1 = self.bb.log_marginal(o11, 0, o01, 0)
-    #             log_p_D_given_Lij0 = self.bb.log_marginal(0, o10, 0, o00)
-
-    #             log_odds = log_p_D_given_Lij1 - log_p_D_given_Lij0
-    #             prob_edge_exists = 1.0 / (1.0 + np.exp(-log_odds))
-                
-    #             if self.rng.random() < prob_edge_exists:
-    #                 # TODO: update logic for directed graph.
-
-    #                 L[i, j] = 1
-    #                 L[j, i] = 1
-        # np.fill_diagonal(L, 0)
-        # return L
-
-    # def _gibbs_sample_blueprint(self) -> np.ndarray:
-    #     """
-        
-    #     """
-    #     L = np.zeros((self.NL, self.NL), dtype=int)
-    #     for i in range(self.NL):
-    #         for j in range(i+1, self.NL):
-    #             # count how many input graphs actually have that edge
-    #             m = 0
-    #             for pk, Wk in zip(self.perm, self.W):
-    #                 idx_i = np.where(pk==i)[0]
-    #                 idx_j = np.where(pk==j)[0]
-    #                 if idx_i.size and idx_j.size and Wk[idx_i[0], idx_j[0]]>0.5:
-    #                     m += 1
-
-    #             # log-marginal if we *keep* that edge vs if we *drop* it
-    #             lp1 = self.bb.log_marginal_edges(m,       0)
-    #             lp0 = self.bb.log_marginal_edges(0, self.K-m)
-
-    #             p = 1.0 / (1.0 + np.exp(lp0 - lp1))
-    #             if self.rng.random() < p:
-    #                 L[i,j] = L[j,i] = 1
-
-    #     np.fill_diagonal(L, 0)
-    #     return L
-
-
-
-
     def _gibbs_sample_blueprint(self) -> np.ndarray:
         """
+        Method to sample the blueprint graph using Gibbs sampling. 
+        Theoretically stronger than the majority consensus.
+
+        Returns
+        -------
+        L : np.ndarray
+            The sampled adjacency matrix of the latent blueprint graph.
         """
         L = np.zeros((self.NL, self.NL), dtype=int)
         for i in range(self.NL):
@@ -478,7 +438,6 @@ class RJMCMCAligner:
 
         np.fill_diagonal(L, 0)
         return L
-
 
     # cosine similarity attr‑vs‑latent slot
     def _attr_cosine(self,
@@ -615,6 +574,11 @@ class RJMCMCAligner:
     def _birth(self) -> bool:
         """
         Method to add a new latent slot to the blueprint graph.
+
+        Returns
+        -------
+        bool
+            Boolean indicating whether a birth was successful.
         """
         unmatched = [(k, i)
                       for k in range(self.K)
@@ -623,20 +587,6 @@ class RJMCMCAligner:
         if not unmatched:
             return False
         k, i = unmatched[self.rng.integers(len(unmatched))]
-
-        # s = self.NL
-
-        # # expand blueprint matrix
-        # self.L = np.pad(self.L, ((0, 1), (0, 1)), constant_values=0)
-        # self.NL += 1
-
-        # # initialise edges by copying row/col from observed graph
-        # Ak = (self.W[k] > 0.5) if self.binary_mode else (self.W[k] > 0)
-        # row = np.zeros(self.NL, int)
-        # row[:-1] = Ak[i]
-        # self.L[s, :] = row
-        # self.L[:, s] = row
-        # self.L[s, s] = 0
 
         # Broadcast over only the observed adjacency matrix.
         s = self.NL
@@ -649,8 +599,9 @@ class RJMCMCAligner:
         Ak = (self.W[k] > 0.5) if self.binary_mode else (self.W[k] > 0)
         row = np.zeros(self.NL, int)
         pk = self.perm[k]
-        for t in range(s):            # for every existing latent slot
-            js = np.where(pk == t)[0] # which node in graph k sits at slot t?
+        for t in range(s):
+
+            js = np.where(pk == t)[0]
             if js.size:
                 row[t] = int(Ak[i, js[0]])
         # row[s] stays 0
@@ -664,7 +615,13 @@ class RJMCMCAligner:
     def _death(self) -> bool:
         """
         Delete an unassigned latent slot from the blueprint graph.
+
+        Returns
+        -------
+        bool
+            Boolean indicating whether a death was successful.
         """
+
         assigned = {slot for pk in self.perm for slot in pk if slot >= 0}
         empty = [s for s in range(self.NL) if s not in assigned]
         if not empty:
@@ -721,12 +678,12 @@ class RJMCMCAligner:
         return self.graphs[k].nodes[self.V[k][i]].get("anchor", False)
 
     #  Sampler
-    def sample(self):
+    def sample(self) -> None:
         """
         Main method to sample the MCMC.
+
         """
         # Initial blueprint and energy calculation
-        
         # Init latent graph from majority consensus not Gibbs sampling.
         self.L = self._gibbs_sample_blueprint()
         cur_E = self._energy()
@@ -786,7 +743,7 @@ class RJMCMCAligner:
                         # The blueprint is updated implicitly within _death
                         self.L = self._gibbs_sample_blueprint()
                         new_E = self._energy()
-                        
+
                         log_acc_prob = cur_E - new_E
                         if np.log(self.rng.random()) < log_acc_prob:
                             cur_E = new_E
@@ -849,23 +806,6 @@ class RJMCMCAligner:
                 for k in range(self.K):
                     self._stored_pi[k].append(self.perm[k].copy())
 
-    # Main public methods
-    # def latent_blueprint_graph(self) -> nx.DiGraph:
-    #     """
-    #     Method to return the latent blueprint graph as the mean of the
-    #     sampled posterior.
-
-    #     Returns
-    #     -------
-    #     nx.DiGraph
-    #         The mean of the latent posterior. 
-    #     """
-    #     if not self._stored_L:
-    #         raise RuntimeError("Run sample() first.")
-    #     Lavg = np.mean(self._stored_L, axis=0)
-    #     Lbin = (Lavg >= 0.5).astype(int)
-    #     return nx.from_numpy_array(Lbin, create_using=nx.DiGraph)
-
     def latent_blueprint_graph(self,
                                posterior_prob_cutoff: float = 0.2) -> nx.DiGraph:
         """
@@ -896,12 +836,6 @@ class RJMCMCAligner:
 
         Lavg = tally_matrix / num_samples
 
-        ########
-        print("Max posterior edge‐prob:", Lavg.max())
-        print("Edge‐prob matrix:\n", np.round(Lavg,3))
-        ########
-
-        # 20% sampling in post cutoff.
         Lbin = (Lavg >= posterior_prob_cutoff).astype(int)
         return nx.from_numpy_array(Lbin, create_using=nx.DiGraph)
 
@@ -937,6 +871,14 @@ class RJMCMCAligner:
     # Mapping of latent slot to input nodes.
     def get_node_to_latent_mapping(self) -> Dict[int, np.ndarray]:
             """
+            Method to compute the mapping of original graph nodes to
+            latent slots based on the stored permutations.
+
+            Returns
+            -------
+            Dict[int, np.ndarray]
+                A dictionary where keys are graph indices and values are
+                arrays of probabilities for each latent slot.
             """
             if not any(self._stored_pi):
                 raise RuntimeError("Run sample() first.")
@@ -975,7 +917,6 @@ class RJMCMCAligner:
                 prob_mapping[k] = tally_matrix / num_samples
                 
             return prob_mapping
-
 
 
 #TODO: update to FAISS to scale > 1e4
