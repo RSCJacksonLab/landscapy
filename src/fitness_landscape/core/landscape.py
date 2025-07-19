@@ -264,12 +264,18 @@ class FitnessLandscape(BaseGraphLandscape):
         networkx.Graph
             Graph representation of the landscape.
         """
+
+        #Get fitness values for graph construction.
+        fitness_values = self.get_signal()
+
         if self.graph_type == 'hamming':
-            self.graph = create_hamming_graph(self.sequences, list(self.fitness_values.values()), **kwargs)
-        
+            self.graph = create_hamming_graph(self.sequences, fitness_values, **kwargs)
+
         elif self.graph_type == 'knn':
-            self.graph = create_knn_graph(self.sequences, list(self.fitness_values.values()), **kwargs)
-        
+            self.graph = create_knn_graph(self.sequences, fitness_values, **kwargs)
+
+        #TODO: Other graph types can be added here.
+
         else:
             raise ValueError(f"Unsupported graph type: {self.graph_type}")
     
