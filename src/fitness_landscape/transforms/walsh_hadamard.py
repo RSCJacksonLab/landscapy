@@ -4,8 +4,6 @@ from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, 
 from ..core.landscape import FitnessLandscape
 from ..core.sequence import BaseNumpySequence, BinarySequence, generate_sequences
 
-#TODO: Make sure WHT takes only binary sequences
-
 def walsh_transform(landscape: FitnessLandscape,
                     order: int = None,
                     backend: Literal['numpy', 'torch']='numpy') -> np.ndarray:
@@ -35,12 +33,18 @@ def walsh_transform(landscape: FitnessLandscape,
     if not sequences:
         raise ValueError("Landscape contains no sequences")
     
+    # Check sequences are BinarySequence or BaseNumpySequence
+    if not all(isinstance(seq, (BinarySequence)) for seq in sequences):
+        raise TypeError("All sequences must be BinarySequence")
+
+    elif  not np.all(np.isin(seq.to_array(), [0, 1])):
+            raise TypeError(f"Walsh-Hadamard transform requires binary sequences. "
+                            f"Found non-binary sequence: {seq.to_array()}")
+    
     seq_length = len(sequences[0])
     for seq in sequences:
         if len(seq) != seq_length:
             raise ValueError("All sequences must have the same length")
-        if not set(seq.sequence).issubset({0, 1}):
-            raise ValueError("Walsh transform requires binary sequences (0s and 1s)")
     
     # Extract fitness values in the same order as sequences
     fitness_values = np.array([landscape.get_fitness(seq) for seq in sequences])
