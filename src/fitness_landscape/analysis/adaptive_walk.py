@@ -4,7 +4,6 @@ from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, 
 from ..core.landscape import FitnessLandscape
 from ..core.sequence import BaseNumpySequence
 from ..core.graph import create_hamming_graph
-from logging import Logger
 
 def find_greedy_accessible_paths(landscape: FitnessLandscape, 
                                  start_sequence: BaseNumpySequence,
@@ -51,8 +50,6 @@ def find_greedy_accessible_paths(landscape: FitnessLandscape,
     assert landscape.graph is not None, \
     'Landscape graph must be initialised.'
     
-    if landscape.graph_type is not 'hamming':
-        Logger.warning(msg="Landscape graph type is not `Hamming`. Path analysis relies on Hamming structure for valid interpretation.")
 
     # Create directed graph for accessible paths
     directed_graph = nx.DiGraph()
@@ -133,9 +130,6 @@ def analyze_path_accessibility(landscape: FitnessLandscape,
     # Assert graph structure exists in landscape and warn if not Hamming graph.
     assert landscape.graph is not None, \
     'Landscape graph must be initialised.'
-    
-    if landscape.graph_type is not 'hamming':
-        Logger.warning(msg="Landscape graph type is not `Hamming`. Path analysis relies on Hamming structure for valid interpretation.")
     
     # Find local minima and maxima
     local_minima = []
@@ -260,9 +254,6 @@ def calculate_basin_of_attraction(landscape: FitnessLandscape,
     # Assert graph structure exists in landscape and warn if not Hamming graph.
     assert landscape.graph is not None, \
     'Landscape graph must be initialised.'
-    
-    if landscape.graph_type is not 'hamming':
-        Logger.warning(msg="Landscape graph type is not `Hamming`. Path analysis relies on Hamming structure for valid interpretation.")
     
     # Verify that the sequence is a local optimum
     optimum_fitness = landscape.get_fitness(local_optimum)

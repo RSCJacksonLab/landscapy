@@ -4,7 +4,6 @@ from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable
 from ..core.landscape import FitnessLandscape
 from ..core.graph import create_hamming_graph
 from ..core.sequence import sequence_distance
-from logging import Logger
 from .eigenmode import eigenmode_decomposition
 
 def calculate_ruggedness_autocorrelation_analytical(landscape: FitnessLandscape,
@@ -72,10 +71,7 @@ def calculate_ruggedness_autocorrelation_stochastic(landscape: FitnessLandscape,
     
     if not sequences:
         raise ValueError("Landscape contains no sequences")
-    
-    if landscape.graph_type is not 'hamming':
-        Logger.warning(msg="Landscape graph type is not `Hamming`. Path analysis relies on Hamming structure for valid interpretation.")
-    
+        
     # Perform random walk
     walk_indices = _random_walk(landscape.graph, steps)
     
