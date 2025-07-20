@@ -131,6 +131,8 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
     
     return G
 
+
+
 #TODO: Evolutionary velocity connectivity
 #TODO: TDA persistant homology connectivity
 #TODO: density dependent kNN connectivity

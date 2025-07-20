@@ -1,0 +1,775 @@
+import numpy as np
+import pytest
+import networkx as nx
+
+from fitness_landscape.core.sequence import *
+from fitness_landscape.core.graph import *
+from fitness_landscape.core.landscape import *
+from fitness_landscape.analysis.epistasis import *
+from fitness_landscape.analysis.statistics import *
+from fitness_landscape.analysis.adaptive_walk import *
+from fitness_landscape.analysis.random_walk import *
+from fitness_landscape.analysis.dirichlet_energy import *
+from fitness_landscape.transforms.graph_fourier import *
+from fitness_landscape.analysis.eigenmode import *
+from fitness_landscape.analysis.graph import *
+from fitness_landscape.models.elementary_landscape import *
+from fitness_landscape.models.nk import *
+from fitness_landscape.models.rmf import *
+from math import factorial
+
+# Pytest fixtures for landscapes
+@pytest.fixture
+def additive_landscape():
+    """
+    A purely additive NK landscape with K=0.
+
+    Returns
+    -------
+    NKFitnessLandscape
+        An NK landscape with no epistasis (K=0).
+    """
+    return NKFitnessLandscape(N=4, K=0, alphabet_size=2, seed=42)
+
+@pytest.fixture
+def epistatic_landscape():
+    """
+    An epistatic NK landscape with K=2.
+
+    Returns
+    -------
+    NKFitnessLandscape
+        An NK landscape with K=2, which introduces epistasis.
+    """
+    return NKFitnessLandscape(N=4, K=2, alphabet_size=2, seed=42)
+
+@pytest.fixture(params=[1, 5, 10]) # Test with 3 different eigenvectors
+def elementary_landscape(request):
+    """
+    Creates an ElementaryFitnessLandscape based on the j-th
+    eigenvector where j is parameterized by pytest.
+
+    Parameters
+    ----------
+    request : pytest.FixtureRequest
+        The pytest request object that provides the parameter value.
+    
+    Returns
+    -------
+    tuple
+        A tuple containing the ElementaryFitnessLandscape instance and
+        the index j.
+    """
+    j = request.param
+    
+     # N=5 is 32 nodes.
+    sequences = generate_sequences(length=5, alphabet=[0, 1])
+    k = 4 
+    
+    # Create the landscape. The fitness signal is the j-th eigenvector.
+    landscape = ElementaryFitnessLandscape(
+        sequences=sequences,
+        j=j,
+        k=k,
+        seed=42,
+        emb_nodes=False
+    )
+    # Also return the index 'j' to identify the correct eigenvalue
+    return landscape, j
+
+@pytest.fixture
+def complete_hamming_graph_n3():
+    """
+    Provides a complete Hamming graph for N=3, which has known
+    properties.
+
+    Returns
+    -------
+    networkx.Graph
+        A complete Hamming graph with N=3.
+    """
+    return create_hamming_graph(N=3)
+
+@pytest.fixture
+def random_rmf_landscape():
+    """
+    An uncorrelated RMF landscape (pure noise).
+
+    Returns
+    -------
+    RMFFitnessLandscape
+        An RMF landscape with no slope and high noise.
+    """
+    return RMFFitnessLandscape(N=8, slope=0.0, sigma=10.0, seed=42)
+
+@pytest.fixture
+def linear_rmf_landscape():
+    """
+    An RMF landscape with no noise (sigma=0) and a perfect linear
+    relationship between fitness and distance from the optimum.
+
+    Returns
+    -------
+    RMFFitnessLandscape
+        An RMF landscape with a linear fitness signal.
+    """
+    return RMFFitnessLandscape(N=8, slope=1.0, sigma=0.0, seed=42)
+
+
+# Adaptive walk tests
+def test_number_of_local_optima_vs_K(additive_landscape: additive_landscape,
+                                     epistatic_landscape: epistatic_landscape):
+    """
+    Tests that the number of local optima increases with K.
+
+    Parameters
+    ----------
+    additive_landscape : NKFitnessLandscape
+        A purely additive landscape (K=0).
+    epistatic_landscape : NKFitnessLandscape
+        An epistatic landscape (K>0).
+    
+    Raises
+    ------
+    AssertionError
+        If the number of local optima does not match the expected
+        values.
+    """
+    # For K=0, there should be exactly one local (and global) maximum.
+    smooth_results = analyze_path_accessibility(additive_landscape)
+    assert smooth_results['maxima_count'] == 1
+
+    # For K>0, the number of maxima should be greater than 1.
+    rugged_results = analyze_path_accessibility(epistatic_landscape )
+    assert rugged_results['maxima_count'] > 1
+
+
+def test_number_of_greedy_paths_vs_K(additive_landscape: additive_landscape,
+                                     epistatic_landscape: epistatic_landscape):
+    """
+    Tests that the number of accessible paths decreases with K. For
+    K=0, paths between antipodal nodes (distance d) = d!
+
+    Parameters
+    ----------
+    additive_landscape : NKFitnessLandscape
+        A purely additive landscape (K=0).
+    epistatic_landscape : NKFitnessLandscape
+        An epistatic landscape (K>0).
+
+    Raises
+    ------
+    AssertionError
+        If the number of paths does not match the expected values.
+    """
+    # For K=0, N=4, the number of paths between "0000" and "1111" should be 4! = 24
+    start_smooth = BinarySequence("0000")
+    end_smooth = BinarySequence("1111")
+    smooth_paths = find_greedy_accessible_paths(additive_landscape, start_smooth, end_smooth)
+    assert smooth_paths['path_count'] == factorial(4)
+
+    # For K>0, the number of paths between distant points should be very low, often 0.
+    start_rugged = BinarySequence("00000000")
+    end_rugged = BinarySequence("11111111")
+    
+    rugged_paths = find_greedy_accessible_paths(epistatic_landscape, start_rugged, end_rugged)
+    assert rugged_paths['path_count'] == 0
+
+def test_basin_of_attraction_vs_K(additive_landscape: additive_landscape,
+                                  epistatic_landscape: epistatic_landscape):
+    """
+    Tests that the basin of the global optimum shrinks with K. For K=0,
+    the basin is the entire space. For K>0, it's a fraction.
+
+    Parameters
+    ----------
+    additive_landscape : NKFitnessLandscape
+        A purely additive landscape (K=0).
+    epistatic_landscape : NKFitnessLandscape
+        An epistatic landscape (K>0).
+
+    Raises
+    ------
+    AssertionError
+        If the basin sizes do not match the expected values.
+    """
+    # For K=0, the basin of the single optimum should be the whole space.
+    smooth_fitnesses = additive_landscape.get_signal()
+    smooth_optimum_idx = np.argmax(smooth_fitnesses)
+    smooth_optimum_seq = additive_landscape.sequences[smooth_optimum_idx]
+    smooth_basin = calculate_basin_of_attraction_greedy(epistatic_landscape, smooth_optimum_seq)
+    assert smooth_basin['basin_size'] == len(epistatic_landscape.sequences)
+
+    # For K>0, the basin of the global optimum should be smaller than the whole space.
+    rugged_fitnesses = epistatic_landscape.get_signal()
+    rugged_optimum_idx = np.argmax(rugged_fitnesses)
+    rugged_optimum_seq = epistatic_landscape.sequences[rugged_optimum_idx]
+    rugged_basin = calculate_basin_of_attraction_greedy(epistatic_landscape, rugged_optimum_seq)
+    assert rugged_basin['basin_size'] < len(epistatic_landscape.sequences)
+
+def test_adaptive_walk_length_vs_K(additive_landscape: additive_landscape,
+                                   epistatic_landscape: epistatic_landscape):
+    """
+    Tests that the average adaptive walk length increases with K.
+
+    Parameters
+    ----------
+    additive_landscape : NKFitnessLandscape
+        A purely additive landscape (K=0).
+    epistatic_landscape : NKFitnessLandscape
+        An epistatic landscape (K>0).
+
+    Raises
+    ------
+    AssertionError
+        If the average walk lengths do not match the expected values.
+    """
+    # Average over a few walks to get a stable estimate
+    n_walks = 10
+    smooth_lengths = [adaptive_walk_stochastic(additive_landscape, strategy='greedy')['steps_taken'] for _ in range(n_walks)]
+    rugged_lengths = [adaptive_walk_stochastic(epistatic_landscape, strategy='greedy')['steps_taken'] for _ in range(n_walks)]
+    
+    assert np.mean(smooth_lengths) < np.mean(rugged_lengths)
+
+def test_basin_of_attraction_stochastic_runs(epistatic_landscape: epistatic_landscape):
+    """
+    Tests that the stochastic basin calculation runs and returns a
+    plausible result.
+
+    Raises
+    ------
+    AssertionError
+        If the basin size is not greater than 0.
+    """
+    rugged_fitnesses = epistatic_landscape.get_signal()
+    optimum_idx = np.argmax(rugged_fitnesses)
+    optimum_seq = epistatic_landscape.sequences[optimum_idx]
+
+    # Use a low number of simulations for a fast test
+    stochastic_basin = calculate_basin_of_attraction_stochastic(
+        epistatic_landscape,
+        optimum_seq,
+        n_simulations=10,
+        beta=1.0
+    )
+    assert 'basin_size' in stochastic_basin
+    assert stochastic_basin['basin_size'] > 0
+
+def test_neutral_network_analysis_runs(epistatic_landscape: epistatic_landscape):
+    """
+    Tests that neutral network analysis correctly identifies
+    components.
+
+    Parameters
+    ----------
+    epistatic_landscape : NKFitnessLandscape
+        An epistatic landscape (K>0).
+    
+    Raises
+    ------
+    AssertionError
+        If the analysis does not find any networks or the largest
+        network size is 0.
+    """
+    # A rugged landscape is likely to have some neutral or near-neutral connections
+    neutral_results = neutral_network_analysis(epistatic_landscape, threshold=0.01)
+    assert 'network_count' in neutral_results
+    assert neutral_results['network_count'] > 0
+    assert neutral_results['largest_network_size'] > 0
+    
+
+# Dirichelet energy tests
+def test_total_dirichlet_energy_equals_eigenvalue(elementary_landscape):
+    """
+    Tests that the total Dirichlet energy of an elementary landscape equals its
+    defining eigenvalue.
+    
+    Theory: For a fitness signal f = v_j (the j-th eigenvector of the Laplacian L),
+    the Dirichlet energy E = f'Lf = v_j'Lv_j = v_j'(λ_j*v_j) = λ_j * ||v_j||^2.
+    Since eigenvectors are normalized (||v_j||^2 = 1), E = λ_j.
+    The function normalizes by N, so we test against E / N.
+    """
+    landscape, j = elementary_landscape
+    
+    # 1. Calculate the Dirichlet energy using the function to be tested.
+    # Note: The function normalizes by N, so we get E/N.
+    energy_results = calculate_ruggedness_dirichlet_energy(landscape)
+    calculated_energy_per_node = energy_results['total_dirichlet_energy']
+
+    # 2. Get the true eigenvalues from a separate decomposition.
+    eigenvalues, _ = eigenmode_decomposition(landscape.graph, matrix='laplacian')
+    
+    # Eigenvalues are sorted in ascending order by default in many libraries,
+    # but let's sort them to be sure.
+    eigenvalues.sort()
+    true_eigenvalue = eigenvalues[j]
+    
+    # 3. The total energy is E = λ_j. The function returns E / N.
+    expected_energy_per_node = true_eigenvalue / len(landscape.sequences)
+
+    # 4. Assert that the calculated energy matches the theoretical expectation.
+    assert np.isclose(calculated_energy_per_node, expected_energy_per_node)
+
+def test_sum_of_local_contributions_equals_total_energy(elementary_landscape):
+    """
+    Tests that the sum of local Dirichlet energy contributions equals the
+    total Dirichlet energy.
+    
+    Theory: The total Dirichlet energy E = Σ E_i, where E_i is the local
+    contribution of each node i.
+    """
+    landscape, _ = elementary_landscape
+    
+    # 1. Calculate the total Dirichlet energy.
+    total_energy_results = calculate_ruggedness_dirichlet_energy(landscape)
+    # The function returns E/N, so we multiply by N to get the total E.
+    total_energy = total_energy_results['total_dirichlet_energy'] * len(landscape.sequences)
+
+    # 2. Calculate the local contributions for all nodes.
+    local_contributions = local_dirichlet_energy_contribution(landscape)
+    
+    # 3. Sum the local contributions.
+    sum_of_locals = sum(local_contributions.values())
+    
+    # 4. Assert that the sum of locals equals the total energy.
+    assert np.isclose(sum_of_locals, total_energy)
+
+
+
+
+# Epistasis tests
+def test_walsh_on_additive_landscape(additive_landscape):
+    """
+    Tests that Walsh-Hadamard transform finds no high-order epistasis for a K=0 landscape.
+    """
+    results = calculate_epistasis_walsh(additive_landscape, order=4)
+    # For a K=0 landscape, all coefficients for orders > 1 must be zero.
+    for order, coeffs in results['by_order'].items():
+        if order > 1:
+            for term, value in coeffs.items():
+                assert np.isclose(value, 0), f"Walsh term {term} should be zero"
+
+def test_regression_on_additive_landscape(additive_landscape):
+    """
+    Tests that regression finds no high-order epistasis and has a perfect fit for a K=0 landscape.
+    """
+    # Test with order=2 to check for second-order terms
+    results = calculate_epistasis_regression(additive_landscape, order=2)
+    
+    # The R² score should be 1.0, indicating a perfect linear fit.
+    assert np.isclose(results['model']['r2_score'], 1.0)
+    
+    # All second-order coefficients must be zero.
+    if 2 in results['by_order']:
+        for term, value in results['by_order'][2].items():
+            assert np.isclose(value, 0), f"Regression term {term} should be zero"
+
+def test_reference_free_on_additive_landscape(additive_landscape):
+    """
+    Tests that the reference-free method finds no high-order epistasis for a K=0 landscape.
+    """
+    results = calculate_epistasis_reference_free(additive_landscape, order=2)
+    # All second-order coefficients must be zero.
+    if 2 in results['by_order']:
+        for term, value in results['by_order'][2].items():
+            assert np.isclose(value, 0), f"Reference-free term {term} should be zero"
+
+def test_ensemble_on_additive_landscape(additive_landscape):
+    """
+    Tests that the ensemble method finds no high-order epistasis for a K=0 landscape.
+    """
+    results = calculate_epistasis_ensemble(additive_landscape, order=2)
+    # All second-order coefficients must be zero.
+    if 2 in results['by_order']:
+        for term, value in results['by_order'][2].items():
+            assert np.isclose(value, 0), f"Ensemble term {term} should be zero"
+
+# Sanity Check for Epistatic Landscapes (K>0)
+
+@pytest.mark.parametrize("epistasis_func", [
+    calculate_epistasis_walsh,
+    calculate_epistasis_regression,
+    calculate_epistasis_reference_free,
+    calculate_epistasis_ensemble
+])
+def test_epistasis_detection_on_k1_landscape(epistatic_landscape, epistasis_func):
+    """
+    Tests that all methods can detect non-zero epistasis on a K=1 landscape.
+    """
+    results = epistasis_func(epistatic_landscape, order=2)
+    
+    # For a K=1 landscape, we expect at least one non-zero second-order term.
+    assert 2 in results['by_order'], f"{epistasis_func.__name__} did not compute second-order terms."
+    
+    second_order_coeffs = results['by_order'][2].values()
+    assert any(not np.isclose(v, 0) for v in second_order_coeffs), \
+        f"{epistasis_func.__name__} failed to detect any second-order epistasis."
+
+
+
+# Fourier transform tests
+def test_eigenmode_reconstruction():
+    """
+    Tests that a matrix can be reconstructed from its eigenmodes.
+
+    Raises
+    ------
+    AssertionError
+        If the reconstructed matrix does not match the original matrix.
+    
+    """
+    graph = nx.path_graph(4)
+    L = nx.laplacian_matrix(graph).toarray()
+    
+    eigenvalues, eigenvectors = eigenmode_decomposition(graph, matrix='laplacian')
+    
+    # Reconstruct using all modes
+    reconstructed_L = reconstruct_from_eigenmodes(eigenvectors, eigenvalues)
+    
+    assert np.allclose(L, reconstructed_L, atol=1e-9)
+
+def test_gft_reconstruction():
+    """
+    Tests that a signal can be perfectly reconstructed via inverse GFT.
+
+    Raises
+    ------
+    AssertionError
+        If the reconstructed signal does not match the original signal.
+    """
+    graph = nx.cycle_graph(4)
+    signal = np.sin(np.linspace(0, 2 * np.pi, 4, endpoint=False))
+    for i, node in enumerate(graph.nodes()):
+        graph.nodes[node]['fitness'] = signal[i]
+    
+    landscape = FitnessLandscape(graph=graph, emb_nodes=False)
+    eigenvectors, _, coefficients = graph_fourier_transform(landscape)
+    reconstructed_signal = inverse_graph_fourier_transform(eigenvectors, coefficients)
+
+    assert np.allclose(signal, reconstructed_signal, atol=1e-9)
+
+
+
+
+# Graph analysis tests
+def test_graph_properties_on_hamming_graph(complete_hamming_graph_n3: complete_hamming_graph_n3):
+    """
+    Validates graph_properties against the known theoretical values
+    for a complete N=3 Hamming graph.
+
+    Parameters
+    ----------
+    complete_hamming_graph_n3 : networkx.Graph
+        A complete Hamming graph for N=3.
+
+    Raises
+    ------
+    AssertionError
+        If the calculated properties do not match the expected values.
+    """
+    properties = graph_properties(complete_hamming_graph_n3)
+
+    # Theoretical properties of a 3-cube graph:
+    # 8 nodes, 12 edges, each node has degree 3.
+    num_nodes = 8
+    num_edges = 12
+    
+    assert properties['degree']['mean'] == 3.0
+    assert properties['degree']['min'] == 3.0
+    assert properties['degree']['max'] == 3.0
+    assert properties['clustering'] == 0.0  # No triangles in a cube graph
+    assert properties['components']['count'] == 1
+    
+    expected_density = (2 * num_edges) / (num_nodes * (num_nodes - 1))
+    assert np.isclose(properties['density'], expected_density)
+    
+    # Avg shortest path length for a 3-cube is (1*3 + 2*3 + 3*1) / 7
+    expected_path_length = (3 + 6 + 3) / 7.0
+    assert np.isclose(properties['path_length'], expected_path_length)
+
+
+def test_local_optima_on_smooth_landscape(additive_landscape: additive_landscape):
+    """
+    Validates that a purely additive (K=0) NK landscape has exactly one
+    local (and global) optimum.
+
+    Parameters
+    ----------
+    additive_landscape : NKFitnessLandscape
+        A purely additive landscape (K=0).
+
+    Raises
+    ------
+    AssertionError
+        If the number of local optima is not exactly 1.
+    """
+    results = calculate_ruggedness_local_optima(additive_landscape)
+    
+    assert results['local_optima_count'] == 1, \
+        "A K=0 landscape must have exactly one local optimum."
+
+def test_local_optima_on_rugged_landscape(epistatic_landscape: epistatic_landscape):
+    """
+    Validates that a rugged (K>0) NK landscape has more than one
+    local optimum.
+
+    Parameters
+    ----------
+    epistatic_landscape : NKFitnessLandscape
+        An epistatic landscape (K>0).
+    Raises
+    ------
+    AssertionError
+        If the number of local optima is not greater than 1.
+    """
+    results = calculate_ruggedness_local_optima(epistatic_landscape)
+    
+    assert results['local_optima_count'] > 1, \
+        "A K>0 landscape is expected to have multiple local optima."
+
+def test_local_optima_fitness_statistics(epistatic_landscape: epistatic_landscape):
+    """
+    Sanity check for the fitness statistics of the found local optima.
+
+    Parameters
+    ----------
+    epistatic_landscape : NKFitnessLandscape
+        An epistatic landscape (K>0). 
+    Raises
+    ------
+    AssertionError
+        If the statistics do not match the expected properties of a
+        rugged landscape.
+    """
+    results = calculate_ruggedness_local_optima(epistatic_landscape)
+    
+    # The max fitness of the optima should be the global max fitness of the landscape
+    global_max_fitness = np.max(epistatic_landscape.get_signal())
+    
+    assert 'mean_fitness' in results
+    assert np.isclose(results['max_fitness'], global_max_fitness)
+    assert results['min_fitness'] <= results['max_fitness']
+
+
+# Random walk analysis tests
+def test_stochastic_correlation_length_vs_ruggedness(additive_landscape: additive_landscape,
+                                                     epistatic_landscape: epistatic_landscape):
+    """
+    Tests that the correlation length is greater for a smooth landscape
+    than a rugged one.
+
+    Parameters
+    ----------
+    additive_landscape : NKFitnessLandscape
+        A purely additive landscape (K=0).
+    epistatic_landscape : NKFitnessLandscape
+        An epistatic landscape (K>0).
+    
+    Raises
+    ------
+    AssertionError
+        If the correlation length for the smooth landscape is not greater
+        than that for the rugged landscape.
+    """
+    smooth_results = calculate_ruggedness_autocorrelation_stochastic(additive_landscape, steps=5000)
+    rugged_results = calculate_ruggedness_autocorrelation_stochastic(epistatic_landscape, steps=5000)
+    
+    assert smooth_results['correlation_length'] > rugged_results['correlation_length']
+
+def test_autocorrelation_on_random_landscape(random_rmf_landscape: random_rmf_landscape):
+    """
+    Tests that autocorrelation is near zero for a completely random
+    landscape.
+
+    Parameters
+    ----------
+    random_rmf_landscape : RMFFitnessLandscape
+        An RMF landscape with no slope and high noise.
+    Raises
+    ------
+    AssertionError
+        If the autocorrelation at lag 1 is not close to zero.
+    """
+    results = calculate_ruggedness_autocorrelation_stochastic(random_rmf_landscape, steps=10000, lag_max=5)
+    
+    # The autocorrelation at lag 1 should be very close to zero.
+    assert np.isclose(results['autocorrelation'][1], 0, atol=0.1)
+
+def test_stochastic_converges_to_analytical():
+    """
+    Tests that the stochastic autocorrelation converges to the
+    analytical result for a long random walk.
+
+    Raises
+    ------
+    AssertionError
+        If the stochastic autocorrelation does not match the analytical
+        autocorrelation within a reasonable tolerance.
+    """
+    # Use a small landscape so the stochastic walk can cover it reasonably well
+    landscape = NKFitnessLandscape(N=5, K=1, alphabet_size=2, seed=42)
+    
+    # Calculate the exact analytical autocorrelation
+    analytical_results = calculate_ruggedness_autocorrelation_analytical(landscape, lag_max=5)
+    analytical_autocorr = analytical_results['autocorrelation']
+    
+    # Calculate the stochastic autocorrelation with a very long walk
+    stochastic_results = calculate_ruggedness_autocorrelation_stochastic(landscape, steps=100000, lag_max=5)
+    stochastic_autocorr = stochastic_results['autocorrelation']
+    
+    # The first value is always 1, so we compare from the second element onwards
+    # We use a larger tolerance because the stochastic result is an approximation.
+    assert np.allclose(analytical_autocorr[1:], stochastic_autocorr[1:], atol=0.1)
+
+
+
+# Statistics tests
+def test_analyze_fitness_distribution(additive_landscape: additive_landscape):
+    """
+    Tests that the fitness distribution of an additive landscape is
+    correctly identified as approximately normal.
+
+    Parameters
+    ---------- 
+    additive_landscape : NKFitnessLandscape
+        A purely additive landscape (K=0).
+    Raises
+    ------
+    AssertionError
+        If the normality test fails or the mean is not close to the
+        expected value.
+    """
+    results = analyze_fitness_distribution(additive_landscape)
+    
+    # For K=0, fitness is a sum of i.i.d. variables, so it should be normal-like.
+    # The Shapiro-Wilk test p-value should be > 0.05.
+    assert results['normality_test']['is_normal'] is True
+    assert results['mean'] == pytest.approx(4.0, abs=0.2) # Expected mean for N=8, K=0
+
+def test_correlation_analysis(additive_landscape: additive_landscape):
+    """
+    Tests that correlation analysis correctly identifies the perfect
+    linear relationship in a noise-free RMF landscape.
+
+    Parameters
+    ----------
+    additive_landscape : RMFFitnessLandscape
+        An RMF landscape with a linear fitness signal.
+    Raises
+    ------
+    AssertionError
+        If the Pearson correlation is not close to -1.0, indicating a
+        perfect anti-correlation with distance from the optimum.
+    """
+    # Create a feature that is the Hamming distance from the optimum ("00...0")
+    distances = [np.sum(seq.to_array()) for seq in additive_landscape.sequences]
+    features = {'distance_from_optimum': distances}
+    
+    results = correlation_analysis(additive_landscape, features)
+    
+    # Fitness is perfectly anti-correlated with distance from the optimum
+    pearson_corr = results['pearson']['distance_from_optimum']['correlation']
+    assert np.isclose(pearson_corr, -1.0)
+
+def test_regression_analysis(additive_landscape: additive_landscape):
+    """
+    Tests that linear regression can perfectly model a purely additive
+    landscape.
+
+    Parameters
+    ----------
+    additive_landscape : NKFitnessLandscape
+        A purely additive landscape (K=0).
+    Raises
+    ------
+    AssertionError
+        If the R2 score is not close to 1.0.
+    """
+    # For a K=0 landscape, fitness is a linear function of the sequence bits.
+    features = {f'pos_{i}': [s.to_array()[i] for s in additive_landscape.sequences] for i in range(8)}
+    
+    results = regression_analysis(additive_landscape, features)
+    
+    # A simple linear model should explain all variance, so R² should be 1.0
+    assert np.isclose(results['models']['linear']['test_r2'], 1.0)
+
+def test_hypothesis_testing(additive_landscape: additive_landscape):
+    """
+    Tests that hypothesis testing correctly identifies a significant
+    difference between two distinct groups of sequences.
+
+    Parameters
+    ----------
+    additive_landscape : NKFitnessLandscape
+        A purely additive landscape (K=0).
+    Raises
+    ------
+    AssertionError
+        If the t-test does not find a significant difference between
+        the two groups.
+    """
+    # Group 1: Sequences close to the optimum (high fitness)
+    group1_indices = [i for i, seq in enumerate(additive_landscape.sequences) if np.sum(seq.to_array()) <= 2]
+    # Group 2: Sequences far from the optimum (low fitness)
+    group2_indices = [i for i, seq in enumerate(additive_landscape.sequences) if np.sum(seq.to_array()) >= 6]
+    
+    groups = {'high_fitness': group1_indices, 'low_fitness': group2_indices}
+    
+    results = hypothesis_testing(additive_landscape, groups)
+    
+    # The p-value from the t-test should be very small, indicating significance.
+    ttest_results = results['pairwise_tests']['high_fitness']['low_fitness']['t_test']
+    assert ttest_results['significant'] is True
+    assert ttest_results['p_value'] < 0.001
+
+def test_bootstrap_analysis(additive_landscape: additive_landscape):
+    """
+    Tests that bootstrap analysis produces a confidence interval that
+    contains the observed statistic.
+
+    Parameters
+    ----------
+    additive_landscape : NKFitnessLandscape
+        A purely additive landscape (K=0).
+    Raises
+    ------
+    AssertionError
+        If the confidence interval does not contain the observed mean.
+    """
+    # Bootstrap the mean of the fitness distribution
+    results = bootstrap_analysis(additive_landscape, statistic_func=np.mean, n_bootstrap=100)
+    
+    observed_mean = results['observed']
+    lower_ci, upper_ci = results['confidence_interval']
+    
+    assert lower_ci <= observed_mean <= upper_ci
+
+def test_permutation_test(additive_landscape: additive_landscape):
+    """
+    Tests that a permutation test confirms the significant difference
+    found by the standard hypothesis test.
+
+    Parameters
+    ----------
+    additive_landscape : NKFitnessLandscape
+        A purely additive landscape (K=0).
+    Raises
+    ------
+    AssertionError
+        If the permutation test does not confirm the significance of
+        the difference between the two groups.
+    """
+    # Use the same groups as the hypothesis testing test
+    group1_indices = [i for i, seq in enumerate(additive_landscape.sequences) if np.sum(seq.to_array()) <= 2]
+    group2_indices = [i for i, seq in enumerate(additive_landscape.sequences) if np.sum(seq.to_array()) >= 6]
+    groups = {'high_fitness': group1_indices, 'low_fitness': group2_indices}
+    
+    # The test statistic is the difference in means between the two groups
+    def diff_in_means(a, b):
+        return np.mean(a) - np.mean(b)
+        
+    results = permutation_test(additive_landscape, groups, statistic_func=diff_in_means, n_permutations=500)
+    
+    # The p-value should be very small, confirming the groups are different.
+    assert results['significant'] is True
+    assert results['p_value'] < 0.01
