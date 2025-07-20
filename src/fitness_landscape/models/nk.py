@@ -2,11 +2,12 @@ import numpy as np
 import networkx as nx
 from typing import Optional, Tuple
 from ..core.landscape import FitnessLandscape
+from itertools import product
 
 def generate_NK_landscape(N: int,
                           K: int,
                           alphabet_size: int = 2,
-                          seed: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
+                          seed: int = None) -> tuple[np.ndarray, np.ndarray]:
     """
     Generate all possible sequences and fitness values for an NK
     landscape.
@@ -30,40 +31,42 @@ def generate_NK_landscape(N: int,
         Array of sequences (each sequence is an array of integers).
     fitness_values : np.ndarray
         Array of fitness values corresponding to each sequence.
+
     """
     if seed is not None:
         np.random.seed(seed)
-    
-    num_sequences = alphabet_size ** N
-    sequences = []
-    fitness_values = []
-    
+
+    # Generate all possible sequences
+    alleles = range(alphabet_size)
+    sequences = np.array(list(product(alleles, repeat=N)))
+    num_sequences = len(sequences)
+    fitness_values = np.zeros(num_sequences)
+
+    # Create fitness contribution tables
     fitness_contrib = []
-    for i in range(N):
+    for _ in range(N):
         table_size = alphabet_size ** (K + 1)
         fitness_contrib.append(np.random.rand(table_size))
-    
-    # Iterate over all possible sequences
-    for i in range(num_sequences):
-        # Generate a sequence as a numpy array; for binary sequences, use binary representation.
-        seq = np.array(list(np.binary_repr(i, width=N)), dtype=int)
-        sequences.append(seq)
-        
+
+    # Calculate fitness for each sequence
+    for i, seq in enumerate(sequences):
         total_fit = 0.0
-        # Sum the contributions from each gene
         for j in range(N):
-            # Define a circular neighborhood: gene j and the next K genes (modulo N)
+            
+            # Define a circular neighborhood
             indices = [(j + offset) % N for offset in range(K + 1)]
             config = seq[indices]
 
-            index = int("".join(config.astype(str)), base=alphabet_size)
-            total_fit += fitness_contrib[j][index]
-        
-        # Average the contributions to obtain the overall fitness.
-        fitness_values.append(total_fit / N)
-    
-    return np.array(sequences), np.array(fitness_values)
+            # Calculate index for the fitness contribution table
+            index = 0
+            for allele_idx, allele in enumerate(config):
+                index += allele * (alphabet_size ** (K - allele_idx))
 
+            total_fit += fitness_contrib[j][index]
+
+        fitness_values[i] = total_fit / N
+
+    return sequences, fitness_values
 
 class NKFitnessLandscape(FitnessLandscape):
     """

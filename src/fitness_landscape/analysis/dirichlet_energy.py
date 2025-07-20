@@ -143,7 +143,7 @@ def _collect_edges(landscape: Union[FitnessLandscape, nx.Graph],
             selected_edges.append((u, v))
     return selected_edges
 
-def calculate_local_dirichlet_energy(landscape: FitnessLandscape) -> Dict: #TODO: add indexing sequences.
+def local_dirichlet_energy(landscape: FitnessLandscape) -> Dict: #TODO: add indexing sequences.
     """
     Function to determine the local Dirichlet energy of a node.
 
@@ -184,3 +184,46 @@ def calculate_local_dirichlet_energy(landscape: FitnessLandscape) -> Dict: #TODO
         local_dirichlet = sub_values @ laplacian @ sub_values
 
         results[(f'{node}', idx)] = local_dirichlet
+
+def local_dirichlet_energy_contribution(landscape: FitnessLandscape) -> Dict[int, float]:
+    """
+    Calculates the local contribution of each node to the total
+    Dirichlet energy.
+
+    Parameters
+    ----------
+    landscape : FitnessLandscape
+        The fitness landscape to analyze, which must have a graph
+        representation.
+
+    Returns
+    -------
+    Dict[int, float]
+        A dictionary mapping each node index to its local Dirichlet
+        energy contribution.
+    """
+    if not isinstance(landscape, FitnessLandscape) or landscape.graph is None:
+        raise TypeError("Input must be a FitnessLandscape with an initialized graph.")
+
+    graph = landscape.graph
+    local_energies = {}
+
+    for node, node_data in graph.nodes(data=True):
+        fitness_i = node_data.get('fitness')
+        if fitness_i is None:
+            continue 
+
+        degree_i = graph.degree(node)
+        
+        # Calculate the sum of fitness values of all neighbors
+        sum_neighbor_fitness = 0
+        for neighbor in graph.neighbors(node):
+            neighbor_fitness = graph.nodes[neighbor].get('fitness')
+            if neighbor_fitness is not None:
+                sum_neighbor_fitness += neighbor_fitness
+        
+        local_energy = (degree_i * (fitness_i ** 2)) - (fitness_i * sum_neighbor_fitness)
+        
+        local_energies[node] = local_energy
+        
+    return local_energies
