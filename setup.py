@@ -35,7 +35,8 @@ setup(
         "transformers>=4.53.2",
         "cogent3==2025.3.22a4", 
         "piqtree>=0.4.0",
-        "pydantic==2.11.7" 
+        "pydantic==2.11.7",
+        "pytest>=8"
         # TODO: Add soft sequence alignment
     ],
     extras_require={
