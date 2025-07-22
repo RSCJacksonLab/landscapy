@@ -1,15 +1,15 @@
 from .adaptive_walk import (
     find_greedy_accessible_paths,
     analyze_path_accessibility,
-    calculate_basin_of_attraction,
+    calculate_basin_of_attraction_greedy,
+    calculate_basin_of_attraction_stochastic,
     adaptive_walk_stochastic,
     neutral_network_analysis,
 )
 
 from .dirichlet_energy import (
     calculate_ruggedness_dirichlet_energy,
-    calculate_local_dirichlet_energy,
-)
+    local_dirichlet_energy_contribution)
 
 from .eigenmode import (
     eigenmode_decomposition,

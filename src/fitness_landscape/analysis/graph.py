@@ -2,7 +2,6 @@ import numpy as np
 import networkx as nx
 from ..core.landscape import FitnessLandscape
 from typing import Union, Dict
-from logging import Logger
 
 def graph_properties(graph: Union[FitnessLandscape, nx.Graph]) -> Dict:
     """
@@ -91,9 +90,6 @@ def calculate_ruggedness_local_optima(landscape: FitnessLandscape,
     
     assert landscape.graph is not None, \
     'Landscape graph must be initialised.'
-    
-    if landscape.graph_type is not 'hamming':
-        Logger.warning(msg="Landscape graph type is not `Hamming`. Path analysis relies on Hamming structure for valid interpretation.")
     
     # Find local optima
     local_optima = []

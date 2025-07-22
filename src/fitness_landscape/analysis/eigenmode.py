@@ -132,24 +132,17 @@ def _eigenmode_decomposition_numpy(eig_mat, k=None) -> Tuple:
     eigenvectors : np.ndarray
         The eig_max eigenvectors.
     """
-    # Convert to dense matrix for eigendecomposition
-    mat_dense = eig_mat.todense()
-    
-    # Compute eigendecomposition
-    if k is not None and k < mat_dense.shape[0]:
-        # Use sparse eigendecomposition for efficiency
-        eigenvalues, eigenvectors = sp.linalg.eigsh(eig_mat,
-                                                    k=k,
-                                                    which='LM')
+    if hasattr(eig_mat, "todense"):
+        mat_dense = eig_mat.todense()
     else:
-        # Compute full eigendecomposition
-        eigenvalues, eigenvectors = np.linalg.eigh(mat_dense)
+        mat_dense = np.asarray(eig_mat)
+        
+    eigenvalues, eigenvectors = np.linalg.eigh(mat_dense)
     
-    # Sort eigenvalues and eigenvectors in descending order
-    idx = np.argsort(eigenvalues)[::-1]
-    eigenvalues = eigenvalues[idx]
-    eigenvectors = eigenvectors[:, idx]
-    
+    if k is not None:
+        eigenvectors = eigenvectors[:, :k]
+        eigenvalues = eigenvalues[:k]
+        
     return eigenvalues, eigenvectors
 
 

@@ -2,8 +2,7 @@ import numpy as np
 import torch
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
 from ..core.landscape import FitnessLandscape
-from ..core.sequence import Sequence, BinarySequence, generate_sequences
-
+from ..core.sequence import BaseNumpySequence, BinarySequence, generate_sequences
 
 def walsh_transform(landscape: FitnessLandscape,
                     order: int = None,
@@ -28,22 +27,25 @@ def walsh_transform(landscape: FitnessLandscape,
     # Validate input
     if not isinstance(landscape, FitnessLandscape):
         raise TypeError("landscape must be a FitnessLandscape object")
-    
+
     # Check if all sequences have the same length and are binary
     sequences = landscape.sequences
     if not sequences:
         raise ValueError("Landscape contains no sequences")
-    
-    seq_length = len(sequences[0])
+
     for seq in sequences:
-        if len(seq) != seq_length:
-            raise ValueError("All sequences must have the same length")
-        if not set(seq.sequence).issubset({0, 1}):
-            raise ValueError("Walsh transform requires binary sequences (0s and 1s)")
-    
-    # Extract fitness values in the same order as sequences
-    fitness_values = np.array([landscape.get_fitness(seq) for seq in sequences])
-    
+        if not isinstance(seq, BinarySequence):
+
+            # The Walsh-Hadamard transform is only defined for binary sequences.
+            raise TypeError(f"All sequences must be BinarySequence, but found {type(seq)}")
+        if not np.all(np.isin(seq.to_array().astype(int), [0, 1])):
+            
+            raise TypeError("All sequences in landscape must be binary (contain only 0s and 1s)")
+
+    # Get fitness values and sequence length
+    fitness_values = landscape.get_signal()
+    N = len(sequences[0])
+
     # Create sequence matrix where each row is a sequence
     sequence_matrix = np.array([seq.to_array() for seq in sequences])
     
@@ -231,7 +233,7 @@ def _inverse_walsh_transform_numpy(coefficients: np.ndarray,
         sequences = np.array([seq.to_array() for seq in sequences])
     else:
         # Convert sequences to numpy array if needed
-        if isinstance(sequences[0], Sequence):
+        if isinstance(sequences[0], BaseNumpySequence):
             sequences = np.array([seq.to_array() for seq in sequences])
         else:
             sequences = np.asarray(sequences)
@@ -294,7 +296,7 @@ def _inverse_walsh_transform_torch(coefficients: Union[torch.Tensor, np.ndarray]
         sequences = torch.tensor([seq.to_array() for seq in sequences], dtype=torch.float32)
     else:
         # Convert sequences to torch tensor if needed
-        if isinstance(sequences[0], Sequence):
+        if isinstance(sequences[0], BaseNumpySequence):
             sequences = torch.tensor([seq.to_array() for seq in sequences], dtype=torch.float32)
         else:
             sequences = torch.tensor(sequences, dtype=torch.float32)

@@ -1,9 +1,8 @@
+from typing import Optional, List, Literal
 import numpy as np
-import networkx as nx
-from typing import Optional, Tuple, List
 from ..core.landscape import FitnessLandscape
-from ..core.sequence import Sequence
-from ..core.graph import create_knn_graph
+from ..core.sequence import BaseNumpySequence, generate_sequences
+from ..core.graph import create_knn_graph, create_hamming_graph
 from ..analysis.eigenmode import eigenmode_decomposition
 
 class ElementaryFitnessLandscape(FitnessLandscape):
@@ -16,28 +15,39 @@ class ElementaryFitnessLandscape(FitnessLandscape):
     ----------
 
     """
-
     def __init__(self,
-                 sequences: List[Sequence],
                  j: int,
-                 k: int,
+                 N: int = None,
+                 sequences: List[BaseNumpySequence] = None,
                  seed: Optional[int] = None,
-                 graph_type: str = 'knn',
+                 alphabet: List = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y'],
+                 graph_type: Literal['knn', 'hamming'] = 'hamming',
                  **kwargs):
 
-        graph = create_knn_graph(sequences=sequences,
-                                 k=k)
-        _, eigenvectors = eigenmode_decomposition(graph=graph,
-                                                  matrix='laplacian',
-                                                  backend='numpy')
+        if sequences is None and N is None:
+            raise ValueError("Either `sequences` or `N` must be provided.")
         
-        fitness_signal = eigenvectors[:, j]
-        for i, node in enumerate(graph.nodes()):
-            graph.nodes[node]['fitness'] = fitness_signal[i]
-        
-        self.k = k
-        self.eigenvector_index = j
-        self.seed = seed
+        # CORRECTED: Infer N from sequences if not provided
+        if N is None and sequences is not None:
+            N = len(sequences[0])
 
-        super().__init__(graph=graph,
+        if graph_type == 'knn':
+            if sequences is None:
+                raise ValueError("`sequences` must be provided for kNN graph.")
+            graph = create_knn_graph(sequences=sequences,
+                                     k=int(np.sqrt(len(sequences))))
+
+        elif graph_type == 'hamming':
+            if N is None:
+                raise ValueError("`N` must be provided for Hamming graph.")
+            if sequences is None:
+                sequences = generate_sequences(N, alphabet)
+            graph = create_hamming_graph(sequences)
+        
+        eigenvalues, eigenvectors = eigenmode_decomposition(graph)
+        fitness_values = eigenvectors[:, j]
+        
+        super().__init__(sequences=sequences,
+                         fitness_values=fitness_values,
+                         graph_type=graph_type,
                          **kwargs)

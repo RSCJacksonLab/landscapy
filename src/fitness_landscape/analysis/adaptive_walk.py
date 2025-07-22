@@ -2,13 +2,12 @@ import numpy as np
 import networkx as nx
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
 from ..core.landscape import FitnessLandscape
-from ..core.sequence import Sequence
+from ..core.sequence import BaseNumpySequence
 from ..core.graph import create_hamming_graph
-from logging import Logger
 
 def find_greedy_accessible_paths(landscape: FitnessLandscape, 
-                                 start_sequence: Sequence,
-                                 end_sequence: Sequence,
+                                 start_sequence: BaseNumpySequence,
+                                 end_sequence: BaseNumpySequence,
                                  **kwargs) -> Dict:
     """
     Function to find all fitness greedy paths between two sequences.
@@ -51,8 +50,6 @@ def find_greedy_accessible_paths(landscape: FitnessLandscape,
     assert landscape.graph is not None, \
     'Landscape graph must be initialised.'
     
-    if landscape.graph_type is not 'hamming':
-        Logger.warning(msg="Landscape graph type is not `Hamming`. Path analysis relies on Hamming structure for valid interpretation.")
 
     # Create directed graph for accessible paths
     directed_graph = nx.DiGraph()
@@ -133,9 +130,6 @@ def analyze_path_accessibility(landscape: FitnessLandscape,
     # Assert graph structure exists in landscape and warn if not Hamming graph.
     assert landscape.graph is not None, \
     'Landscape graph must be initialised.'
-    
-    if landscape.graph_type is not 'hamming':
-        Logger.warning(msg="Landscape graph type is not `Hamming`. Path analysis relies on Hamming structure for valid interpretation.")
     
     # Find local minima and maxima
     local_minima = []
@@ -224,8 +218,8 @@ def analyze_path_accessibility(landscape: FitnessLandscape,
         'total_pairs': total_pairs
     }
 
-def calculate_basin_of_attraction(landscape: FitnessLandscape,
-                                  local_optimum: Sequence,
+def calculate_basin_of_attraction_greedy(landscape: FitnessLandscape,
+                                  local_optimum: BaseNumpySequence,
                                   **kwargs) -> Dict:
     """
     Calculate the characteristics of a basin of attraction around a
@@ -260,9 +254,6 @@ def calculate_basin_of_attraction(landscape: FitnessLandscape,
     # Assert graph structure exists in landscape and warn if not Hamming graph.
     assert landscape.graph is not None, \
     'Landscape graph must be initialised.'
-    
-    if landscape.graph_type is not 'hamming':
-        Logger.warning(msg="Landscape graph type is not `Hamming`. Path analysis relies on Hamming structure for valid interpretation.")
     
     # Verify that the sequence is a local optimum
     optimum_fitness = landscape.get_fitness(local_optimum)
@@ -336,8 +327,121 @@ def calculate_basin_of_attraction(landscape: FitnessLandscape,
         'optimum_fitness': optimum_fitness
     }
 
+def calculate_basin_of_attraction_stochastic(landscape: FitnessLandscape,
+                                             local_optimum: BaseNumpySequence,
+                                             n_simulations: int = 100,
+                                             max_steps: int = 1000,
+                                             beta: float = 1.0,
+                                             acceptance_threshold: float = 0.5,
+                                             **kwargs) -> Dict:
+    """
+    Calculates the basin of attraction for a local optimum using a
+    stochastic Metropolis-style adaptive walk.
+
+    Parameters
+    ----------
+    landscape : FitnessLandscape
+        The fitness landscape to analyze.
+    local_optimum : BaseNumpySequence
+        The local optimum sequence defining the basin.
+    n_simulations : int, optional
+        Number of stochastic walks to simulate from each starting
+        sequence.
+    max_steps : int, optional
+        Maximum number of steps for each walk to prevent infinite
+        loops.
+    beta : float, optional
+        Inverse temperature parameter for the Metropolis criterion.
+        Controls selection strength.
+    acceptance_threshold : float, optional
+        The minimum probability required for a sequence to be included
+        in the basin.
+
+    Returns
+    -------
+    Dict
+        A dictionary containing the basin analysis results.
+    """
+    sequences = landscape.sequences
+    if not sequences or landscape.graph is None:
+        raise ValueError("Landscape must contain sequences and an initialized graph.")
+
+    # Find the index of the target local optimum
+    try:
+        optimum_idx = sequences.index(local_optimum)
+    except ValueError:
+        raise ValueError("Local optimum not found in the landscape's sequences.")
+
+    optimum_fitness = landscape.get_fitness(local_optimum)
+    basin_probabilities = {}
+    basin_sequences = set()
+
+    # For each sequence in the landscape, estimate its probability of reaching the optimum
+    for i, start_seq in enumerate(sequences):
+        if i == optimum_idx:
+            basin_probabilities[i] = 1.0
+            continue
+
+        successful_walks = 0
+        for _ in range(n_simulations):
+            current_idx = i
+            
+            for step in range(max_steps):
+                if current_idx == optimum_idx:
+                    successful_walks += 1
+                    break # Walk successfully reached the optimum
+
+                current_fitness = landscape.get_fitness(sequences[current_idx])
+                neighbors = list(landscape.graph.neighbors(current_idx))
+                
+                if not neighbors:
+                    # Trapped at a node with no neighbors
+                    break 
+
+                # Propose a random move to a neighbor
+                proposed_neighbor_idx = np.random.choice(neighbors)
+                proposed_fitness = landscape.get_fitness(sequences[proposed_neighbor_idx])
+                
+                # Calculate the acceptance probability
+                delta_fitness = proposed_fitness - current_fitness
+                if delta_fitness > 0:
+                    acceptance_prob = 1.0
+                else:
+                    acceptance_prob = np.exp(beta * delta_fitness)
+                
+                # Accept or reject the move
+                if np.random.rand() < acceptance_prob:
+                    current_idx = proposed_neighbor_idx
+            
+            if current_idx == optimum_idx and step < max_steps -1 :
+                successful_walks +=1
+
+        # Calculate the probability of belonging to the basin
+        basin_probabilities[i] = successful_walks / n_simulations
+
+    # A sequence is in the basin if its probability exceeds the threshold
+    for idx, prob in basin_probabilities.items():
+        if prob >= acceptance_threshold:
+            basin_sequences.add(idx)
+
+    return {
+        'basin': list(basin_sequences),
+        'basin_size': len(basin_sequences),
+        'basin_fraction': len(basin_sequences) / len(sequences),
+        'optimum': local_optimum,
+        'optimum_fitness': optimum_fitness,
+        'basin_probabilities': basin_probabilities,
+        'parameters': {
+            'n_simulations': n_simulations,
+            'max_steps': max_steps,
+            'beta': beta,
+            'acceptance_threshold': acceptance_threshold
+        }
+    }
+
+
 def adaptive_walk_stochastic(landscape: FitnessLandscape,
-                             start_sequence: Sequence=None,
+                             start_sequence: BaseNumpySequence=None,
                              max_steps: int=100,
                              strategy: Literal['greedy', 'random_improvement']='greedy') -> Dict:
     """

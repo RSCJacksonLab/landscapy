@@ -9,18 +9,35 @@ from typing import List, Optional
 
 
 class ESMEmbedder:
+    """
+    Class for embedding protein sequences using ESM models.
+    Supports both relaxed sequences and one-hot encoded sequences.
+
+    Attributes
+    ----------
+    model_name : str
+        Name of the ESM model to use for embeddings.
+    device : str
+        Device to run the model on, either 'cuda' or 'cpu'.
+    alphabet : List[str]
+        List of amino acids expected for embedding.
+    exclude_cls_eos : bool
+        Whether to exclude the <cls> and <eos> tokens from the
+        embeddings.
+    """
 
     def __init__(self,
                  model_name: str,
                  device: Optional[str] = None,
                  alphabet: str = 'ACDEFGHIKLMNPQRSTVWY',
                  exclude_cls_eos: bool = True) -> None:
-        '''
+
+        """
         Initialise PLM embedder class by initialising the provided
         model.
 
-        Parameters:
-        -----------
+        Parameters
+        ----------
         model_name : str
             HuggingFace PLM model name.
 
@@ -33,7 +50,8 @@ class ESMEmbedder:
         exclude_cls_eos : bool
             Whether the forward pass will add <cls> and <eos> tokens to
             the embeddings.
-        '''
+        """
+        
         # device management
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -48,10 +66,10 @@ class ESMEmbedder:
         self.exclude_cls_eos = exclude_cls_eos
 
     def _load_model(self):
-        '''
+        """
         Load tokenizer and model given name. Tokenizer is used to
         construct an embedding matrix for use on relaxed sequences.
-        '''
+        """
         # load model and tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         self.model = EsmForMaskedLM.from_pretrained(self.model_name).to(self.device)
@@ -90,28 +108,29 @@ class ESMEmbedder:
             ).float().to(self.device)
 
     def _freeze_esm(self):
-        '''
+        """
         Freeze all parameters of the ESM model to prevent updates 
         during training.
-        '''
+        """
         for param in self.model.parameters():
             param.requires_grad = False
 
-    def forward_pass(self, relaxed_seqs: torch.Tensor) -> torch.Tensor:
-        '''
+    def forward_pass(self,
+                     relaxed_seqs: torch.Tensor) -> torch.Tensor:
+        """
         Forward pass with relaxed amino acids at each position.
 
-        Parameters:
-        -----------
+        Parameters
+        ----------
         relaxed_seqs : torch.Tensor
             Array of shape [L * alphabet_size] or [B * L * alphabet_size] 
             containing distribution of AAs at each position.
 
-        Returns:
-        --------
+        Returns
+        -------
             torch.Tensor
                 Final hidden layer from the model.
-        '''
+        """
         # ensure input has batch dimension
         if relaxed_seqs.dim() == 2:
             # add batch dimension if missing [L, A] -> [1, L, A]
@@ -152,19 +171,19 @@ class ESMEmbedder:
         return out.hidden_states[-1]
     
     def get_seq_ohe(self, sequence: str) -> np.ndarray:
-        '''
+        """
         Get the OHE for a protein sequence.
 
-        Parameters:
-        -----------
+        Parameters
+        ----------
         sequence : str
             Protein sequence string to get the OHE of.
 
-        Returns:
-        --------
+        Returns
+        -------
         np.ndarray
             OHE of sequence.
-        '''
+        """
         seq_len = len(sequence)
         alphabet_size = len(self.alphabet)
         encoding = np.zeros((seq_len, alphabet_size), dtype=np.float32)
@@ -179,22 +198,22 @@ class ESMEmbedder:
     def embed_relaxed_seqs(self,
                            relaxed_seqs: ArrayLike,
                            batch_size: int = 32) -> np.ndarray:
-        '''
+        """
         Embed relaxed (or one-hot encoded) sequences directly.
 
-        Parameters:
-        -----------
+        Parameters
+        ----------
         relaxed_seqs : List[torch.Tensor]
             List of relaxed sequence tensors.
 
         batch_size : int
             Batch size for processing.
 
-        Returns:
-        --------
+        Returns
+        -------
         np.ndarray
             Extracted features.
-        '''
+        """
         if isinstance(relaxed_seqs, np.ndarray):
             relaxed_seqs = torch.from_numpy(relaxed_seqs).float()
 
@@ -220,22 +239,22 @@ class ESMEmbedder:
     def extract_features(self,
                          sequences: List[str],
                          batch_size: int = 32) -> np.ndarray:
-        '''
+        """"
         Extract features from protein sequences.
 
-        Parameters:
-        -----------
+        Parameters
+        ----------
         sequences : List[str]
             List of protein sequences.
 
         batch_size : int
             Batch size for processing.
 
-        Returns:
-        --------
+        Returns
+        -------
         np.ndarray
             Extracted features.
-        '''
+        """
         features = []
 
         # process sequences
@@ -259,28 +278,28 @@ class ESMEmbedder:
     def embed_sequences(self,
                        sequences: List[str],
                        batch_size: int = 32) -> np.ndarray:
-        '''
+        """
         Alias for extract_features for consistency with embed_relaxed_seqs.
         
-        Parameters:
-        -----------
+        Parameters
+        ----------
         sequences : List[str]
             List of protein sequences.
             
         batch_size : int
             Batch size for processing.
             
-        Returns:
-        --------
+        Returns
+        -------
         np.ndarray
             Extracted features.
-        '''
+        """
         return self.extract_features(sequences, batch_size)
 
     def save_embeddings(self, 
                         embeddings: np.ndarray, 
                         embedding_path: Path) -> None:
-        '''
+        """
         Save embeddings.
         
         Parameters:
@@ -290,12 +309,13 @@ class ESMEmbedder:
             
         embedding_path : Path
             Path to load the embeddings from
-        '''
+        """
         # save embeddings
         np.save(embedding_path, embeddings)
 
-    def load_embeddings(self, embedding_path: Path) -> np.ndarray:
-        '''
+    def load_embeddings(self,
+                        embedding_path: Path) -> np.ndarray:
+        """
         Load saved embeddings.
         
         Parameters:
@@ -307,5 +327,5 @@ class ESMEmbedder:
         --------
         np.ndarray
             Loaded embeddings
-        '''
+        """
         return np.load(embedding_path)

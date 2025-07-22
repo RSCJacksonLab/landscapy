@@ -1,12 +1,12 @@
 import numpy as np
 import networkx as nx
-from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal,  Protocol, runtime_checkable, Hashable
+from typing import List, Union, Tuple, Dict, Any, Iterable, Literal,  Protocol, runtime_checkable, Hashable
 from dataclasses import dataclass
 from .sequence import BaseNumpySequence, make_sequence
 from .graph import create_hamming_graph
 import scipy.linalg as la
 from abc import ABC, abstractmethod
-from pydantic import BaseModel, Field, validator, conlist, ValidationError  
+from pydantic import BaseModel, Field, field_validator, ValidationError, ConfigDict
 from .graph import create_knn_graph, create_hamming_graph
 from .digraph import ASRLandscapeConstructor
 from cogent3 import make_aligned_seqs
@@ -15,18 +15,21 @@ import inspect
 
 
 class NodeModel(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
     sequence: BaseNumpySequence
     fitness: Union[float, None] = np.nan
     gapped_arr: np.ndarray = Field(..., repr=False)
     ungapped_arr: np.ndarray = Field(..., repr=False)
 
-    @validator("gapped_arr")
+    @field_validator("gapped_arr")
+    @classmethod
     def _check_gap(cls, v):
         if v.ndim != 2 or v.shape[1] != 21:
             raise ValueError("gapped_arr must be (L,21)")
         return v
 
-    @validator("ungapped_arr")
+    @field_validator("ungapped_arr")
+    @classmethod
     def _check_ungap(cls, v):
         if v.ndim != 2 or v.shape[1] != 20:
             raise ValueError("ungapped_arr must be (L,20)")
@@ -51,6 +54,17 @@ class BaseGraphLandscape(ABC):
     """
     Abstract base class for directed and undirected fitness landscapes.
     Implements standard class methods.
+
+    Attributes
+    ----------
+    graph : _GraphLike
+        The graph representation of the fitness landscape.
+    sequences : list[BaseNumpySequence]
+        List of sequences in the landscape.
+    _records : Dict[SeqKey, _Record]
+        Dictionary mapping sequence keys to records containing sequence and fitness data.
+    graph_type : Literal['hamming', 'knn']
+        Type of graph used in the landscape (e.g., 'hamming', 'knn').
     """
     graph: _GraphLike
     sequences: list[BaseNumpySequence]
@@ -62,6 +76,7 @@ class BaseGraphLandscape(ABC):
         self._records = {}
         self.graph_type = None,
         
+        self._res_emb_arr_key: str = 'residue_emb_arr'
         self._emb_arr_key: str = 'emb_arr'
 
     def get_fitness(self,
@@ -70,6 +85,13 @@ class BaseGraphLandscape(ABC):
                     default: Union[float, None] = None) -> float:
         """
         Method to retrieve the fitness of a sequence.
+
+        Returns
+        -------
+        float
+            Fitness value of the sequence. If the sequence is not
+            found, returns the default value if provided, otherwise
+            raises KeyError.
         """
 
         key = tuple(make_sequence(sequence).to_array())
@@ -83,18 +105,36 @@ class BaseGraphLandscape(ABC):
     def get_signal(self) -> np.ndarray:
         """
         Method to retrieve the graph signal vector.
+
+        Returns
+        -------
+        np.ndarray
+            Array of fitness values for each sequence in the landscape.
         """
         return np.fromiter(
             (rec.fitness for rec in self._records.values()), float, len(self._records)
         )
     
     def _init_from_pairs(self,
-                         seqs,
-                         fits):
+                         seqs: List[BaseNumpySequence],
+                         fits: Union[List, np.ndarray]) -> None:
+        
+        """
+        Method to initialize the landscape from pairs of sequences and
+        fitness values.
+
+        Parameters
+        ----------
+        seqs : List[BaseNumpySequence]
+            List of sequences to initialize the landscape with.
+        fits : Union[List, np.ndarray]
+            List or array of fitness values corresponding to the sequences.
+        """
+
         for seq, fit in zip(seqs, fits):
             s = make_sequence(seq)
             self.sequences.append(s)
-            self._records[tuple(s.to_array())] = _Record(seq=s, fitness=float(fit))
+            self._records[tuple(s.to_array())] = _Record(sequence=s, fitness=float(fit))
 
     def _init_from_graph(self, graph: _GraphLike) -> None:
         self.graph = graph
@@ -106,7 +146,7 @@ class BaseGraphLandscape(ABC):
 
             seq = make_sequence(model.sequence)
             rec = _Record(
-                seq=seq,
+                sequence=seq,
                 fitness=float(model.fitness),
                 gapped_arr=getattr(model, "gapped_arr", None),
                 ungapped_arr=getattr(model, "ungapped_arr", None),
@@ -116,25 +156,41 @@ class BaseGraphLandscape(ABC):
 
 
     def compute_node_embeddings(self,
-                                model_name: str = None,
-                                batch_size: int = None) -> None:
+                                model_name: str = 'facebook/esm2_t6_8M_UR50D',
+                                batch_size: int = 64) -> None:
         """
         Method to get node embeddings from soft sequence OHE. Inplace
         node attribute updates.
+
+        Parameters
+        ----------
+        model_name : str, optional
+            Name of the ESM model to use for embeddings. If not provided,
+            defaults to 'esm2_t33_650M_UR50D'.
+        batch_size : int, optional
+            Batch size for embedding computation. If not provided,
+            defaults to 64.
         """
 
         if not hasattr(self, 'emb_model'):
             
             self.emb_model = ESMEmbedder(model_name=model_name)
 
-        ohe_arr = np.stack([node['ungapped_arr'] for node in self.graph.nodes(data=True)])
+        ohe_arr = np.stack([node[1]['ungapped_arr'] for node in self.graph.nodes(data=True)])
 
         emb_arr = self.emb_model.embed_relaxed_seqs(relaxed_seqs=ohe_arr,
                                                 batch_size=batch_size)
         
         # Iterate through nodes and update data attributes.
-        for node, arr in zip(self.graph.nodes(), emb_arr):
-            self.graph[node][self._emb_arr_key] = arr
+        for node_identifier, embedding_array in zip(self.graph.nodes(), emb_arr):
+            # Update attribute in the node data.
+            
+            # Store residue-wise embeddings.
+            self.graph.nodes[node_identifier][self._res_emb_arr_key] = embedding_array
+            
+            # Pool and store sequence-wise embeddings.
+            pooled_array = np.mean(embedding_array, axis=0)
+            self.graph.nodes[node_identifier][self._emb_arr_key] = pooled_array
 
     @abstractmethod
     def _to_graph(self):
@@ -148,6 +204,27 @@ class BaseGraphLandscape(ABC):
     def _split_kwargs(callable_a: Any,
                       callable_b: Any,
                       kwargs: Dict[str, Any]) -> tuple[dict, dict]:
+        """
+        Method to split kwargs between two callables based on their
+        signatures. Raises TypeError if a kwarg is ambiguous (i.e., valid
+        for both callables).
+
+        Parameters
+        ----------
+        callable_a : Any
+            First callable to check kwargs against.
+        callable_b : Any
+            Second callable to check kwargs against.
+        kwargs : Dict[str, Any]
+            Dictionary of keyword arguments to split.
+        
+        Returns
+        -------
+        tuple[dict, dict]
+            Two dictionaries containing kwargs for each callable.
+            If a kwarg is ambiguous (valid for both callables), raises
+            TypeError.
+        """
 
         sig_a = inspect.signature(callable_a)
         sig_b = inspect.signature(callable_b)
@@ -169,6 +246,17 @@ class BaseGraphLandscape(ABC):
     def from_graph(cls,
                    graph: _GraphLike,
                    **kwargs):
+        
+        """
+        Class method to create a landscape from a graph.
+
+        Parameters
+        ----------
+        graph : _GraphLike
+            The graph representation of the fitness landscape.
+        **kwargs
+            Additional keyword arguments to pass to the constructor.
+        """
 
         return cls(graph=graph, **kwargs)
     
@@ -209,13 +297,11 @@ class FitnessLandscape(BaseGraphLandscape):
                  fitness_values: np.ndarray = None,
                  *,
                  graph_type: Literal['hamming'] = 'hamming',
-                 emb_nodes: bool = True,
+                 emb_nodes: bool = False,
                  **kwargs) -> None:
         
         super().__init__()
         
-        self.sequences = []
-        self.fitness_values = {}
         self.graph = None
         self.graph_type = graph_type
         
@@ -257,12 +343,21 @@ class FitnessLandscape(BaseGraphLandscape):
         networkx.Graph
             Graph representation of the landscape.
         """
+
+        #Get fitness values for graph construction.
+        fitness_values = self.get_signal()
+
+        creation_kwargs = kwargs.copy()
+        creation_kwargs.pop('graph_type', None)
+
         if self.graph_type == 'hamming':
-            self.graph = create_hamming_graph(self.sequences, list(self.fitness_values.values()), **kwargs)
-        
+            self.graph = create_hamming_graph(self.sequences, fitness_values, **creation_kwargs)
+
         elif self.graph_type == 'knn':
-            self.graph = create_knn_graph(self.sequences, list(self.fitness_values.values()), **kwargs)
-        
+            self.graph = create_knn_graph(self.sequences, fitness_values, **creation_kwargs)
+
+        #TODO: Other graph types can be added here.
+
         else:
             raise ValueError(f"Unsupported graph type: {self.graph_type}")
     
@@ -282,12 +377,12 @@ class DirectedFitnessLandscape(BaseGraphLandscape):
     """
     
     def __init__(self,
-                 digraph: nx.DiGraph,
-                 sequences: List[BaseNumpySequence],
+                 digraph: nx.DiGraph = None,
+                 sequences: List[BaseNumpySequence] = None,
                  fitness_values: np.ndarray = None,
                  *,
                  laplacian: Union[Literal['directed'], None] = None,
-                 emb_nodes: bool = True,
+                 emb_nodes: bool = False,
                  graph_type: Literal['phylogenetic_directed'] = 'phylogenetic_directed',
                  **kwargs) -> None:
         
@@ -470,11 +565,21 @@ class DirectedFitnessLandscape(BaseGraphLandscape):
                                   *,
                                   moltype="protein"):
         """
+        Method to create an alignment from the sequences in the landscape.
 
+        Parameters
+        ----------
+        moltype : str, optional
+            The type of molecule (e.g., 'protein'). Defaults to 'protein'.
+
+        Returns
+        -------
+        cogent3.Alignment
+            An alignment object containing the sequences in the landscape.
         """
         if hasattr(self, "graph") and self.graph is not None:
             data = {
-                str(node): str(d["sequence"])              # Sequence objects stringify fine
+                str(node): str(d["sequence"]) # Sequence objects stringify fine
                 for node, d in self.graph.nodes(data=True)
                 if "sequence" in d
             }

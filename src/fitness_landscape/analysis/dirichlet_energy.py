@@ -1,11 +1,7 @@
 import numpy as np
 import networkx as nx
-from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable
+from typing import List, Union, Dict
 from ..core.landscape import FitnessLandscape
-from ..core.graph import create_hamming_graph
-from ..core.sequence import sequence_distance, Sequence
-from logging import Logger
-from .eigenmode import eigenmode_decomposition
 
 def calculate_ruggedness_dirichlet_energy(landscape: FitnessLandscape,
                                           edge_weight_bins: Union[np.ndarray, List] = None,
@@ -24,6 +20,9 @@ def calculate_ruggedness_dirichlet_energy(landscape: FitnessLandscape,
         Dirichlet energy is determined as the global energy without
         edge contribution pooling. 
     
+    weighted_laplacian : bool, default=False
+        Boolean to indicate if a weighted Laplacian should be used.
+    
     Returns
     -------
     results : Dict
@@ -32,19 +31,22 @@ def calculate_ruggedness_dirichlet_energy(landscape: FitnessLandscape,
 
     if weighted_laplacian: 
         # Weighted Laplacian for kNN graphs.
-        laplacian = nx.laplacian_matrix(G = landscape.graph, weight='weight')
+        laplacian = nx.laplacian_matrix(G=landscape.graph, weight='weight').toarray()
     else:
-        laplacian = nx.laplacian_matrix(G = landscape.graph)
+        laplacian = nx.laplacian_matrix(G=landscape.graph).toarray()
 
     results = {}
 
     signal = landscape.get_signal()
 
+    # The formula for total Dirichlet energy is f' * L * f
     total_de = signal @ laplacian @ signal
-    total_de = total_de / nx.number_of_nodes(landscape.graph)
+    
+    # Normalize by the number of nodes
+    total_de_per_node = total_de / nx.number_of_nodes(landscape.graph)
     
     results = {
-        'total_dirichlet_energy': total_de,
+        'total_dirichlet_energy': total_de_per_node,
         'weighted_laplacian': weighted_laplacian,
     }
 
@@ -55,24 +57,26 @@ def calculate_ruggedness_dirichlet_energy(landscape: FitnessLandscape,
         for bin_range in edge_weight_bins:
             
             # Collect edges in the bin range.
-            edge_list = _collect_edges(landscape=landscape.graph, weight=bin_range)
+            edge_list = _collect_edges(landscape=landscape, weight=bin_range)
             edge_de = 0.0
             
             for u, v in edge_list:
                 fitness1 = landscape.graph.nodes[u].get('fitness', 0.0)
                 fitness2 = landscape.graph.nodes[v].get('fitness', 0.0)
                 
-                # Use the edge weight if available (default to 1.0 if missing)
                 current_edge_weight = landscape.graph.edges[u, v].get('weight', 1.0)
                 edge_de += _sum_dirichlet_energy(fitness1=fitness1,
                                                 fitness2=fitness2,
                                                 weighted_edge=weighted_laplacian,
                                                 edge_weight=current_edge_weight)
                 
-            # Save the edge Dirichlet energy and its contribution.
             bin_key = f"{bin_range}"
             results['edge_weight_bins'][f'{bin_key}_dirichlet_energy'] = edge_de
-            results['edge_weight_bins'][f'{bin_key}_contribution'] = edge_de / total_de
+            # Normalize contribution by total energy (not per-node energy)
+            if total_de > 0:
+                results['edge_weight_bins'][f'{bin_key}_contribution'] = edge_de / total_de
+            else:
+                results['edge_weight_bins'][f'{bin_key}_contribution'] = 0.0
 
     return results
 
@@ -83,54 +87,20 @@ def _sum_dirichlet_energy(fitness1: float,
     """
     Helper function to compute the edge summed form of the Dirichlet
     energy. 
-
-    Parameters
-    ----------
-    fitness1 : float
-        Fitness value of first incident node. 
-    
-    fitness2 : float
-        Fitness value of second incident node.
-    
-    weighted_edge : bool, default=`False`
-        Boolean to weight the summed dirichlet energy ny a weight.
-
-    egde_weight : float, default=`None`
-        The edge weight.
-    
-    Returns
-    -------
-    float
-        The summed dirichlet energy.
     """
     squared_diffs = (fitness1 - fitness2)**2
     if weighted_edge:
-        assert edge_weight is not None, \
-        'Edge weights must be included if weighting by an edge.'
-
+        if edge_weight is None:
+            raise ValueError('Edge weights must be provided if weighting by an edge.')
         squared_diffs = squared_diffs * edge_weight
     
     return squared_diffs / 2
 
 def _collect_edges(landscape: Union[FitnessLandscape, nx.Graph],
-                   weight: np.ndarray) -> np.ndarray:
+                   weight: np.ndarray) -> List[tuple[int, int]]:
     """
     Helper function to collect edges into distance bins. 
-
-    Parameters
-    ----------
-    landscape : FitnessLandscape or nx.Graph
-        The fitness landscape to analyze.
-    
-    bins : array-like
-        The edge-weight bin to collect edges into. Shape must be (2,).
-    
-    Returns
-    -------
-    List[tuple[int, int]]
-        The list of edges indexing the sequences.
     """
-
     if isinstance(landscape, FitnessLandscape):
         graph = landscape.graph
     elif isinstance(landscape, nx.Graph):
@@ -138,53 +108,30 @@ def _collect_edges(landscape: Union[FitnessLandscape, nx.Graph],
     else:
         raise TypeError("landscape must be a FitnessLandscape or nx.Graph")
     
-    # Expect weight to be a two-element sequence: [min_weight, max_weight)
     min_weight, max_weight = weight
     selected_edges = []
     for u, v, data in graph.edges(data=True):
         w = data.get('weight', 1.0)
-        if w >= min_weight and w < max_weight:
+        if min_weight <= w < max_weight:
             selected_edges.append((u, v))
     return selected_edges
 
-def calculate_local_dirichlet_energy(landscape: FitnessLandscape) -> Dict: #TODO: add indexing sequences.
+def local_dirichlet_energy_contribution(landscape: FitnessLandscape) -> Dict[int, float]:
     """
-    Function to determine the local Dirichlet energy of a node.
-
-    Parameters
-    ----------
-    landscape : FitnessLandscape
-        The fitness landscape to analyze. 
-    
-    Returns
-    -------
-    Dict
-        Dict of local energies.
+    Calculates the local contribution of each node to the total
+    Dirichlet energy.
     """
+    if not isinstance(landscape, FitnessLandscape) or landscape.graph is None:
+        raise TypeError("Input must be a FitnessLandscape with an initialized graph.")
 
-    landscape = landscape.graph
+    graph = landscape.graph
+    fitness_values = landscape.get_signal()
+    local_energies = {}
 
-    nodes = list(landscape.nodes())
-    values = np.array([landscape.nodes[node]['fitness'] for node in nodes])
-
-    # Build adjacency matrix using nx.adjacency_matrix
-    adj_matrix = nx.adjacency_matrix(landscape, nodelist=nodes, weight=None)
-    adj_matrix = adj_matrix + adj_matrix.T  # Ensure symmetry
-    adj_matrix[adj_matrix > 1] = 1  # Remove multiple edges
-
-    results = {}
-
-    for idx, node in enumerate(nodes):
-
-        # Use getrow to retrieve the row as a 2D sparse matrix
-        neighbor_indices = adj_matrix.getrow(idx).nonzero()[1]
-        sub_indices = np.append(neighbor_indices, idx)
-        sub_values = values[sub_indices]
-
-        sub_adj = adj_matrix[sub_indices][:, sub_indices]
-        degree_vector = np.array(sub_adj.sum(axis=1)).flatten()
-        degree_matrix = np.diag(degree_vector)
-        laplacian = degree_matrix - sub_adj.toarray()
-        local_dirichlet = sub_values @ laplacian @ sub_values
-
-        results[(f'{node}', idx)] = local_dirichlet
+    for i in graph.nodes():
+        local_sum = 0
+        for j in graph.neighbors(i):
+            local_sum += (fitness_values[i] - fitness_values[j])**2
+        local_energies[i] = 0.5 * local_sum
+        
+    return local_energies

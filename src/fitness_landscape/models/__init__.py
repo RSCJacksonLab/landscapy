@@ -12,6 +12,6 @@ from .elementary_landscape import (
 
 __all__ = [
     'NKFitnessLandscape',
-    'RMFFitnessLandscape,',
+    'RMFFitnessLandscape',
     'ElementaryFitnessLandscape',
 ]
