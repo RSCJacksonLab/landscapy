@@ -53,7 +53,8 @@ def graph_fourier_transform(graph: Union[nx.Graph, FitnessLandscape],
 
 
 def _graph_fourier_transform_numpy(graph: Union[nx.Graph, FitnessLandscape],
-                                   signal: np.ndarray) -> Tuple:
+                                   signal: np.ndarray,
+                                   k: int = None) -> Tuple:
     """
     Helper function to compute the GFT using the numpy backend.
 
@@ -79,7 +80,7 @@ def _graph_fourier_transform_numpy(graph: Union[nx.Graph, FitnessLandscape],
 
     eigenvalues, eigenvectors = eigenmode_decomposition(graph=graph,
                                                         matrix='laplacian',
-                                                        k=None,
+                                                        k=k,
                                                         backend='numpy')
 
     # Compute Fourier coefficients if signal is provided    
