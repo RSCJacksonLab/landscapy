@@ -5,7 +5,6 @@ from . import models
 
 from .core import (
     FitnessLandscape,
-    DirectedFitnessLandscape,
     BaseNumpySequence,
     BinarySequence,
     MultialleleSequence,
@@ -13,7 +12,6 @@ from .core import (
     sequence_distance,
     create_hamming_graph,
     create_knn_graph,
-    ASRLandscapeConstructor,
 
 )
 
@@ -30,8 +28,6 @@ __all__ = [
     'generate_sequences',
     'sequence_distance',
     'FitnessLandscape',
-    'DirectedFitnessLandscape',
-    'ASRLandscapeConstructor',
     'create_hamming_graph',
     'create_knn_graph',
 ]

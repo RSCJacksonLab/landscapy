@@ -8,7 +8,6 @@ from .sequence import (
 
 from .landscape import (
     FitnessLandscape,
-    DirectedFitnessLandscape
 )
 
 
@@ -17,10 +16,6 @@ from .graph import (
     create_knn_graph,
 )
 
-from .digraph import (
-    ASRLandscapeConstructor,
-
-)
 
 __all__ = [
     'BaseNumpySequence',
