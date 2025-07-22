@@ -1,6 +1,6 @@
 import numpy as np
 import networkx as nx
-from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal,  Protocol, runtime_checkable, Hashable
+from typing import List, Union, Tuple, Dict, Any, Iterable, Literal,  Protocol, runtime_checkable, Hashable
 from dataclasses import dataclass
 from .sequence import BaseNumpySequence, make_sequence
 from .graph import create_hamming_graph
@@ -54,6 +54,17 @@ class BaseGraphLandscape(ABC):
     """
     Abstract base class for directed and undirected fitness landscapes.
     Implements standard class methods.
+
+    Attributes
+    ----------
+    graph : _GraphLike
+        The graph representation of the fitness landscape.
+    sequences : list[BaseNumpySequence]
+        List of sequences in the landscape.
+    _records : Dict[SeqKey, _Record]
+        Dictionary mapping sequence keys to records containing sequence and fitness data.
+    graph_type : Literal['hamming', 'knn']
+        Type of graph used in the landscape (e.g., 'hamming', 'knn').
     """
     graph: _GraphLike
     sequences: list[BaseNumpySequence]
@@ -74,6 +85,13 @@ class BaseGraphLandscape(ABC):
                     default: Union[float, None] = None) -> float:
         """
         Method to retrieve the fitness of a sequence.
+
+        Returns
+        -------
+        float
+            Fitness value of the sequence. If the sequence is not
+            found, returns the default value if provided, otherwise
+            raises KeyError.
         """
 
         key = tuple(make_sequence(sequence).to_array())
@@ -87,14 +105,32 @@ class BaseGraphLandscape(ABC):
     def get_signal(self) -> np.ndarray:
         """
         Method to retrieve the graph signal vector.
+
+        Returns
+        -------
+        np.ndarray
+            Array of fitness values for each sequence in the landscape.
         """
         return np.fromiter(
             (rec.fitness for rec in self._records.values()), float, len(self._records)
         )
     
     def _init_from_pairs(self,
-                         seqs,
-                         fits):
+                         seqs: List[BaseNumpySequence],
+                         fits: Union[List, np.ndarray]) -> None:
+        
+        """
+        Method to initialize the landscape from pairs of sequences and
+        fitness values.
+
+        Parameters
+        ----------
+        seqs : List[BaseNumpySequence]
+            List of sequences to initialize the landscape with.
+        fits : Union[List, np.ndarray]
+            List or array of fitness values corresponding to the sequences.
+        """
+
         for seq, fit in zip(seqs, fits):
             s = make_sequence(seq)
             self.sequences.append(s)
@@ -120,11 +156,20 @@ class BaseGraphLandscape(ABC):
 
 
     def compute_node_embeddings(self,
-                                model_name: str = None,
-                                batch_size: int = None) -> None:
+                                model_name: str = 'facebook/esm2_t6_8M_UR50D',
+                                batch_size: int = 64) -> None:
         """
         Method to get node embeddings from soft sequence OHE. Inplace
         node attribute updates.
+
+        Parameters
+        ----------
+        model_name : str, optional
+            Name of the ESM model to use for embeddings. If not provided,
+            defaults to 'esm2_t33_650M_UR50D'.
+        batch_size : int, optional
+            Batch size for embedding computation. If not provided,
+            defaults to 64.
         """
 
         if not hasattr(self, 'emb_model'):
@@ -159,6 +204,27 @@ class BaseGraphLandscape(ABC):
     def _split_kwargs(callable_a: Any,
                       callable_b: Any,
                       kwargs: Dict[str, Any]) -> tuple[dict, dict]:
+        """
+        Method to split kwargs between two callables based on their
+        signatures. Raises TypeError if a kwarg is ambiguous (i.e., valid
+        for both callables).
+
+        Parameters
+        ----------
+        callable_a : Any
+            First callable to check kwargs against.
+        callable_b : Any
+            Second callable to check kwargs against.
+        kwargs : Dict[str, Any]
+            Dictionary of keyword arguments to split.
+        
+        Returns
+        -------
+        tuple[dict, dict]
+            Two dictionaries containing kwargs for each callable.
+            If a kwarg is ambiguous (valid for both callables), raises
+            TypeError.
+        """
 
         sig_a = inspect.signature(callable_a)
         sig_b = inspect.signature(callable_b)
@@ -180,6 +246,17 @@ class BaseGraphLandscape(ABC):
     def from_graph(cls,
                    graph: _GraphLike,
                    **kwargs):
+        
+        """
+        Class method to create a landscape from a graph.
+
+        Parameters
+        ----------
+        graph : _GraphLike
+            The graph representation of the fitness landscape.
+        **kwargs
+            Additional keyword arguments to pass to the constructor.
+        """
 
         return cls(graph=graph, **kwargs)
     
@@ -488,11 +565,21 @@ class DirectedFitnessLandscape(BaseGraphLandscape):
                                   *,
                                   moltype="protein"):
         """
+        Method to create an alignment from the sequences in the landscape.
 
+        Parameters
+        ----------
+        moltype : str, optional
+            The type of molecule (e.g., 'protein'). Defaults to 'protein'.
+
+        Returns
+        -------
+        cogent3.Alignment
+            An alignment object containing the sequences in the landscape.
         """
         if hasattr(self, "graph") and self.graph is not None:
             data = {
-                str(node): str(d["sequence"])              # Sequence objects stringify fine
+                str(node): str(d["sequence"]) # Sequence objects stringify fine
                 for node, d in self.graph.nodes(data=True)
                 if "sequence" in d
             }

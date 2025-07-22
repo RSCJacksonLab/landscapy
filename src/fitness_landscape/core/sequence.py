@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Iterable, List, Sequence as _SeqLike, Union, Literal
+from typing import Iterable, List, Sequence as _SeqLike, Union, Literal, Mapping
 
 import numpy as np
 from cogent3.core.sequence import Sequence as _C3Sequence
@@ -51,36 +51,38 @@ class BaseNumpySequence:
                  *,
                  alphabet: Union[Iterable, None] = None,
                  moltype: Union[str, MolType, None] = None) -> None:
-        
-        # If providing sequence as a cogent3.Sequence, handle it directly and update attributes.
-        if isinstance(sequence, _C3Sequence) and not isinstance(sequence, BaseNumpySequence):
-            self._np = _to_numpy(sequence)
-            self._c3_seq = sequence
-            self.alphabet = list(self._c3_seq.moltype.alphabet)
-            return
+
+        is_c3_seq = isinstance(sequence, _C3Sequence) and not isinstance(sequence, BaseNumpySequence)
 
         self._np: np.ndarray = _to_numpy(sequence)
-        self._c3_seq = None  # Default to None
+        self._c3_seq = sequence if is_c3_seq else None
 
-        if alphabet is None:
-            alphabet = sorted(list(set(self._np)))
-        self.alphabet: List[str] = list(map(str, alphabet))
+        
+        # If an alphabet is explicitly provided, ALWAYS use it.
+        if alphabet is not None:
+            self.alphabet = list(map(str, alphabet))
+        
+        # If no alphabet is given, try to get it from the cogent3 object's moltype.
+        elif is_c3_seq:
+            self.alphabet = list(self._c3_seq.moltype.alphabet)
+        
+        # Infer the alphabet from the sequence data itself.
+        else:
+            self.alphabet = sorted(list(set(map(str, self._np))))
 
-        # Only try to create a cogent3 sequence if a moltype is given.
-        if moltype is not None:
+        # Standardize gap character ONLY for string arrays, preserving numeric arrays.
+        if self._np.dtype.kind in 'US' and "gap" in self.alphabet and "-" not in self.alphabet:
+            self._np[self._np == "-"] = "gap"
+
+        if moltype and not self._c3_seq:
             try:
-                if isinstance(moltype, str):
-                    moltype_obj = get_moltype(moltype)
-                else:
-                    moltype_obj = moltype
-                
-                seq_str = "".join(map(str, self._np.tolist()))
-                # Use the factory method from the moltype object
+                moltype_obj = get_moltype(moltype) if isinstance(moltype, str) else moltype
+
+                # Translate "gap" back to "-" for cogent3 compatibility
+                seq_str = "".join(map(str, self._np)).replace("gap", "-")
                 self._c3_seq = moltype_obj.make_seq(seq_str)
             except (ValueError, TypeError, KeyError):
-                # If moltype is not recognized or fails fall back and do not create the cogent3 object.
                 self._c3_seq = None
-
 
     def __len__(self):
         return len(self._np)
@@ -154,11 +156,78 @@ class BaseNumpySequence:
         # Get the moltype from the internal cogent3 sequence object
         current_moltype = self._c3_seq.moltype if self._c3_seq else None
         return self.__class__(new_np, alphabet=self.alphabet, moltype=current_moltype)
+    
+    def to_one_hot(self,
+                   mapping: Union[Mapping[str, int], None] = None) -> np.ndarray:
+        """
+        Method to compute a (L, |alphabet|) one hot matrix for the
+        sequence.
+
+        Parameters
+        ----------
+        mapping : Mapping
+            The index : character mapping. 
+        
+        Returns
+        -------
+        mat : np.ndarray
+            The (L, |alphabet|) ohe matrix.
+        """
+
+        if mapping is None:
+            mapping = {sym: i for i, sym in enumerate(self.alphabet)}
+        
+        idxs = np.array([mapping[str(s)] for s in self._np], dtype=int)
+        mat = np.zeros((len(self), len(mapping)), dtype=int)
+        mat[np.arange(len(self)), idxs] = 1
+        return mat
+    
+    def to_integer(self,
+                   mapping: Union[Mapping[str, int], None] = None) -> np.ndarray:
+        """
+        Method to convert interger representation of sequence. Useful
+        in multiallelic systems. 
+
+        Parameters
+        ----------
+        mapping : Mapping
+            The index : character mapping. 
+        
+        Returns
+        -------
+        np.ndarray
+            The (L, 1) integer array.        
+        """
+        if mapping is None:
+            mapping = {sym: i for i, sym in enumerate(self.alphabet)}
+
+        return np.array([mapping[str(s)] for s in self.ndarray], dtype=int)
+    
+    def remove_gap_arr(self,
+                       *,
+                       gap_threshold: float = 0.5) -> np.ndarray:
+        """
+
+        """
+        gap_idx = self.alphabet.index("gap") if "gap" in self.alphabet else len(self.alphabet) - 1
+        post = self.to_one_hot() # (L, |A|)
+
+        if post.shape[1] != len(self.alphabet):
+            raise ValueError("posterior columns != alphabet length")
+
+        keep_mask = post[:, gap_idx] <= gap_threshold
+        filtered = post[keep_mask, :gap_idx]
+        if gap_idx < post.shape[1] - 1:
+            filtered = np.hstack([filtered, post[keep_mask, gap_idx + 1 :]])
+
+        # renormalise row–wise
+        filtered = filtered / filtered.sum(axis=1, keepdims=True)
+        return filtered
 
 # BinarySequence can now be much simpler
 class BinarySequence(BaseNumpySequence):
     """
-    Binary {0,1} sequence.
+    Binary sequence class that accepts only 0/1 symbols.
     """
     def __init__(self,
                  sequence: _SeqConvertible) -> None:
@@ -230,13 +299,23 @@ class SoftSequence(BaseNumpySequence):
 
     def map_values(self) -> np.ndarray:
         """
-        
+        Method to return the maximum posterior value for each site.
+
+        Returns
+        -------
+        np.ndarray
+            The maximum posterior value for each site.
         """
         return self.posterior.max(axis=1)
 
     def entropy(self) -> np.ndarray:
         """
-        
+        Method to compute the entropy of the posterior distribution.
+
+        Returns
+        -------
+        np.ndarray
+            The entropy for each site in the sequence.
         """
         with np.errstate(divide="ignore", invalid="ignore"):
             logp = np.where(self.posterior > 0, np.log(self.posterior), 0.0)
@@ -244,7 +323,7 @@ class SoftSequence(BaseNumpySequence):
 
     def resample(self) -> "SoftSequence":
         """
-        Generate a new *hard* proxy by sampling each posterior row.
+        Generate a new hard proxy by sampling each posterior row.
         """
         return SoftSequence(self.posterior,
                             self.alphabet,
@@ -252,12 +331,23 @@ class SoftSequence(BaseNumpySequence):
                             rng=self._rng)
 
     @staticmethod
-    def compute_conditional_gap_dist(
-        aa_post_dist: np.ndarray,       # (L, 20)
-        gap_post_dist: np.ndarray,      # (L, 2)  gap / no‑gap
-    ) -> np.ndarray:
+    def compute_conditional_gap_dist(aa_post_dist: np.ndarray,       
+                                     gap_post_dist: np.ndarray) -> np.ndarray: 
+    
         """
-
+        Compute the conditional distribution of amino acids given gaps.
+        
+        Parameters
+        ----------
+        aa_post_dist : np.ndarray
+            The posterior distribution of amino acids, shape (L, 20).
+        gap_post_dist : np.ndarray
+            The posterior distribution of gaps, shape (L, 1).   
+        
+        Returns
+        -------
+        np.ndarray
+            The conditional distribution of amino acids given gaps, shape (L, 21).
         """
         if aa_post_dist.shape[0] != gap_post_dist.shape[0]:
             raise ValueError("aa_post_dist and gap_post_dist must share length L")
@@ -275,7 +365,24 @@ def make_sequence(sequence: _SeqConvertible,
                   alphabet: Iterable | None = None,
                   moltype: str | None = None) -> BaseNumpySequence:
     """
+    Function to create a sequence object from various input types.
     
+    Parameters
+    ----------
+    sequence : _SeqConvertible
+        The sequence data, which can be a BaseNumpySequence, sequence-like,
+        numpy array, or cogent3 Sequence.
+    binary : bool, optional
+        If True, create a BinarySequence. If None, infer from the sequence data.
+    alphabet : Iterable, optional
+        The alphabet of the sequence. If None, inferred from the sequence data.
+    moltype : str, optional
+        The moltype of the sequence. If None, no moltype is set.
+    
+    Returns
+    -------
+    BaseNumpySequence
+        A BaseNumpySequence or BinarySequence object based on the input.
     """
     seq_np = _to_numpy(sequence)
     if binary is True or (binary is None and set(seq_np).issubset({0, 1})):

@@ -242,7 +242,23 @@ class ASRLandscapeConstructor:
         
     def construct_dag(self) -> nx.DiGraph:
         """
-        
+        Method to construct a directed acyclic graph (DAG) from the
+        phylogenetic tree and the alignment.
+
+        Returns
+        -------
+        nx.DiGraph
+            A directed acyclic graph where nodes are the tips and
+            internal nodes of the phylogenetic tree, and edges are
+            directed from parent to child nodes. Each node contains
+            the following attributes:
+            - `sequence`: The sequence at that node, either as a
+              `BaseNumpySequence` or `SoftSequence`.
+            - `fitness`: Fitness value, initialized to NaN.
+            - `gapped_arr`: A (L, 21) array representing the gapped
+              sequence in one-hot encoding.
+            - `ungapped_arr`: A (L, 20) array representing the ungapped
+              sequence in one-hot encoding.
         """
         G = nx.DiGraph()
         for child, parent in self.phylogenetic_tree.child_parent_map().items():
