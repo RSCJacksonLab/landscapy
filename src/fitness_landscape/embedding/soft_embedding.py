@@ -254,7 +254,7 @@ class ESMEmbedder:
         -------
         np.ndarray
             Extracted features.
-        """"
+        """
         features = []
 
         # process sequences
