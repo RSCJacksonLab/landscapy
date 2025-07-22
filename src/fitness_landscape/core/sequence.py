@@ -121,25 +121,37 @@ class BaseNumpySequence:
         else:
             raise ValueError(f"Unsupported metric: {metric}")
 
-    def mutate(self, positions: Union[int, Iterable[int], None] = None, *, values: Union[Iterable, None] = None, rng: Union[np.random.Generator, None] = None) -> "BaseNumpySequence":
+    def mutate(self,
+            positions: Union[int, Iterable[int], None] = None,
+            *,
+            values: Union[Iterable, None] = None,
+            rng: Union[np.random.Generator, None] = None) -> "BaseNumpySequence":
+        """
+        Create a mutated copy of the sequence.
+        """
         rng = rng or np.random.default_rng()
         new_np = self._np.copy()
+
         if positions is None:
             positions = [rng.integers(0, len(self))]
         elif isinstance(positions, int):
             positions = [positions]
         else:
             positions = list(positions)
+
         if values is None:
+            # Ensure mutated value is a string to match alphabet type
             values = [rng.choice([a for a in self.alphabet if a != str(new_np[p])]) for p in positions]
         elif not isinstance(values, (list, tuple, np.ndarray)):
             values = [values]
+
         if len(values) != len(positions):
             raise ValueError("Length of values must equal length of positions.")
+
         for p, v in zip(positions, values):
             new_np[p] = v
-        
-        # Pass the original moltype when creating the mutated copy
+
+        # Get the moltype from the internal cogent3 sequence object
         current_moltype = self._c3_seq.moltype if self._c3_seq else None
         return self.__class__(new_np, alphabet=self.alphabet, moltype=current_moltype)
 
