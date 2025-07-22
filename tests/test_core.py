@@ -66,12 +66,14 @@ def test_create_complete_hamming_graph():
         If the graph does not have the expected number of nodes or
         edges.
     """
-    graph = create_hamming_graph(N=3)
-    assert graph.number_of_nodes() == 8
+    # First, generate the sequences for N=3
+    sequences = generate_sequences(length=3, alphabet=[0, 1])
     
-    # Each of 8 nodes has 3 neighbors
-    assert graph.number_of_edges() == 12  
-    # Check degree of a node
+    # Then, create the graph from the sequences
+    graph = create_hamming_graph(sequences=sequences)
+    
+    assert graph.number_of_nodes() == 8
+    assert graph.number_of_edges() == 12
     assert graph.degree[0] == 3
 
 
@@ -90,7 +92,9 @@ def test_create_knn_graph():
     graph = create_knn_graph(sequences=sequences, k=k)
     # In a complete Hamming space, each node should have k neighbors
     for node in graph.nodes():
-        assert graph.degree[node] == k
+        
+        # Equidistance connections are included thus the true degree is >= k (depedning on graph structure).
+        assert graph.degree[node] >= k
 
 
 def test_fitness_landscape_initialization():
@@ -105,22 +109,71 @@ def test_fitness_landscape_initialization():
     """
     sequences = generate_sequences(length=3, alphabet=[0, 1])
     fitnesses = np.random.rand(8)
-    
+
     # Test initialization from sequences and fitness values
-    landscape = FitnessLandscape(sequences=sequences, fitness_values=fitnesses)
+    landscape = FitnessLandscape(sequences=sequences, fitness_values=fitnesses, emb_nodes=False)
     assert len(landscape) == 8
     assert landscape.get_fitness(sequences[0]) == fitnesses[0]
     assert landscape.graph is not None
-    
-    # Test initialization from a pre-made graph
-    graph = create_hamming_graph(N=3)
+
+    graph_sequences = generate_sequences(length=3, alphabet=[0, 1])
+    graph = create_hamming_graph(sequences=graph_sequences) 
     for i, node in enumerate(graph.nodes()):
         graph.nodes[node]['fitness'] = fitnesses[i]
-        # Required attributes for from_graph initialization
         graph.nodes[node]['sequence'] = sequences[i]
-        graph.nodes[node]['gapped_arr'] = np.zeros((1, 21)) # Dummy data
-        graph.nodes[node]['ungapped_arr'] = np.zeros((1, 20)) # Dummy data
+        
+        # Dummy data for the required attributes
+        graph.nodes[node]['gapped_arr'] = np.zeros((1, 21))
+        graph.nodes[node]['ungapped_arr'] = np.zeros((1, 20))
 
     landscape_from_graph = FitnessLandscape.from_graph(graph, emb_nodes=False)
     assert len(landscape_from_graph) == 8
     assert landscape_from_graph.get_fitness(sequences[0]) == fitnesses[0]
+
+def test_multiallele_sequence():
+    """
+    Tests the MultialleleSequence class.
+    """
+    alphabet = ['A', 'C', 'G', 'T']
+    seq_data = ['A', 'G', 'T', 'C']
+    seq = MultialleleSequence(seq_data, alphabet=alphabet)
+    assert np.array_equal(seq.to_array(), seq_data)
+    assert seq.alphabet == alphabet
+
+    # Test that it raises an error for invalid characters
+    with pytest.raises(ValueError):
+        MultialleleSequence(['A', 'X', 'G', 'T'], alphabet=alphabet)
+    
+    seq2 = MultialleleSequence(['A', 'C', 'G', 'T'], alphabet=alphabet)
+    assert seq.distance(seq2) == 3
+
+def test_soft_sequence():
+    """
+    Tests the SoftSequence class.
+    """
+    alphabet = ['A', 'C', 'G', 'T']
+    
+    # Posterior probabilities for a sequence of length 3
+    posterior = np.array([
+        [0.8, 0.1, 0.05, 0.05], # Most likely A
+        [0.1, 0.1, 0.7, 0.1],  # Most likely G
+        [0.25, 0.25, 0.25, 0.25] # Completely uncertain
+    ])
+
+    # Test with argmax rule
+    soft_seq_argmax = SoftSequence(posterior, alphabet=alphabet, hard_rule='argmax')
+    expected_hard_seq = ['A', 'G', 'A'] # 'A' is the first max at index 2
+    assert np.array_equal(soft_seq_argmax.to_array(), expected_hard_seq)
+
+    rng = np.random.default_rng(42)
+    soft_seq_sample = SoftSequence(posterior, alphabet=alphabet, hard_rule='sample', rng=rng)
+    assert len(soft_seq_sample) == 3
+    assert all(c in alphabet for c in soft_seq_sample.to_array())
+
+    # Test map_values and entropy
+    map_values = soft_seq_argmax.map_values()
+    entropy = soft_seq_argmax.entropy()
+    assert map_values.shape == (3,)
+    assert entropy.shape == (3,)
+    assert np.allclose(map_values, [0.8, 0.7, 0.25])
+    assert entropy[0] > 0 and entropy[2] > entropy[0]

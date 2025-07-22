@@ -6,7 +6,7 @@ from .sequence import BaseNumpySequence, make_sequence
 from .graph import create_hamming_graph
 import scipy.linalg as la
 from abc import ABC, abstractmethod
-from pydantic import BaseModel, Field, validator, ValidationError, ConfigDict
+from pydantic import BaseModel, Field, field_validator, ValidationError, ConfigDict
 from .graph import create_knn_graph, create_hamming_graph
 from .digraph import ASRLandscapeConstructor
 from cogent3 import make_aligned_seqs
@@ -21,13 +21,15 @@ class NodeModel(BaseModel):
     gapped_arr: np.ndarray = Field(..., repr=False)
     ungapped_arr: np.ndarray = Field(..., repr=False)
 
-    @validator("gapped_arr")
+    @field_validator("gapped_arr")
+    @classmethod
     def _check_gap(cls, v):
         if v.ndim != 2 or v.shape[1] != 21:
             raise ValueError("gapped_arr must be (L,21)")
         return v
 
-    @validator("ungapped_arr")
+    @field_validator("ungapped_arr")
+    @classmethod
     def _check_ungap(cls, v):
         if v.ndim != 2 or v.shape[1] != 20:
             raise ValueError("ungapped_arr must be (L,20)")
@@ -218,7 +220,7 @@ class FitnessLandscape(BaseGraphLandscape):
                  fitness_values: np.ndarray = None,
                  *,
                  graph_type: Literal['hamming'] = 'hamming',
-                 emb_nodes: bool = True,
+                 emb_nodes: bool = False,
                  **kwargs) -> None:
         
         super().__init__()
@@ -268,11 +270,14 @@ class FitnessLandscape(BaseGraphLandscape):
         #Get fitness values for graph construction.
         fitness_values = self.get_signal()
 
+        creation_kwargs = kwargs.copy()
+        creation_kwargs.pop('graph_type', None)
+
         if self.graph_type == 'hamming':
-            self.graph = create_hamming_graph(self.sequences, fitness_values, **kwargs)
+            self.graph = create_hamming_graph(self.sequences, fitness_values, **creation_kwargs)
 
         elif self.graph_type == 'knn':
-            self.graph = create_knn_graph(self.sequences, fitness_values, **kwargs)
+            self.graph = create_knn_graph(self.sequences, fitness_values, **creation_kwargs)
 
         #TODO: Other graph types can be added here.
 
@@ -300,7 +305,7 @@ class DirectedFitnessLandscape(BaseGraphLandscape):
                  fitness_values: np.ndarray = None,
                  *,
                  laplacian: Union[Literal['directed'], None] = None,
-                 emb_nodes: bool = True,
+                 emb_nodes: bool = False,
                  graph_type: Literal['phylogenetic_directed'] = 'phylogenetic_directed',
                  **kwargs) -> None:
         
