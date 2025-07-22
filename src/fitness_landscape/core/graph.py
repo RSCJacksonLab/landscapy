@@ -1,6 +1,6 @@
 import numpy as np
 import networkx as nx
-from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
+from typing import List, Union, Literal
 from .sequence import BaseNumpySequence, sequence_distance
 
 # Simple graph constructors
