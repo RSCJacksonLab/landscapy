@@ -54,21 +54,18 @@ def test_walsh_coefficients_extraction():
 def test_graph_fourier_transform_reconstruction():
     """
     Tests that a signal can be perfectly reconstructed via inverse GFT.
-    
-    Raises
-    ------
-    AssertionError
-        If the reconstructed signal does not match the original signal.
-        This test uses a cycle graph with a sine wave signal.
+    This test uses a cycle graph with a sine wave signal.
     """
     graph = nx.cycle_graph(8)
     signal = np.sin(np.linspace(0, 2 * np.pi, 8, endpoint=False))
     for i, node in enumerate(graph.nodes()):
-        # Add dummy sequence data required by FitnessLandscape
-        graph.nodes[node]['sequence'] = np.array([i]) 
+
+        graph.nodes[node]['sequence'] = BaseNumpySequence([i]) 
         graph.nodes[node]['fitness'] = signal[i]
+        graph.nodes[node]['gapped_arr'] = np.zeros((1, 21)) # Dummy data
+        graph.nodes[node]['ungapped_arr'] = np.zeros((1, 20)) # Dummy data
     
-    landscape = FitnessLandscape(graph=graph, emb_nodes=False)
+    landscape = FitnessLandscape.from_graph(graph, emb_nodes=False)
     
     eigenvectors, _, coefficients = graph_fourier_transform(landscape)
     reconstructed_signal = inverse_graph_fourier_transform(eigenvectors, coefficients)

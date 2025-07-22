@@ -27,28 +27,25 @@ def walsh_transform(landscape: FitnessLandscape,
     # Validate input
     if not isinstance(landscape, FitnessLandscape):
         raise TypeError("landscape must be a FitnessLandscape object")
-    
+
     # Check if all sequences have the same length and are binary
     sequences = landscape.sequences
     if not sequences:
         raise ValueError("Landscape contains no sequences")
-    
-    # Check sequences are BinarySequence or BaseNumpySequence
-    if not all(isinstance(seq, (BinarySequence)) for seq in sequences):
-        raise TypeError("All sequences must be BinarySequence")
 
-    elif  not np.all(np.isin(seq.to_array(), [0, 1])):
-            raise TypeError(f"Walsh-Hadamard transform requires binary sequences. "
-                            f"Found non-binary sequence: {seq.to_array()}")
-    
-    seq_length = len(sequences[0])
     for seq in sequences:
-        if len(seq) != seq_length:
-            raise ValueError("All sequences must have the same length")
-    
-    # Extract fitness values in the same order as sequences
-    fitness_values = np.array([landscape.get_fitness(seq) for seq in sequences])
-    
+        if not isinstance(seq, BinarySequence):
+
+            # The Walsh-Hadamard transform is only defined for binary sequences.
+            raise TypeError(f"All sequences must be BinarySequence, but found {type(seq)}")
+        if not np.all(np.isin(seq.to_array().astype(int), [0, 1])):
+            
+            raise TypeError("All sequences in landscape must be binary (contain only 0s and 1s)")
+
+    # Get fitness values and sequence length
+    fitness_values = landscape.get_signal()
+    N = len(sequences[0])
+
     # Create sequence matrix where each row is a sequence
     sequence_matrix = np.array([seq.to_array() for seq in sequences])
     

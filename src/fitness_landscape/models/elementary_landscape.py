@@ -15,7 +15,6 @@ class ElementaryFitnessLandscape(FitnessLandscape):
     ----------
 
     """
-
     def __init__(self,
                  j: int,
                  N: int = None,
@@ -27,29 +26,28 @@ class ElementaryFitnessLandscape(FitnessLandscape):
 
         if sequences is None and N is None:
             raise ValueError("Either `sequences` or `N` must be provided.")
-    
+        
+        # CORRECTED: Infer N from sequences if not provided
+        if N is None and sequences is not None:
+            N = len(sequences[0])
 
         if graph_type == 'knn':
             if sequences is None:
                 raise ValueError("`sequences` must be provided for kNN graph.")
             graph = create_knn_graph(sequences=sequences,
-                                    k=int(np.sqrt(len(sequences))))
-        
+                                     k=int(np.sqrt(len(sequences))))
+
         elif graph_type == 'hamming':
             if N is None:
                 raise ValueError("`N` must be provided for Hamming graph.")
-            sequences = generate_sequences(length=N, alphabet=alphabet)
-            graph = create_hamming_graph(sequences=sequences)
+            if sequences is None:
+                sequences = generate_sequences(N, alphabet)
+            graph = create_hamming_graph(sequences)
         
-        _, eigenvectors = eigenmode_decomposition(graph=graph,
-                                                  matrix='laplacian',
-                                                  backend='numpy')
-        fitness_signal = eigenvectors[:, j]
-        for i, node in enumerate(graph.nodes()):
-            graph.nodes[node]['fitness'] = fitness_signal[i]
+        eigenvalues, eigenvectors = eigenmode_decomposition(graph)
+        fitness_values = eigenvectors[:, j]
         
-        self.eigenvector_index = j
-        self.seed = seed
-
-        super().__init__(graph=graph,
+        super().__init__(sequences=sequences,
+                         fitness_values=fitness_values,
+                         graph_type=graph_type,
                          **kwargs)
