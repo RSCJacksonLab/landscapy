@@ -9,8 +9,7 @@ from .adaptive_walk import (
 
 from .dirichlet_energy import (
     calculate_ruggedness_dirichlet_energy,
-    local_dirichlet_energy_contribution,
-    local_dirichlet_energy)
+    local_dirichlet_energy_contribution)
 
 from .eigenmode import (
     eigenmode_decomposition,
