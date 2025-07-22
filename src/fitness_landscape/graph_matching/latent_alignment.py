@@ -139,7 +139,7 @@ class NormalGamma:
 
 class RJMCMCAligner:
     """
-    Reversible jump MCMC alignment of directed graphs. Implemented
+    Reversible jump MCMC alignment graphs. Implemented
     from https://www.nature.com/articles/s41467-025-59077-7.
 
     Attributes
@@ -172,8 +172,6 @@ class RJMCMCAligner:
         The edge attribute dictionary  weight key.
     emb_key : str, default=`emb_arr`
         The node attribute dictionary embedding array key.
-    directed : bool, default=`True`
-        Boolean to indicate whether the graphs are directed.
     seed : int
         The random state.
     """
@@ -193,7 +191,6 @@ class RJMCMCAligner:
                  cosine_anchor_threshold: float = 0.95,
                  weight_key: str = 'weight',
                  emb_key: str = 'emb_arr',
-                 directed: bool = True,
                  seed: Union[int, None] = None) -> None:
         
         self.rng = np.random.default_rng(seed)
@@ -202,7 +199,6 @@ class RJMCMCAligner:
         self.K = len(graphs)
         self.burn_in, self.samples, self.thin, self.birth_death_prob = burn_in, samples, thin, birth_death_prob
         self.birth_gamma = birth_prior_gamma
-        self.directed = directed
 
         # Burn in housekeeping.
         self._in_growth_phase = False
@@ -462,8 +458,7 @@ class RJMCMCAligner:
     def _gibbs_sample_blueprint(self) -> np.ndarray:
         """
         Method to sample the blueprint graph using Gibbs sampling. 
-        Theoretically stronger than the majority consensus. Different
-        methods implemented for directed and undirected graphs.
+        Theoretically stronger than the majority consensus.
 
         Returns
         -------
@@ -480,12 +475,9 @@ class RJMCMCAligner:
         P_keep = a_post / (a_post + b_post)
 
         # vectorized Bernoulli draws
-        U = self.rng.random((NL, NL))
-        if self.directed:
-            L = (U < P_keep).astype(int)
-        else:
-            m = np.triu(U < P_keep, 1)
-            L = m.astype(int) + m.T.astype(int)
+        U = self.rng.random((NL, NL))    
+        m = np.triu(U < P_keep, 1)
+        L = m.astype(int) + m.T.astype(int)
 
         np.fill_diagonal(L, 0)
         return L
@@ -788,7 +780,7 @@ class RJMCMCAligner:
         for step in range(total_steps):
 
             # Bookkeeping on number of latent edges.
-            self.trace_edges.append(self.L.sum() // 2)  # divide by 2 for undirected edges
+            self.trace_edges.append(self.L.sum() // 2) 
 
 
             # if step > self.burn_in: 
