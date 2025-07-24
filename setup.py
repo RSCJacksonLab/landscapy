@@ -24,7 +24,7 @@ setup(
     ],
     package_dir={"": "src"},
     packages=find_packages(where="src"),
-    python_requires=">=3.7",
+    python_requires=">=3.12",
     install_requires=[
         "numpy>=1.19.0",
         "scipy>=1.5.0",
@@ -38,7 +38,7 @@ setup(
         "pydantic==2.11.7",
         "pytest>=8",
         "pytest-cov>=6",
-        # TODO: Add soft sequence alignment
+        "softalign @ git+https://github.com/RSCJacksonLab/softalign.git@9127e3a"
     ],
     extras_require={
         "dev": [
