@@ -85,11 +85,9 @@ class BernoulliBeta:
         """
         a_post = self.alpha1 + o_success
         b_post = self.alpha0 + o_fail
-        return (
-        gammaln(a_post) + gammaln(b_post) - gammaln(a_post+b_post)
-        - (gammaln(self.alpha1) + gammaln(self.alpha0)
-            - gammaln(self.alpha1 + self.alpha0))
-        )
+        log_beta_posterior = gammaln(a_post) + gammaln(b_post) - gammaln(a_post + b_post)
+        log_beta_prior = gammaln(self.alpha1) + gammaln(self.alpha0) - gammaln(self.alpha1 + self.alpha0)
+        return log_beta_posterior - log_beta_prior
 
 #TODO: Test NormalGamma.
 @dataclass
@@ -200,86 +198,69 @@ class RJMCMCAligner:
         self.burn_in, self.samples, self.thin, self.birth_death_prob = burn_in, samples, thin, birth_death_prob
         self.birth_gamma = birth_prior_gamma
 
-        # Burn in housekeeping.
         self._in_growth_phase = False
-        self.trace_E = []
-        self.trace_NL = []
-        self.trace_edges = []
+        self.trace_E, self.trace_NL, self.trace_edges = [], [], []
         self.accept_counts = {"swap":0, "cycle3":0, "resample":0, "birth":0, "death":0}
         self.proposal_counts = self.accept_counts.copy()
-
-        # Chain book keeping.
         self._stored_L: List[np.ndarray] = []
         self._stored_pi: List[List[np.ndarray]] = [[] for _ in range(self.K)]
 
-        
-        # hyper‑priors
         self.bb = bernoulli_beta or BernoulliBeta()
         self.ng = normal_gamma or NormalGamma()
 
-        # Auto-anchor nodes according to consine similarity. 
         if auto_anchor:
-            auto_anchors_by_cosine(graphs=graphs,
-                                   cos_threshold=cosine_anchor_threshold)
+            auto_anchors_by_cosine(graphs=graphs, cos_threshold=cosine_anchor_threshold)
 
-        # preprocess
         self.V: List[List] = [list(G.nodes()) for G in graphs]
         self.n: List[int] = [len(vs) for vs in self.V]
 
-        # adjacency / weight matrices — store binary adjacency in CSR for sparse ops        
         self.W: List[csr_matrix] = []
         for G, vs in zip(graphs, self.V):
             dense = nx.to_numpy_array(G, nodelist=vs, weight=weight_key, nonedge=0.0)
-            if np.isin(dense, [0.0,1.0]).all():
-                binarized = (dense > 0.5).astype(np.int8)
-            else:
-                binarized = (dense > 0).astype(np.int8)
-            self.W.append(csr_matrix(binarized))
+            self.W.append(csr_matrix((dense > 0).astype(np.int8)))
         
-        # everything in W is now 0/1 CSR
         self.binary_mode = True   
-
-        # embeddings
         self.X = [np.vstack([np.asarray(G.nodes[v][emb_key], float) for v in vs]) for G, vs in zip(graphs, self.V)]
 
-        # anchor handling
-        # map anchor label to latent slot id (shared for all graphs)
         anchor_label_to_slot: dict[str | int, int] = {}
         next_slot = 0
         self.perm: List[np.ndarray] = []
-        for k, (G, vs, Wk) in enumerate(zip(graphs, self.V, self.W)):
+        for k, (G, vs) in enumerate(zip(graphs, self.V)):
             pk = -np.ones(len(vs), dtype=int)
             for i, v in enumerate(vs):
                 if G.nodes[v].get("anchor", False):
-                    label = G.nodes[v].get("anchor_id", v)  # fall back to name
+                    label = G.nodes[v].get("anchor_id", v)
                     if label not in anchor_label_to_slot:
                         anchor_label_to_slot[label] = next_slot
                         next_slot += 1
                     pk[i] = anchor_label_to_slot[label]
             self.perm.append(pk)
-        self.NL = max(max(p.max(initial=-1)+1 for p in self.perm), 1)
 
-        # # fill non‑anchored nodes with degree ranking heuristic
-        for k, (pk, Wk) in enumerate(zip(self.perm, self.W)):
-            free_slots = [s for s in range(self.NL) if s not in pk]
-            deg_order = np.argsort(Wk.sum(1))
-            for i in deg_order:
-                
-                # Safeguard against popping from an empty list.
-                if pk[i] == -1:
-                    if not free_slots:
-                        break
-                    pk[i] = free_slots.pop(0)
+        # FIX 2: Correct initialization of latent slots (NL) and permutations.
+        num_anchored_slots = len(anchor_label_to_slot)
+        max_nodes = max(self.n) if self.n else 0
+        self.NL = max(num_anchored_slots, max_nodes)
+        
+        # This logic ensures each graph's nodes are assigned to the first
+        # available slots without conflict.
+        globally_used_slots = set(anchor_label_to_slot.values())
+        for pk in self.perm:
+            unassigned_indices = np.where(pk == -1)[0]
+            # In this simple init, each graph gets the first available slots
+            # This is a simple heuristic; the MCMC will fix it.
+            slots_for_this_graph = sorted(list(set(range(self.NL)) - set(pk)))
+            
+            num_to_assign = min(len(unassigned_indices), len(slots_for_this_graph))
+            nodes_to_assign = unassigned_indices[:num_to_assign]
+            slots_to_assign = slots_for_this_graph[:num_to_assign]
 
-        # per-graph counts
+            pk[nodes_to_assign] = slots_to_assign
+        
         self.C_k: List[np.ndarray] = [
             self._compute_Ck(pk, Wk) for pk, Wk in zip(self.perm, self.W)
         ]
 
-        # global sum (vectorized)
         self.C_global = np.sum(self.C_k, axis=0)
-
-        # Initialize L as an empty blueprint.
         self.L = np.zeros((self.NL, self.NL), dtype=int)
 
     # Compute counts with JIT-compatible static method.
