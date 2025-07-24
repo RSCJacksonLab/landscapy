@@ -85,11 +85,9 @@ class BernoulliBeta:
         """
         a_post = self.alpha1 + o_success
         b_post = self.alpha0 + o_fail
-        return (
-        gammaln(a_post) + gammaln(b_post) - gammaln(a_post+b_post)
-        - (gammaln(self.alpha1) + gammaln(self.alpha0)
-            - gammaln(self.alpha1 + self.alpha0))
-        )
+        log_beta_posterior = gammaln(a_post) + gammaln(b_post) - gammaln(a_post + b_post)
+        log_beta_prior = gammaln(self.alpha1) + gammaln(self.alpha0) - gammaln(self.alpha1 + self.alpha0)
+        return log_beta_posterior - log_beta_prior
 
 #TODO: Test NormalGamma.
 @dataclass
@@ -139,7 +137,7 @@ class NormalGamma:
 
 class RJMCMCAligner:
     """
-    Reversible jump MCMC alignment of directed graphs. Implemented
+    Reversible jump MCMC alignment graphs. Implemented
     from https://www.nature.com/articles/s41467-025-59077-7.
 
     Attributes
@@ -172,14 +170,12 @@ class RJMCMCAligner:
         The edge attribute dictionary  weight key.
     emb_key : str, default=`emb_arr`
         The node attribute dictionary embedding array key.
-    directed : bool, default=`True`
-        Boolean to indicate whether the graphs are directed.
     seed : int
         The random state.
     """
     
     def __init__(self,
-                 graphs: List[nx.DiGraph],
+                 graphs: List[nx.Graph],
                  *,
                  alpha: float = 0.5,
                  bernoulli_beta: Optional[BernoulliBeta] = None,
@@ -193,7 +189,6 @@ class RJMCMCAligner:
                  cosine_anchor_threshold: float = 0.95,
                  weight_key: str = 'weight',
                  emb_key: str = 'emb_arr',
-                 directed: bool = True,
                  seed: Union[int, None] = None) -> None:
         
         self.rng = np.random.default_rng(seed)
@@ -202,88 +197,70 @@ class RJMCMCAligner:
         self.K = len(graphs)
         self.burn_in, self.samples, self.thin, self.birth_death_prob = burn_in, samples, thin, birth_death_prob
         self.birth_gamma = birth_prior_gamma
-        self.directed = directed
 
-        # Burn in housekeeping.
         self._in_growth_phase = False
-        self.trace_E = []
-        self.trace_NL = []
-        self.trace_edges = []
+        self.trace_E, self.trace_NL, self.trace_edges = [], [], []
         self.accept_counts = {"swap":0, "cycle3":0, "resample":0, "birth":0, "death":0}
         self.proposal_counts = self.accept_counts.copy()
-
-        # Chain book keeping.
         self._stored_L: List[np.ndarray] = []
         self._stored_pi: List[List[np.ndarray]] = [[] for _ in range(self.K)]
 
-        
-        # hyper‑priors
         self.bb = bernoulli_beta or BernoulliBeta()
         self.ng = normal_gamma or NormalGamma()
 
-        # Auto-anchor nodes according to consine similarity. 
         if auto_anchor:
-            auto_anchors_by_cosine(graphs=graphs,
-                                   cos_threshold=cosine_anchor_threshold)
+            auto_anchors_by_cosine(graphs=graphs, cos_threshold=cosine_anchor_threshold)
 
-        # preprocess
         self.V: List[List] = [list(G.nodes()) for G in graphs]
         self.n: List[int] = [len(vs) for vs in self.V]
 
-        # adjacency / weight matrices — store binary adjacency in CSR for sparse ops        
         self.W: List[csr_matrix] = []
         for G, vs in zip(graphs, self.V):
             dense = nx.to_numpy_array(G, nodelist=vs, weight=weight_key, nonedge=0.0)
-            if np.isin(dense, [0.0,1.0]).all():
-                binarized = (dense > 0.5).astype(np.int8)
-            else:
-                binarized = (dense > 0).astype(np.int8)
-            self.W.append(csr_matrix(binarized))
+            self.W.append(csr_matrix((dense > 0).astype(np.int8)))
         
-        # everything in W is now 0/1 CSR
         self.binary_mode = True   
-
-        # embeddings
         self.X = [np.vstack([np.asarray(G.nodes[v][emb_key], float) for v in vs]) for G, vs in zip(graphs, self.V)]
 
-        # anchor handling
-        # map anchor label to latent slot id (shared for all graphs)
         anchor_label_to_slot: dict[str | int, int] = {}
         next_slot = 0
         self.perm: List[np.ndarray] = []
-        for k, (G, vs, Wk) in enumerate(zip(graphs, self.V, self.W)):
+        for k, (G, vs) in enumerate(zip(graphs, self.V)):
             pk = -np.ones(len(vs), dtype=int)
             for i, v in enumerate(vs):
                 if G.nodes[v].get("anchor", False):
-                    label = G.nodes[v].get("anchor_id", v)  # fall back to name
+                    label = G.nodes[v].get("anchor_id", v)
                     if label not in anchor_label_to_slot:
                         anchor_label_to_slot[label] = next_slot
                         next_slot += 1
                     pk[i] = anchor_label_to_slot[label]
             self.perm.append(pk)
-        self.NL = max(max(p.max(initial=-1)+1 for p in self.perm), 1)
 
-        # # fill non‑anchored nodes with degree ranking heuristic
-        for k, (pk, Wk) in enumerate(zip(self.perm, self.W)):
-            free_slots = [s for s in range(self.NL) if s not in pk]
-            deg_order = np.argsort(Wk.sum(1))
-            for i in deg_order:
-                
-                # Safeguard against popping from an empty list.
-                if pk[i] == -1:
-                    if not free_slots:
-                        break
-                    pk[i] = free_slots.pop(0)
+        # FIX 2: Correct initialization of latent slots (NL) and permutations.
+        num_anchored_slots = len(anchor_label_to_slot)
+        max_nodes = max(self.n) if self.n else 0
+        self.NL = max(num_anchored_slots, max_nodes)
+        
+        # This logic ensures each graph's nodes are assigned to the first
+        # available slots without conflict.
+        globally_used_slots = set(anchor_label_to_slot.values())
+        for pk in self.perm:
+            unassigned_indices = np.where(pk == -1)[0]
+            # In this simple init, each graph gets the first available slots
+            # This is a simple heuristic; the MCMC will fix it.
+            slots_for_this_graph = sorted(list(set(range(self.NL)) - set(pk)))
+            
+            num_to_assign = min(len(unassigned_indices), len(slots_for_this_graph))
+            nodes_to_assign = unassigned_indices[:num_to_assign]
+            slots_to_assign = slots_for_this_graph[:num_to_assign]
 
-        # per-graph counts
+            pk[nodes_to_assign] = slots_to_assign
+        
         self.C_k: List[np.ndarray] = [
             self._compute_Ck(pk, Wk) for pk, Wk in zip(self.perm, self.W)
         ]
 
-        # global sum (vectorized)
         self.C_global = np.sum(self.C_k, axis=0)
-
-        # Initialize L as an empty blueprint.
         self.L = np.zeros((self.NL, self.NL), dtype=int)
 
     # Compute counts with JIT-compatible static method.
@@ -462,8 +439,7 @@ class RJMCMCAligner:
     def _gibbs_sample_blueprint(self) -> np.ndarray:
         """
         Method to sample the blueprint graph using Gibbs sampling. 
-        Theoretically stronger than the majority consensus. Different
-        methods implemented for directed and undirected graphs.
+        Theoretically stronger than the majority consensus.
 
         Returns
         -------
@@ -480,12 +456,9 @@ class RJMCMCAligner:
         P_keep = a_post / (a_post + b_post)
 
         # vectorized Bernoulli draws
-        U = self.rng.random((NL, NL))
-        if self.directed:
-            L = (U < P_keep).astype(int)
-        else:
-            m = np.triu(U < P_keep, 1)
-            L = m.astype(int) + m.T.astype(int)
+        U = self.rng.random((NL, NL))    
+        m = np.triu(U < P_keep, 1)
+        L = m.astype(int) + m.T.astype(int)
 
         np.fill_diagonal(L, 0)
         return L
@@ -788,7 +761,7 @@ class RJMCMCAligner:
         for step in range(total_steps):
 
             # Bookkeeping on number of latent edges.
-            self.trace_edges.append(self.L.sum() // 2)  # divide by 2 for undirected edges
+            self.trace_edges.append(self.L.sum() // 2) 
 
 
             # if step > self.burn_in: 
@@ -915,14 +888,14 @@ class RJMCMCAligner:
                     self._stored_pi[k].append(self.perm[k].copy())
 
     def latent_blueprint_graph(self,
-                               posterior_prob_cutoff: float = 0.2) -> nx.DiGraph:
+                               posterior_prob_cutoff: float = 0.2) -> nx.Graph:
         """
         Method to return the latent blueprint graph by correctly averaging
         the posterior samples, even when the number of latent nodes changes.
 
         Returns
         -------
-        nx.DiGraph
+        nx.Graph
             The mean of the latent posterior.
         """
         if not self._stored_L:
@@ -934,7 +907,7 @@ class RJMCMCAligner:
                 max_nl = l_matrix.shape[0]
 
         if max_nl == 0:
-            return nx.DiGraph()
+            return nx.Graph()
 
         tally_matrix = np.zeros((max_nl, max_nl))
         num_samples = len(self._stored_L)
@@ -945,7 +918,7 @@ class RJMCMCAligner:
         Lavg = tally_matrix / num_samples
 
         Lbin = (Lavg >= posterior_prob_cutoff).astype(int)
-        return nx.from_numpy_array(Lbin, create_using=nx.DiGraph)
+        return nx.from_numpy_array(Lbin, create_using=nx.Graph)
 
     def posterior_match_probabilities(self) -> Dict:
         """
@@ -1028,7 +1001,7 @@ class RJMCMCAligner:
 
 
 #TODO: update to FAISS to scale > 1e4
-def auto_anchors_by_cosine( graphs: List[nx.DiGraph],
+def auto_anchors_by_cosine( graphs: List[nx.Graph],
                            *,
                            emb_key: str = "emb_arr",
                            cos_threshold: float = 0.90,
