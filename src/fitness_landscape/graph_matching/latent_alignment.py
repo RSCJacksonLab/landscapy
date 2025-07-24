@@ -177,7 +177,7 @@ class RJMCMCAligner:
     """
     
     def __init__(self,
-                 graphs: List[nx.DiGraph],
+                 graphs: List[nx.Graph],
                  *,
                  alpha: float = 0.5,
                  bernoulli_beta: Optional[BernoulliBeta] = None,
@@ -907,14 +907,14 @@ class RJMCMCAligner:
                     self._stored_pi[k].append(self.perm[k].copy())
 
     def latent_blueprint_graph(self,
-                               posterior_prob_cutoff: float = 0.2) -> nx.DiGraph:
+                               posterior_prob_cutoff: float = 0.2) -> nx.Graph:
         """
         Method to return the latent blueprint graph by correctly averaging
         the posterior samples, even when the number of latent nodes changes.
 
         Returns
         -------
-        nx.DiGraph
+        nx.Graph
             The mean of the latent posterior.
         """
         if not self._stored_L:
@@ -926,7 +926,7 @@ class RJMCMCAligner:
                 max_nl = l_matrix.shape[0]
 
         if max_nl == 0:
-            return nx.DiGraph()
+            return nx.Graph()
 
         tally_matrix = np.zeros((max_nl, max_nl))
         num_samples = len(self._stored_L)
@@ -937,7 +937,7 @@ class RJMCMCAligner:
         Lavg = tally_matrix / num_samples
 
         Lbin = (Lavg >= posterior_prob_cutoff).astype(int)
-        return nx.from_numpy_array(Lbin, create_using=nx.DiGraph)
+        return nx.from_numpy_array(Lbin, create_using=nx.Graph)
 
     def posterior_match_probabilities(self) -> Dict:
         """
@@ -1020,7 +1020,7 @@ class RJMCMCAligner:
 
 
 #TODO: update to FAISS to scale > 1e4
-def auto_anchors_by_cosine( graphs: List[nx.DiGraph],
+def auto_anchors_by_cosine( graphs: List[nx.Graph],
                            *,
                            emb_key: str = "emb_arr",
                            cos_threshold: float = 0.90,

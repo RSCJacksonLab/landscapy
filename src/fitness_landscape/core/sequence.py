@@ -275,27 +275,32 @@ class SoftSequence(BaseNumpySequence):
                  gap_posterior: np.ndarray = None,
                  rng: np.random.Generator | None = None):
 
+        self.alphabet = list(alphabet) # The core, ungapped alphabet
+        self._rng = rng or np.random.default_rng()
+        
+        # Determine the alphabet to be used for the hard sequence proxy
+        hard_sequence_alphabet = self.alphabet
+        
         if gap_posterior is not None:
-
             if aa_posterior.shape[0] != gap_posterior.shape[0]:
                 raise ValueError('gap and amino acid length must be the same')
             
             self.posterior = np.asarray(self.compute_conditional_gap_dist(aa_post_dist=aa_posterior,
-                                                          gap_post_dist=gap_posterior))
+                                                                          gap_post_dist=gap_posterior))
+            # Use an extended alphabet that includes the gap character
+            hard_sequence_alphabet = self.alphabet + ['gap']
         else:
             self.posterior = np.asarray(aa_posterior, dtype=float)
                 
-        self.alphabet = list(alphabet)
-        self._rng = rng or np.random.default_rng()
-
         if hard_rule == "argmax":
             hard = self.posterior.argmax(axis=1)
         elif hard_rule == "sample":
-            hard = [self._rng.choice(len(self.alphabet), p=row) for row in self.posterior]
+            # Use the full posterior for sampling
+            hard = [self._rng.choice(self.posterior.shape[1], p=row) for row in self.posterior]
         else:
             raise ValueError("hard_rule must be 'argmax' or 'sample'")
 
-        super().__init__([self.alphabet[i] for i in hard], alphabet=self.alphabet)
+        super().__init__([hard_sequence_alphabet[i] for i in hard], alphabet=hard_sequence_alphabet)
 
     def map_values(self) -> np.ndarray:
         """
@@ -384,7 +389,15 @@ def make_sequence(sequence: _SeqConvertible,
     BaseNumpySequence
         A BaseNumpySequence or BinarySequence object based on the input.
     """
+    if isinstance(sequence, BaseNumpySequence) and alphabet is None:
+        return sequence
+
     seq_np = _to_numpy(sequence)
+    
+    # If an alphabet wasn't passed, but the original object had one, use it.
+    if alphabet is None and isinstance(sequence, BaseNumpySequence):
+        alphabet = sequence.alphabet
+
     if binary is True or (binary is None and set(seq_np).issubset({0, 1})):
         return BinarySequence(seq_np)
     

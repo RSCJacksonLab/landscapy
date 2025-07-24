@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, field_validator, ValidationError  
+from pydantic import BaseModel, Field, field_validator, ValidationError, ConfigDict
 from typing import Union, List, Literal, Iterable
 import numpy as np
 from ..core.landscape import FitnessLandscape, _GraphLike, NodeModel
@@ -8,6 +8,7 @@ import networkx as nx
 from softalign.soft_alignment import align_soft_sequences
 
 class EmbNodeModel(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
     emb_arr: np.ndarray = Field(..., repr=False)
 
     @field_validator("emb_arr")
@@ -20,6 +21,17 @@ class EmbNodeModel(BaseModel):
 
 class FitnessSuperscape:
     """
+    FitnessSuperscape is a class that manages multiple fitness
+    landscapes and aligns them into a common latent space using RJMCMC
+    sampling.
+
+    Attributes
+    ----------
+    landscapes : List[Union[FitnessLandscape, _GraphLike]]
+        A list of fitness landscapes or graph-like objects to be aligned.
+    posterior_prob_cutoff : float
+        The cutoff for posterior probabilities when constructing the
+        latent landscape.
     """
 
     def __init__(self,
@@ -54,28 +66,30 @@ class FitnessSuperscape:
         self.latent_graph = self.graph_aligner.latent_blueprint_graph(posterior_prob_cutoff=self._posterior_prob_cutoff)
 
         # Aggregate data into flat data structures.
-        all_prob_maps = np.vstack(self._latent_mappings)
+        all_prob_maps = np.vstack(list(self._latent_mappings.values()))
         all_fitnesses = np.concatenate([
-            #TODO: Make sure using correct API.
-            landscape.fitness_values for landscape in self.landscapes
+            landscape.get_signal() for landscape in self.landscapes
         ])
-        all_sequences = [
-            seq for landscape in self.landscapes for seq in landscape.sequences
+        
+        # Collect all ungapped arrays from the nodes
+        all_ungapped_arrs = [
+            node_data['ungapped_arr']
+            for landscape in self.landscapes
+            for _, node_data in landscape.graph.nodes(data=True)
         ]
 
         # Back referece map for quick lookup.
         back_reference = [
             (k, node_id)
             for k, landscape in enumerate(self.landscapes)
-            for node_id in landscape.nodes
+            for node_id in landscape.graph.nodes()
         ]
 
         # Collect distribution of sequence lengths for ambiguous soft sequences.
-        all_lengths = [len(seq) for seq in all_sequences]
+        all_lengths = [len(seq) for landscape in self.landscapes for seq in landscape.sequences]
         default_length = int(np.median(all_lengths)) if all_lengths else 1
 
         # Vectorised latent fitnesses.
-        #TODO: update fitness to a new class and not a float.
         total_prob_per_latent = all_prob_maps.sum(axis=0) + 1e-12
         weighted_fitness_sum = all_prob_maps.T @ all_fitnesses
         latent_fitnesses_array = weighted_fitness_sum / total_prob_per_latent
@@ -89,80 +103,95 @@ class FitnessSuperscape:
             # Find indices of sequences that contribute to latent node.
             contributor_indices = np.where(prob_col > 0)[0]
             
-            # 
             observed_mappings = []
             for flat_idx in contributor_indices:
                 graph_idx, node_id = back_reference[flat_idx]
                 probability = prob_col[flat_idx]
-                # TODO: add node name.
                 observed_mappings.append({
                     "node_id": node_id,
                     "probability": probability,
                     "graph_index": graph_idx
                 })
             
-            # Sort the mappings by probability
             observed_mappings.sort(key=lambda x: x['probability'], reverse=True)
-            
-            # Set the attribute on the corresponding node in the latent graph.
             self.latent_graph.nodes[latent_node_idx]['observed_node_mappings'] = observed_mappings            
             
-            # If no nodes map here, create an ambiguous soft sequence.
             if len(contributor_indices) == 0:
-
                 uniform_probability = 1.0 / len(self.alphabet)
-                
                 uniform_posterior = np.full(
                     (default_length, len(self.alphabet)),
                     uniform_probability)
                 
-                # Create ambiguous SoftSequence object and append it.
                 ambiguous_sequence = SoftSequence(
                     uniform_posterior,
                     self.alphabet
                 )
                 latent_sequences.append(ambiguous_sequence)
+                # Also set the gapped_arr and ungapped_arr for the latent node
+                gapped_arr = np.zeros((default_length, len(self.alphabet) + 1))
+                gapped_arr[:, :-1] = uniform_posterior
+                self.latent_graph.nodes[latent_node_idx]['gapped_arr'] = gapped_arr
+                self.latent_graph.nodes[latent_node_idx]['ungapped_arr'] = uniform_posterior
                 continue
         
-            # Gather the specific sequences and their corresponding probabilities
-            sequences_to_align = [all_sequences[i] for i in contributor_indices]
+            # Gather the specific ungapped arrays and their corresponding probabilities
+            ungapped_arrs_to_align = [all_ungapped_arrs[i] for i in contributor_indices]
             contributor_probs = prob_col[contributor_indices]
 
-            # Return a list of matrices of the same shape.
-            # TODO: soft sequence alignment.
-            aligned_matrices, score = self.align_soft_sequences(sequences_to_align)
+            # Align the "ungapped_arr" attributes using softalign
+            aligned_arrays, score = align_soft_sequences(
+                sequences=ungapped_arrs_to_align,
+                alphabet=self.alphabet
+            )
 
-            # Stack the aligned matrices into a 3D array.
-            aligned_tensor = np.array(aligned_matrices)
+            aligned_tensor = np.array(aligned_arrays)
+            
             weighted_sum_posterior = np.einsum(
                 'i,ija->ja', contributor_probs, aligned_tensor
             )
             final_posterior = weighted_sum_posterior / total_prob_per_latent[latent_node_idx]
 
+            # `final_posterior` is the gapped array
+            self.latent_graph.nodes[latent_node_idx]['gapped_arr'] = final_posterior
+            
+            # Derive the ungapped array from the final_posterior
+            ungapped_arr = final_posterior[:, :-1]
+            # Renormalize
+            ungapped_arr = ungapped_arr / ungapped_arr.sum(axis=1, keepdims=True)
+            self.latent_graph.nodes[latent_node_idx]['ungapped_arr'] = ungapped_arr
+
+            # Create SoftSequence for the latent landscape
+            aa_posterior = final_posterior[:, :-1]
+            gap_posterior = final_posterior[:, -1:]
+
             latent_sequences.append(
-                SoftSequence(final_posterior, self.alphabet)
+                SoftSequence(
+                    aa_posterior=aa_posterior,
+                    alphabet=self.alphabet,
+                    gap_posterior=gap_posterior
+                )
             )
 
         self.latent_landscape = FitnessLandscape(
-            latent_sequences, latent_fitnesses_array
+            sequences=latent_sequences, fitness_values=latent_fitnesses_array
         )
         self.latent_landscape.graph = self.latent_graph
 
 
     @staticmethod
-    def _validate_embeddings(graphs: list[nx.DiGraph]) -> None:
+    def _validate_embeddings(graphs: list[nx.Graph]) -> None:
         """
         Helper method to validate nodes have valid emb_arr attribute.
 
         Parameters
         ----------
         graphs : List
-            List of nx.DiGraph objects to be aligned.
+            List of nx.Graph objects to be aligned.
         """
         for G in graphs:
             for node, data in G.nodes(data=True):
                 try:
-                    EmbNodeModel(**data)        # will raise if missing/invalid
+                    EmbNodeModel(**data) # will raise if missing/invalid
                 except ValidationError as e:
                     raise ValueError(f"{node!r}: {e}") from None
                 
@@ -219,12 +248,12 @@ class FitnessSuperscape:
                     f"reference alphabet ({reference_alphabet_set})."
                 )
         
-        return reference_alphabet
+        return sorted(list(reference_alphabet_set))
                 
     @staticmethod
     def _extract_graphs(landscapes: Iterable[Union[FitnessLandscape,
                                                    _GraphLike,
-                                                   nx.DiGraph]]) -> list[nx.DiGraph]:
+                                                   nx.Graph]]) -> list[nx.Graph]:
         """
         Helper method to extract directed graphs from directed fitness
         landscapes.
@@ -233,12 +262,12 @@ class FitnessSuperscape:
         ----------
         landscapes : Iterable
             The list of DirectedFitnessLandscapes, _GraphLike or
-            nx.DiGraph objects.
+            nx.Graph objects.
 
         Returns
         -------
         out : list
-            The list of nx.DiGraph objects indexed matched to the
+            The list of nx.Graph objects indexed matched to the
             landscapes.
         """
         out = []
@@ -256,7 +285,17 @@ class FitnessSuperscape:
             out.append(G)
         return out
     
-    
+    def save(self, filepath: str):
+        """Saves the FitnessSuperscape object to a file."""
+        with open(filepath, 'wb') as f:
+            pickle.dump(self, f)
+
+    @staticmethod
+    def load(filepath: str):
+        """Loads a FitnessSuperscape object from a file."""
+        with open(filepath, 'rb') as f:
+            return pickle.load(f)
+
     # TODO: shard with FAISS and retrieve subgraph with cosine match to
     # the query vector. Current method scales O(N^2) over exhaustive
     # graph alignment (even with anchoring): subgraphing will scale

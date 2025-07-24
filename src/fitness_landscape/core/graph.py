@@ -37,7 +37,7 @@ def create_hamming_graph(sequences: List[BaseNumpySequence],
             seq = BaseNumpySequence(seq)
         
         # Add node with sequence attribute
-        G.add_node(i, sequence=seq.to_array())
+        G.add_node(i, sequence=seq)
         
         # Add fitness attribute if provided
         if fitness_values is not None:
@@ -98,7 +98,7 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
             seq = BaseNumpySequence(seq)
         
         # Add node with sequence attribute
-        G.add_node(i, sequence=seq.to_array())
+        G.add_node(i, sequence=seq)
         
         # Add fitness attribute if provided
         if fitness_values is not None:
