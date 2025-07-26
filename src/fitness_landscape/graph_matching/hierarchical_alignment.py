@@ -14,6 +14,23 @@ import faiss
 def run_local_alignment_task(cluster_subgraphs: List[nx.Graph],
                              aligner_params: Dict) -> Tuple[nx.Graph, Dict[int, np.ndarray], Dict[int, list]]:
     """
+    Executes the local RJMCMC alignment for a cluster of subgraphs.
+    This is a Ray remote task to parallelize the local alignments.
+
+    Parameters
+    ----------
+    cluster_subgraphs : List[nx.Graph]
+        A list of subgraphs representing a cluster of nodes.
+    aligner_params : Dict
+        Parameters for the RJMCMCAligner.
+    
+    Returns
+    -------
+    Tuple[nx.Graph, Dict[int, np.ndarray], Dict[int, list]]
+        A tuple containing:
+        - The blueprint graph for the local alignment.
+        - A mapping of node indices to latent space indices.
+        - The order of nodes as seen by the aligner.
     """
     local_aligner = RJMCMCAligner(graphs=cluster_subgraphs, **aligner_params)
     local_aligner.sample()
@@ -29,6 +46,23 @@ def run_local_alignment_task(cluster_subgraphs: List[nx.Graph],
 
 class HierarchicalRJMCMCAligner:
     """
+    A hierarchical RJMCMC aligner that performs two-level graph alignment:
+    1. Local alignments within clusters of nodes.
+    2. Global meta-alignment across clusters.
+
+    Attributes
+    ----------
+    graphs : List[nx.Graph]
+        A list of graphs to be aligned.
+    aligner_params : dict
+        Parameters for the RJMCMCAligner.
+    Local_cluster_threshold : float, default=0.85
+        Threshold for local cluster similarity.
+    global_bridge_threshold : float, default=0.5
+        Threshold for global bridge similarity.
+    emb_key : str, default='emb_arr'
+        The key in the graph nodes' data that containsthe embedding
+        array.
     """
 
     def __init__(self,
@@ -51,6 +85,13 @@ class HierarchicalRJMCMCAligner:
     def run_alignment(self) -> Tuple[nx.Graph, Dict[int, np.ndarray]]:
         """
         Executes the full, two-level hierarchical alignment process.
+
+        Returns
+        -------
+        Tuple[nx.Graph, Dict[int, np.ndarray]]
+            A tuple containing:
+            - The final aligned graph.
+            - A mapping of original graph nodes to latent space nodes.
         """
         # Local Alignments
         local_results = self._run_local_alignments()
@@ -65,6 +106,17 @@ class HierarchicalRJMCMCAligner:
 
     def _create_clusters(self) -> List[Dict]:
         """
+        Method to create clusters of nodes based on cosine similarity
+        of their embeddings across all graphs.
+
+        Returns
+        -------
+        List[Dict]
+            A list of clusters, where each cluster is a dictionary
+            containing:
+            - 'global_indices': Indices of nodes in the cluster.
+            - 'node_backrefs': References to the original nodes in the
+            graphs.
         """
         all_embeddings = []
         node_backrefs = [] 
@@ -72,6 +124,9 @@ class HierarchicalRJMCMCAligner:
             for node_id, data in G.nodes(data=True):
                 all_embeddings.append(data[self.emb_key])
                 node_backrefs.append((k, node_id))
+        
+        if not all_embeddings:
+            return []
         
         all_embeddings = np.array(all_embeddings, dtype=np.float32)
         all_embeddings /= np.linalg.norm(all_embeddings, axis=1, keepdims=True)
@@ -86,7 +141,7 @@ class HierarchicalRJMCMCAligner:
         mask = (indices > -1) & (similarities >= self.local_thresh)
     
         rows = row_indices[mask.ravel()]
-        cols = indices[mask.ravel()]
+        cols = indices.ravel()[mask.ravel()] 
         
         adjacency_matrix = csr_matrix((np.ones_like(rows), (rows, cols)),
                                       shape=(num_nodes, num_nodes))
@@ -114,6 +169,17 @@ class HierarchicalRJMCMCAligner:
 
     def _run_local_alignments(self) -> List[Dict]:
         """
+        Method to run local RJMCMC alignments for each cluster of
+        nodes.
+
+        Returns
+        -------
+        List[Dict]
+            A list of dictionaries, where each dictionary contains:
+            - 'blueprint': The blueprint graph for the local alignment.
+            - 'node_mapping': A mapping of node indices to latent space
+            indices.
+            - 'node_order': The order of nodes as seen by the aligner.
         """
         clusters = self._create_clusters()
         
@@ -145,7 +211,21 @@ class HierarchicalRJMCMCAligner:
     def _run_global_meta_alignment(self,
                                    local_results: List[Dict]) -> Tuple[nx.Graph, Dict[int, np.ndarray]]:
         """
+        Method to run the global meta-alignment across clusters of
+        nodes.
+
+        Returns
+        -------
+        Tuple[nx.Graph, Dict[int, np.ndarray]]
+            A tuple containing:
+            - The meta blueprint graph for the global alignment.
+            - A mapping of original graph nodes to latent space nodes.
         """
+
+        if not local_results:
+            
+            # Return empty but correctly typed results
+            return nx.Graph(), {k: np.array([]) for k in range(self.K)}
 
         meta_graphs = [nx.Graph() for _ in range(self.K)]
         
@@ -173,6 +253,20 @@ class HierarchicalRJMCMCAligner:
                          if meta_graphs[k].has_node(i) and meta_graphs[k].has_node(j):
                             meta_graphs[k].add_edge(i, j)
 
+        total_meta_edges = sum(g.number_of_edges() for g in meta_graphs)
+        if total_meta_edges == 0:
+
+            # Create an empty blueprint graph but ensure it contains all the cluster nodes.
+            meta_blueprint = nx.Graph()
+            all_meta_nodes = set()
+            for g in meta_graphs:
+                all_meta_nodes.update(g.nodes())
+            meta_blueprint.add_nodes_from(all_meta_nodes)
+            
+            # Create empty but correctly structured mapping dictionaries.
+            meta_mappings = {k: np.empty((g.number_of_nodes(), 0)) for k, g in enumerate(meta_graphs)}
+            return meta_blueprint, meta_mappings
+        
         meta_aligner = RJMCMCAligner(graphs=meta_graphs, **self.aligner_params)
         meta_aligner.sample()
 
@@ -183,21 +277,47 @@ class HierarchicalRJMCMCAligner:
                         meta_blueprint: nx.Graph,
                         meta_mappings: Dict[int, np.ndarray]) -> Tuple[nx.Graph, Dict[int, np.ndarray]]:
         """
+        Method to stitch the local results and meta blueprint into a
+        final graph and mappings.
+
+        Parameters
+        ----------
+        local_results : List[Dict]
+            A list of dictionaries containing the local alignment
+            results.
+        meta_blueprint : nx.Graph
+            The meta blueprint graph from the global alignment.
+        meta_mappings : Dict[int, np.ndarray]
+            A mapping of original graph nodes to latent space nodes
+            from the global alignment.
+        
+        Returns
+        -------
+        Tuple[nx.Graph, Dict[int, np.ndarray]]
+            A tuple containing:
+            - The final aligned graph.
+            - A mapping of original graph nodes to latent space nodes.
         """
         final_graph = nx.Graph()
         local_to_global_nodemap = {}
-        
+
         for i, result in enumerate(local_results):
             local_bp = result['blueprint']
-            for node in local_bp.nodes():
-                global_name = f"c{i}_n{node}"
-                local_to_global_nodemap[(i, node)] = global_name
-                final_graph.add_node(global_name) 
-        
-        # Compose graphs first
-        for i, result in enumerate(local_results):
-             for u, v in result['blueprint'].edges():
-                final_graph.add_edge(local_to_global_nodemap[(i, u)], local_to_global_nodemap[(i, v)])
+            
+            # Create a mapping for this cluster's nodes to unique global names
+            node_rename_mapping = {node: f"c{i}_n{node}" for node in local_bp.nodes()}
+            
+            # Store this mapping for later use when adding bridge edges
+            for local_node, global_name in node_rename_mapping.items():
+                local_to_global_nodemap[(i, local_node)] = global_name
+                
+            # Create a new graph with the relabeled nodes
+            relabeled_bp = nx.relabel_nodes(local_bp, node_rename_mapping, copy=True)
+            
+            # Compose the uniquely-named blueprint into the final graph
+            final_graph = nx.compose(final_graph, relabeled_bp)
+
+
 
         for i, j in meta_blueprint.edges():
             nodes_i = local_results[i]["node_backrefs"]

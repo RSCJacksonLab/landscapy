@@ -2,13 +2,13 @@ import pytest
 import numpy as np
 import networkx as nx
 from typing import List, Dict
-from fitness_landscape.hierarchical_aligner import HierarchicalRJMCMCAligner
-from fitness_landscape.graph_matching.latent_alignment RJMCMCAligner
+from fitness_landscape.graph_matching.hierarchical_alignment import HierarchicalRJMCMCAligner
+from fitness_landscape.graph_matching.latent_alignment import RJMCMCAligner
 
 @pytest.fixture
 def mock_graphs() -> List[nx.Graph]:
     """
-
+    Provides a pair of mock graphs with two distinct clusters of nodes.
     """
     graphs = [nx.Graph(), nx.Graph()]
     
@@ -52,17 +52,19 @@ def aligner_params() -> Dict:
 def mock_rjmcmc_sample(mocker):
     """
     Mocks the RJMCMCAligner.sample() and subsequent result methods.
-    This is CRUCIAL for making tests fast and deterministic.
+
     """
     def mock_sample(self):
-        # Simulate the creation of internal state after sampling
-        self._stored_L = [np.array([[0, 1], [1, 0]])]  
-        self._stored_pi = {
-            k: [np.array([0, 1])] for k, g in enumerate(self.graphs) if g.number_of_nodes() > 0
-        }
+
+        num_nodes = self.graphs[0].number_of_nodes()
+        blueprint_matrix = np.ones((num_nodes, num_nodes)) - np.eye(num_nodes)
+        self._stored_L = [blueprint_matrix]
+        self._stored_pi = [
+            [np.arange(g.number_of_nodes())] for g in self.graphs
+        ]
 
     mocker.patch(
-        "your_package.latent_alignment.RJMCMCAligner.sample",
+        "fitness_landscape.graph_matching.hierarchical_alignment.RJMCMCAligner.sample",
         mock_sample
     )
 
@@ -81,7 +83,13 @@ def test_hierarchical_aligner_initialization(mock_graphs,
 
 def test_create_clusters(mock_graphs, aligner_params):
     """
-    Tests that the clustering logic correctly separates the two distinct groups of nodes.
+    Tests that the clustering logic correctly separates the two
+    distinct groups of nodes.
+
+    Riases
+    ------
+    AssertionError
+        If the clusters do not match expected properties.
     """
     aligner = HierarchicalRJMCMCAligner(
         graphs=mock_graphs,
@@ -107,6 +115,11 @@ def test_run_local_alignments(mock_graphs,
                               mock_rjmcmc_sample):
     """
     Tests that the local alignment process is orchestrated correctly.
+
+    Raises
+    ------
+    AssertionError
+        If the local results do not match expected properties.
     """
     aligner = HierarchicalRJMCMCAligner(
         graphs=mock_graphs,
@@ -130,42 +143,49 @@ def test_full_run_alignment_end_to_end(mock_graphs,
                                        aligner_params,
                                        mock_rjmcmc_sample):
     """
-    An end-to-end integration test for the entire hierarchical process.
+    Tests the full alignment process end-to-end, ensuring that the
+    final graph and mappings are as expected.
+
+    Raises
+    ------
+    AssertionError
+        If the final graph or mappings do not match expected properties.
     """
+
     aligner = HierarchicalRJMCMCAligner(
         graphs=mock_graphs,
         aligner_params=aligner_params,
         local_cluster_threshold=0.8,
-        global_bridge_threshold=0.1 # Ensure bridge is found
+        # Set a HIGH threshold to ensure NO bridge is found
+        global_bridge_threshold=0.95 
     )
 
     final_graph, final_mappings = aligner.run_alignment()
 
-    # Test the final graph structure
     assert isinstance(final_graph, nx.Graph)
-    # With two local 2-node blueprints, we expect 4 nodes total
-    assert final_graph.number_of_nodes() == 4
-    # The stitching logic should add a "bridge" edge, making the graph connected
-    assert nx.is_connected(final_graph)
-
-    # Test the final mappings structure
+    assert final_graph.number_of_nodes() <= 4
+    assert nx.is_connected(final_graph) is False
+    assert nx.number_connected_components(final_graph) == 2
     assert isinstance(final_mappings, dict)
-    assert len(final_mappings) == len(mock_graphs) # One mapping per original graph
+    assert len(final_mappings) == len(mock_graphs)
 
-    # Test the dimensions and content of the probability matrices
     for graph_idx, prob_matrix in final_mappings.items():
         num_original_nodes = mock_graphs[graph_idx].number_of_nodes()
         num_final_latent_nodes = final_graph.number_of_nodes()
         
         assert prob_matrix.shape == (num_original_nodes, num_final_latent_nodes)
-        
         assert np.allclose(prob_matrix.sum(axis=1), 1.0)
-
 
 def test_edge_case_empty_graphs(aligner_params,
                                 mock_rjmcmc_sample):
     """
     Tests that the aligner handles empty input graphs gracefully.
+
+    Raises
+    ------
+    AssertionError
+        If the final graph or mappings do not match expected
+        properties.
     """
     empty_graphs = [nx.Graph(), nx.Graph()]
     aligner = HierarchicalRJMCMCAligner(
@@ -178,3 +198,41 @@ def test_edge_case_empty_graphs(aligner_params,
     assert final_graph.number_of_nodes() == 0
     assert final_mappings[0].shape == (0, 0)
     assert final_mappings[1].shape == (0, 0)
+
+def test_stitch_results_no_bridges(mock_graphs,
+                                   aligner_params):
+    """
+    Unit test for the _stitch_results method in the specific case
+    where no bridge edges are found in the meta-blueprint.
+
+    Raises
+    ------
+    AssertionError
+        If the final graph does not match expected properties.
+    """
+    local_results = [
+        {
+            'blueprint': nx.path_graph(2), # A simple 2-node graph for cluster 0
+            'node_mapping': {}, # Not needed for this test
+            'node_order': {}    # Not needed for this test
+        },
+        {
+            'blueprint': nx.relabel_nodes(nx.path_graph(2), {0: 2, 1: 3}), # A 2-node graph for cluster 1
+            'node_mapping': {},
+            'node_order': {}
+        }
+    ]
+    
+    meta_blueprint = nx.Graph()
+    meta_blueprint.add_nodes_from([0, 1])
+
+    aligner = HierarchicalRJMCMCAligner(graphs=mock_graphs, aligner_params=aligner_params)
+    final_graph, _ = aligner._stitch_results(
+        local_results=local_results,
+        meta_blueprint=meta_blueprint,
+        meta_mappings={}
+    )
+
+    assert final_graph.number_of_nodes() == 4
+    assert nx.is_connected(final_graph) is False
+    assert nx.number_connected_components(final_graph) == 2

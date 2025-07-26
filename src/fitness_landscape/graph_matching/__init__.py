@@ -3,7 +3,7 @@ from .latent_alignment import (
     auto_anchors_by_cosine
 )
 
-from .hierachical_alignment import HierarchicalRJMCMCAligner
+from .hierarchical_alignment import HierarchicalRJMCMCAligner
 
 __all__ = [
     'RJMCMCAligner',
