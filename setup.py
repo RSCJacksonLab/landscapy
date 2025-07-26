@@ -38,11 +38,14 @@ setup(
         "pydantic==2.11.7",
         "pytest>=8",
         "pytest-cov>=6",
+        "faiss-cpu>=1.11",
+        "ray>=2.48",
         "softalign @ git+https://github.com/RSCJacksonLab/softalign.git@9127e3a"
     ],
     extras_require={
         "dev": [
             "pytest>=6.0",
+            "pytest-mock>=3.14",
             "pytest-cov>=2.10",
             "flake8>=3.8",
             "black>=20.8b1",
