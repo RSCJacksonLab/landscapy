@@ -15,6 +15,8 @@ from .core import (
 
 )
 
+from .utils import cosine_similarity_matrix
+
 __version__ = '0.2.0'
 
 __all__ = [

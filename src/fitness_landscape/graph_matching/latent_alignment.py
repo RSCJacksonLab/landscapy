@@ -6,7 +6,7 @@ from typing import List, Optional, Tuple, Union, Dict
 import numpy as np
 import networkx as nx
 from scipy.special import gammaln
-from .isorank import cosine_similarity_matrix
+from ..utils import cosine_similarity_matrix
 import scipy.optimize
 import numba
 
@@ -220,7 +220,32 @@ class RJMCMCAligner:
             self.W.append(csr_matrix((dense > 0).astype(np.int8)))
         
         self.binary_mode = True   
-        self.X = [np.vstack([np.asarray(G.nodes[v][emb_key], float) for v in vs]) for G, vs in zip(graphs, self.V)]
+        
+        
+        self.X = []
+        emb_dim = None
+        # Find the embedding dimension from any graph that actually has nodes.
+        for g in self.graphs:
+            if g.number_of_nodes() > 0:
+                any_node = list(g.nodes())[0]
+                # Use .get() to avoid a KeyError if a node somehow lacks the embedding key
+                emb = g.nodes[any_node].get(emb_key)
+                if emb is not None:
+                    emb_dim = len(emb)
+                    break
+
+        if emb_dim is None:
+            # If no nodes with embeddings were found anywhere, default the dimension to 0.
+            emb_dim = 0 
+
+        for G, vs in zip(self.graphs, self.V):
+            # If there are nodes in this specific graph
+            if vs:  
+                embeddings = [np.asarray(G.nodes[v].get(emb_key, []), float) for v in vs]
+                self.X.append(np.vstack(embeddings))
+            else:
+                # If the graph is empty, append a correctly shaped empty array.
+                self.X.append(np.empty((0, emb_dim), dtype=float))
 
         anchor_label_to_slot: dict[str | int, int] = {}
         next_slot = 0
@@ -236,7 +261,6 @@ class RJMCMCAligner:
                     pk[i] = anchor_label_to_slot[label]
             self.perm.append(pk)
 
-        # FIX 2: Correct initialization of latent slots (NL) and permutations.
         num_anchored_slots = len(anchor_label_to_slot)
         max_nodes = max(self.n) if self.n else 0
         self.NL = max(num_anchored_slots, max_nodes)
@@ -1033,6 +1057,9 @@ def auto_anchors_by_cosine( graphs: List[nx.Graph],
             emb = np.asarray(G.nodes[v][emb_key], float)
             emb_list.append(emb)
             backref.append((k, i))
+
+    if not emb_list:
+        return    
 
     E = np.vstack(emb_list) # (N, d)
     S = cosine_similarity_matrix(E, E)

@@ -3,14 +3,12 @@ from .latent_alignment import (
     auto_anchors_by_cosine
 )
 
-from .isorank import (
-    cosine_similarity_matrix,
-    isorank_with_features
-)
+from .hierarchical_alignment import HierarchicalRJMCMCAligner
 
 __all__ = [
     'RJMCMCAligner',
     'auto_anchors_by_cosine',
     'cosine_similarity_matrix',
     'isorank_with_features',
+    'HierarchicalRJMCMCAligner'
 ]
