@@ -5,151 +5,176 @@ from dataclasses import dataclass
 from .sequence import BaseNumpySequence, make_sequence
 from .graph import create_hamming_graph
 from abc import ABC, abstractmethod
-from pydantic import BaseModel, Field, field_validator, ValidationError, ConfigDict
 from .graph import create_knn_graph, create_hamming_graph
 from ..embedding.soft_embedding import ESMEmbedder
+from .fitness import BaseFitnessLayer
 import inspect
+from collections import defaultdict
 
-
-class NodeModel(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    sequence: BaseNumpySequence
-    fitness: Union[float, None] = np.nan
-    gapped_arr: np.ndarray = Field(..., repr=False)
-    ungapped_arr: np.ndarray = Field(..., repr=False)
-
-    @field_validator("gapped_arr")
-    @classmethod
-    def _check_gap(cls, v):
-        if v.ndim != 2 or v.shape[1] != 21:
-            raise ValueError("gapped_arr must be (L,21)")
-        return v
-
-    @field_validator("ungapped_arr")
-    @classmethod
-    def _check_ungap(cls, v):
-        if v.ndim != 2 or v.shape[1] != 20:
-            raise ValueError("ungapped_arr must be (L,20)")
-        return v
-
-SeqKey = tuple[str, ...]
-
-@runtime_checkable
-class _GraphLike(Protocol):
-    def nodes(
-        self, data: bool = ...
-    ) -> Iterable[tuple[Hashable, dict]]: ...
-
-@dataclass(slots=True)
-class _Record:
-    sequence: BaseNumpySequence
-    fitness: float
-    gapped_arr: np.ndarray | None = None
-    ungapped_arr: np.ndarray | None = None
-
-class BaseGraphLandscape(ABC):
+class FitnessLandscape:
     """
-    Abstract base class for directed and undirected fitness landscapes.
-    Implements standard class methods.
+    FitnessLandscape is a class that represents a fitness landscape
+    constructed from a networkx graph. It allows for the analysis of
+    fitness layers, sequences, and their relationships.
 
     Attributes
     ----------
-    graph : _GraphLike
-        The graph representation of the fitness landscape.
-    sequences : list[BaseNumpySequence]
-        List of sequences in the landscape.
-    _records : Dict[SeqKey, _Record]
-        Dictionary mapping sequence keys to records containing sequence and fitness data.
-    graph_type : Literal['hamming', 'knn']
-        Type of graph used in the landscape (e.g., 'hamming', 'knn').
+
     """
-    graph: _GraphLike
-    sequences: list[BaseNumpySequence]
-    _records: Dict[SeqKey, _Record] 
-    graph_type: Literal['hamming', 'knn'] # TODO: Add other graph types? 
+    def __init__(self,
+                 sequences: List[BaseNumpySequence],
+                 fitness_layers: Dict[str, BaseFitnessLayer],
+                 *,
+                 graph_type: Literal['hamming', 'knn'] = 'hamming',
+                 graph: _GraphLike = None,
+                 emb_nodes: bool = False,
+                 res_emb_arr_key: str = 'residue_emb_arr',
+                 emb_arr_key: str = 'emb_arr',
 
-    def __init__(self) -> None:
-        self.sequences = []
-        self._records = {}
-        self.graph_type = None,
+                 **kwargs) -> None:
         
-        self._res_emb_arr_key: str = 'residue_emb_arr'
-        self._emb_arr_key: str = 'emb_arr'
+        self.sequences = sequences
+        self.fitness_layers = fitness_layers
+        self.graph_type = graph_type if graph is None else 'precomputed'
+        self.graph = graph
+        self._res_emb_arr_key = res_emb_arr_key
+        self._emb_arr_key = emb_arr_key
 
-    def get_fitness(self,
-                    sequence,
-                    *,
-                    default: Union[float, None] = None) -> float:
+        # Internal mapping from sequence to its integer index for quick lookups
+        self._records = {tuple(seq.to_array()): i for i, seq in enumerate(self.sequences)}
+
+        # Set the initial active view for legacy method compatibility
+        if self.fitness_layers:
+            self._active_view_name = next(iter(self.fitness_layers.keys()))
+        else:
+            self._active_view_name = None
+
+        # Build the graph if one wasn't provided
+        if self.graph is None and self.graph_type:
+            self.to_graph(**kwargs)
+
+        # Optionally compute embeddings
+        if emb_nodes:
+            self.compute_node_embeddings(**kwargs)
+
+    @property
+    def active_layer(self) -> BaseFitnessLayer:
         """
-        Method to retrieve the fitness of a sequence.
-
-        Returns
-        -------
-        float
-            Fitness value of the sequence. If the sequence is not
-            found, returns the default value if provided, otherwise
-            raises KeyError.
+        Dynamic property to get the active fitness layer.
         """
-
-        key = tuple(make_sequence(sequence).to_array())
-        try:
-            return self._records[key].fitness
-        except KeyError:
-            if default is None:
-                raise
-            return default
-
-    def get_signal(self) -> np.ndarray:
-        """
-        Method to retrieve the graph signal vector.
-
-        Returns
-        -------
-        np.ndarray
-            Array of fitness values for each sequence in the landscape.
-        """
-        return np.fromiter(
-            (rec.fitness for rec in self._records.values()), float, len(self._records)
-        )
+        if self._active_view_name is None:
+            raise ValueError("No active fitness layer. Use .view(layer_name) to set one.")
+        return self.fitness_layers[self._active_view_name]
     
-    def _init_from_pairs(self,
-                         seqs: List[BaseNumpySequence],
-                         fits: Union[List, np.ndarray]) -> None:
-        
+    def view(self, name: str) -> BaseFitnessLayer:
         """
-        Method to initialize the landscape from pairs of sequences and
-        fitness values.
+        Retrieves a fitness layer and sets it as the new active view.
+        """
+        if name not in self.fitness_layers:
+            raise KeyError(f"Fitness layer '{name}' not found.")
+        self._active_view_name = name
+        return self.fitness_layers[name]
+    
+    def to_graph(self,
+                 **kwargs) -> None:
+        """
+        Method to construct a networkx graph from the sequences and
+        fitness layers. Symmetrical with the `from_graph` method.
+        """
+        if self.graph_type == 'hamming':
+            self.graph = create_hamming_graph(self.sequences, **kwargs)
+        elif self.graph_type == 'knn':
+            self.graph = create_knn_graph(self.sequences, **kwargs)
+        else:
+            raise ValueError(f"Unsupported graph type for construction: {self.graph_type}")
+
+        seq_to_node_map = {tuple(data['sequence'].to_array()): node_idx
+                           for node_idx, data in self.graph.nodes(data=True)}
+
+        for i, seq in enumerate(self.sequences):
+            node_idx = seq_to_node_map.get(tuple(seq.to_array()))
+            if node_idx is None: continue
+
+            for name, layer in self.fitness_layers.items():
+                attribute_name = f"fitness_{name}"
+                # get_value() retrieves the native data (e.g., list of floats, or a string)
+                self.graph.nodes[node_idx][attribute_name] = layer.get_value(i)
+    
+    @classmethod
+    def from_graph(cls,
+                   graph: nx.Graph,
+                   layer_type_map: Dict[str, str] = None,
+                   **kwargs) -> 'FitnessLandscape':
+        """
+        Creates a FitnessLandscape instance from a networkx graph.
+
+        This method automatically detects fitness data stored in node 
+        attributes that are prefixed with `fitness_`. It constructs
+        the appropriate `FitnessLayer` objects for each detected
+        attribute.
 
         Parameters
         ----------
-        seqs : List[BaseNumpySequence]
-            List of sequences to initialize the landscape with.
-        fits : Union[List, np.ndarray]
-            List or array of fitness values corresponding to the sequences.
+        graph : nx.Graph
+            The input graph. Nodes must have a 'sequence' attribute and
+            none or more 'fitness_*' attributes.
+        
+        layer_type_map : Dict[str, str], optional
+             A map to manually specify the type ('numeric' or
+             'categorical') for ambiguous layers.
+
+        Returns
+        -------
+        FitnessLandscape 
+            A new landscape instance.
         """
+        sequences = []
+        # Use defaultdict to easily collect values for each layer
+        raw_layer_data = defaultdict(list)
+        
+        # Ensure a consistent node order
+        node_order = list(graph.nodes())
 
-        for seq, fit in zip(seqs, fits):
-            s = make_sequence(seq)
-            self.sequences.append(s)
-            self._records[tuple(s.to_array())] = _Record(sequence=s, fitness=float(fit))
+        for node in node_order:
+            data = graph.nodes[node]
+            if 'sequence' not in data:
+                raise ValueError(f"Node {node} is missing the required 'sequence' attribute.")
+            
+            sequences.append(data['sequence'])
+            
+            for key, value in data.items():
+                if key.startswith('fitness_'):
+                    layer_name = key.replace('fitness_', '', 1)
+                    raw_layer_data[layer_name].append(value)
+        
+        # Create FitnessLayer objects from the parsed data.
+        fitness_layers = {}
+        for name, values in raw_layer_data.items():
+            
+            # Infer the layer type based on the data
+            inferred_type = 'numeric' if isinstance(values[0], (list, float, int)) else 'categorical'
+            
+            # Allow user to override inferred type
+            layer_type = layer_type_map.get(name, inferred_type) if layer_type_map else inferred_type
 
-    def _init_from_graph(self, graph: _GraphLike) -> None:
-        self.graph = graph
-        for node, data in graph.nodes(data=True):
-            try:
-                model = NodeModel(**data)
-            except ValidationError as err:
-                raise ValueError(f"Node {node!r}: {err}") from None
+            if layer_type == 'numeric':
 
-            seq = make_sequence(model.sequence)
-            rec = _Record(
-                sequence=seq,
-                fitness=float(model.fitness),
-                gapped_arr=getattr(model, "gapped_arr", None),
-                ungapped_arr=getattr(model, "ungapped_arr", None),
-            )
-            self.sequences.append(seq)
-            self._records[tuple(seq.to_array())] = rec
+                # Ensure all values are lists for NumericFitness
+                numeric_values = [v if isinstance(v, list) else [v] for v in values]
+                fitness_layers[name] = NumericFitness(name=name, values=numeric_values)
+            
+            elif layer_type == 'categorical':
+                # For CategoricalFitness, we can infer all possible categories
+                all_categories = sorted(list(set(values)))
+                fitness_layers[name] = CategoricalFitness(name=name, values=values, categories=all_categories)
+        
+        if not fitness_layers:
+            raise ValueError("No fitness data found in graph. Node attributes must be prefixed with 'fitness_'.")
+
+        # Call the main constructor with the prepared data
+        return cls(sequences, fitness_layers, graph_type=None, **kwargs)
+    
+    #TODO: Add to_graph_tensor() method.
 
 
     def compute_node_embeddings(self,
@@ -189,74 +214,36 @@ class BaseGraphLandscape(ABC):
             pooled_array = np.mean(embedding_array, axis=0)
             self.graph.nodes[node_identifier][self._emb_arr_key] = pooled_array
 
-    @abstractmethod
-    def _to_graph(self):
+    
+    # Legacy methods for compatibility with old code.
+    def get_fitness(self, sequence: BaseNumpySequence) -> float:
         """
-        Abstract graph constructor method.
-        """
-        
-        pass
+        [Legacy] Method to retrieve the fitness of a sequence.
 
-    @staticmethod
-    def _split_kwargs(callable_a: Any,
-                      callable_b: Any,
-                      kwargs: Dict[str, Any]) -> tuple[dict, dict]:
-        """
-        Method to split kwargs between two callables based on their
-        signatures. Raises TypeError if a kwarg is ambiguous (i.e., valid
-        for both callables).
-
-        Parameters
-        ----------
-        callable_a : Any
-            First callable to check kwargs against.
-        callable_b : Any
-            Second callable to check kwargs against.
-        kwargs : Dict[str, Any]
-            Dictionary of keyword arguments to split.
-        
         Returns
         -------
-        tuple[dict, dict]
-            Two dictionaries containing kwargs for each callable.
-            If a kwarg is ambiguous (valid for both callables), raises
-            TypeError.
+        float
+            Fitness value of the sequence. If the sequence is not
+            found, returns the default value if provided, otherwise
+            raises KeyError.
         """
+        seq_index = self._records.get(tuple(sequence.to_array()))
+        if seq_index is None:
+            raise KeyError("Sequence not found in landscape.")
+        return self.active_layer.to_scalar()[seq_index]
 
-        sig_a = inspect.signature(callable_a)
-        sig_b = inspect.signature(callable_b)
-        a_names = set(sig_a.parameters) - {"self"}
-        b_names = set(sig_b.parameters) - {"self"}
-
-        kw_a, kw_b = {}, {}
-        for k, v in kwargs.items():
-            if k in a_names and k in b_names:
-                raise TypeError(f"Ambiguous kwarg '{k}' valid for both functions")
-            if k in a_names:
-                kw_a[k] = v
-            elif k in b_names:
-                kw_b[k] = v
-
-        return kw_a, kw_b
-
-    @classmethod
-    def from_graph(cls,
-                   graph: _GraphLike,
-                   **kwargs):
-        
+    def get_signal(self) -> np.ndarray:
         """
-        Class method to create a landscape from a graph.
+        [Legacy] Method to retrieve the graph signal vector.
 
-        Parameters
-        ----------
-        graph : _GraphLike
-            The graph representation of the fitness landscape.
-        **kwargs
-            Additional keyword arguments to pass to the constructor.
+        Returns
+        -------
+        np.ndarray
+            Array of fitness values for each sequence in the landscape.
         """
+        # Uses the new 'active_layer' property
+        return self.active_layer.to_scalar()
 
-        return cls(graph=graph, **kwargs)
-    
     def __len__(self):
         return len(self.sequences)
     
@@ -269,92 +256,3 @@ class BaseGraphLandscape(ABC):
     
     def __repr__(self):
         return f"{self.__class__.__name__}(n_sequences={len(self.sequences)})"
-
-    
-
-class FitnessLandscape(BaseGraphLandscape):
-    """
-    Base class for fitness landscapes.
-    
-    Attributes
-    ----------
-    sequences : array-like, default=`None`
-        Sequences represented as arrays of elements.
-    fitness_values : array-like, default=`None`
-        Fitness values corresponding to sequences.
-    graph : networkx.Graph, default=`None`
-        NetworkX graph representation of the landscape.
-    graph_type : str, optional
-        Type of graph to create if sequences are provided ('hamming', 'knn', 'custom').
-    """
-    
-    def __init__(self,
-                 graph: nx.Graph = None,
-                 sequences: List[BaseNumpySequence] = None,
-                 fitness_values: np.ndarray = None,
-                 *,
-                 graph_type: Literal['hamming'] = 'hamming',
-                 emb_nodes: bool = False,
-                 **kwargs) -> None:
-        
-        super().__init__()
-        
-        self.graph = None
-        self.graph_type = graph_type
-        
-        if sequences is not None and fitness_values is not None:
-            self._init_from_pairs(sequences, fitness_values)
-        elif graph is not None:
-            self._init_from_graph(graph)
-        else:
-            raise ValueError("Either sequences and fitness_values or graph must be provided")
-        
-        # Split kwargs
-        build_kwargs, emb_kwargs = self._split_kwargs(callable_a=self._to_graph,
-                                                      callable_b=self.compute_node_embeddings,
-                                                      kwargs=kwargs)
-        # Create graph if not provided
-        if self.graph is None and graph_type is not None:
-            self._to_graph(graph_type=graph_type, **build_kwargs)
-
-        # Compute nodes
-        if emb_nodes:
-            self.compute_node_embeddings(**emb_kwargs)
-                
-    def _to_graph(self,
-                 **kwargs) -> nx.Graph:
-        """
-        Method to convert fitness landscape to a network graph.
-        
-        Parameters
-        ----------
-        graph_type : str
-            Type of graph to create. 'hamming': Connect sequences that
-            differ by exactly one position. 'knn': Connect each
-            sequence to its k nearest neighbors.
-        **kwargs
-            Additional parameters for graph creation.
-            
-        Returns
-        -------
-        networkx.Graph
-            Graph representation of the landscape.
-        """
-
-        #Get fitness values for graph construction.
-        fitness_values = self.get_signal()
-
-        creation_kwargs = kwargs.copy()
-        creation_kwargs.pop('graph_type', None)
-
-        if self.graph_type == 'hamming':
-            self.graph = create_hamming_graph(self.sequences, fitness_values, **creation_kwargs)
-
-        elif self.graph_type == 'knn':
-            self.graph = create_knn_graph(self.sequences, fitness_values, **creation_kwargs)
-
-        #TODO: Other graph types can be added here.
-
-        else:
-            raise ValueError(f"Unsupported graph type: {self.graph_type}")
-    
