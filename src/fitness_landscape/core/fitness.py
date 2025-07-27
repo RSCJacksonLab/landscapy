@@ -124,8 +124,6 @@ class NumericFitness(BaseFitnessLayer):
         return np.array([aggregate_func(r) for r in self._replicates])
 
 
-
-
 class CategoricalFitness(FitnessLayer):
     """
     Fitness layer that represents categorical fitness values.
@@ -214,6 +212,107 @@ class CategoricalFitness(FitnessLayer):
             raise ValueError("The provided rank_map does not cover all categories.")
             
         return np.array([_rank_map[v] for v in self._values], dtype=int)
+
+class ProbabilisticCategoricalFitness(BaseFitnessLayer):
+    """
+    Categorical fitness layer that represents probabilities
+    of each category for each sequence.
+
+    Attributes
+    ----------
+    name : str
+        The name of the fitness layer.
+    probabilities : np.ndarray
+        A 2D array of shape (num_sequences, num_categories) where each row
+        is a probability distribution over the categories.
+    categories : List[str]
+        The ordered list of all possible categories.
+    metadata : Dict, optional
+        Additional metadata associated with the fitness layer.
+    """
+    def __init__(self,
+                 name: str,
+                 probabilities: np.ndarray,
+                 categories: List[str],
+                 metadata: Dict = None) -> None:
+        super().__init__(name=name, metadata=metadata)
+        
+        if probabilities.shape[1] != len(categories):
+            raise ValueError("Shape of probabilities matrix must match the number of categories.")
+        if not np.allclose(np.sum(probabilities, axis=1), 1.0):
+            raise ValueError("Rows in the probabilities matrix must sum to 1.")
+            
+        self.probabilities = probabilities
+        self.categories = categories
+        self.category_map = {cat: i for i, cat in enumerate(self.categories)}
+
+    @property
+    def dtype(self) -> Literal['categorical']:
+        return 'categorical'
+
+    def get_tensor(self) -> torch.Tensor:
+        """
+        Method to convert the fitness layer to a PyTorch tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            A tensor representation of the probabilities, where each row
+            corresponds to a sequence and each column corresponds to a
+            category. The tensor will have shape (num_sequences,
+            num_categories).
+        """
+        return torch.tensor(self.probabilities, dtype=torch.float32)
+
+    def get_value(self,
+                  sequence_index: int) -> Dict[str, float]:
+        """
+        Returns the full probability distribution for a single sequence.
+        
+        Parameters
+        ----------
+        sequence_index : int
+            The index of the sequence for which to retrieve the
+            probability distribution.
+
+        Returns
+        -------
+        Dict[str, float]
+            A dictionary mapping each category to its probability for
+            the specified sequence.
+        """
+        return {cat: self.probabilities[sequence_index, i] for i, cat in enumerate(self.categories)}
+
+    def to_scalar(self,
+                  rank_map: Dict[str, int] = None) -> np.ndarray:
+        """
+        Converts to a scalar by returning the integer rank of the most
+        probable category (the mode of the posterior).
+
+        Parameters
+        ----------
+        rank_map : Dict[str, int], optional
+            A mapping from category names to integer ranks. If not provided,
+            the default category order will be used, which is the order in
+            which categories were defined in the layer.
+
+        Returns
+        -------
+        np.ndarray
+            An array of integer ranks corresponding to the most likely
+            category for each sequence. Each value in the layer is replaced
+            by its rank according to the provided rank map. If a value is not
+            found in the rank map, it will raise a ValueError.
+        """
+        _rank_map = rank_map or self.category_map
+        # Find the index of the most likely category for each sequence
+        most_likely_indices = np.argmax(self.probabilities, axis=1)
+        # Convert these indices back to category names
+        most_likely_categories = [self.categories[i] for i in most_likely_indices]
+        # Map the most likely categories to their ranks
+        return np.array([_rank_map[cat] for cat in most_likely_categories])
+
+
 
 # TODO: wrapper classes for fitness layers modifiers.
 

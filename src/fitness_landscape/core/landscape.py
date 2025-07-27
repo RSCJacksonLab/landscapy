@@ -26,7 +26,7 @@ class FitnessLandscape:
                  fitness_layers: Dict[str, BaseFitnessLayer],
                  *,
                  graph_type: Literal['hamming', 'knn'] = 'hamming',
-                 graph: _GraphLike = None,
+                 graph: nx.Graph = None,
                  emb_nodes: bool = False,
                  res_emb_arr_key: str = 'residue_emb_arr',
                  emb_arr_key: str = 'emb_arr',
