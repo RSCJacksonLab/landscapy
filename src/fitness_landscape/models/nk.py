@@ -48,7 +48,21 @@ def generate_NK_states(N: int,
     alphabet_size = len(alphabet)
     allele_map = {allele: i for i, allele in enumerate(alphabet)}
 
-    if base_sequence is not None and variable_sites is not None:
+    if base_sequence is not None and variable_sites is not None: 
+        
+        if len(base_sequence) != N:
+            raise ValueError("Length of base_sequence must be equal to N.")
+        if any(i >= N for i in variable_sites):
+            raise IndexError("All indices in variable_sites must be less than N.")
+        # Check that all non-variable sites in the base sequence are in the alphabet
+        fixed_sites = [idx for idx in range(N) if idx not in variable_sites]
+        for idx in fixed_sites:
+            if base_sequence[idx] not in alphabet:
+                raise ValueError(
+                    f"Character '{base_sequence[idx]}' at position {idx} of base_sequence "
+                    f"is not in the provided alphabet."
+                )
+
         num_variable_sites = len(variable_sites)
         variant_combinations = list(product(alphabet, repeat=num_variable_sites))
         
@@ -133,11 +147,8 @@ def create_gnk_landscape(N: int,
     sequences_np, fitness_values = generate_NK_states(
         N, K, alphabet, seed, adj_mat, base_sequence, variable_sites
     )
-    
-    if alphabet_size == 2:
-        sequences = [BinarySequence(seq) for seq in sequences_np]
-    else:
-        sequences = [MultialleleSequence(seq, alphabet=alphabet) for seq in sequences_np]
+
+    sequences = [BaseNumpySequence(seq, alphabet=alphabet) for seq in sequences_np]
 
     replicates = [[val] for val in fitness_values]
     
@@ -185,7 +196,7 @@ def create_nk_binary_landscape(N: int,
         An instance of the FitnessLandscape class representing the NK
         landscape.
     """
-    sequences_np, fitness_values = generate_NK_states(N, K, alphabet_size=2, seed=seed)
+    sequences_np, fitness_values = generate_NK_states(N, K, alphabet=[0,1], seed=seed)
     
     sequences = [BinarySequence(seq) for seq in sequences_np]
 
@@ -210,7 +221,7 @@ def create_nk_binary_landscape(N: int,
 
 def create_nk_multi_landscape(N: int,
                                K: int,
-                               alphabet_size: int,
+                               alphabet: List,
                                seed: Optional[int] = None,
                                **kwargs) -> FitnessLandscape:
     """
@@ -239,7 +250,7 @@ def create_nk_multi_landscape(N: int,
         An instance of the FitnessLandscape class representing the NK
         landscape.
     """
-    sequences_np, fitness_values = generate_NK_states(N, K, alphabet_size=alphabet_size, seed=seed)
+    sequences_np, fitness_values = generate_NK_states(N, K, alphabet=alphabet, seed=seed)
     
     sequences = [MultialleleSequence(seq) for seq in sequences_np]
 
