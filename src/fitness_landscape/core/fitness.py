@@ -1,7 +1,8 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Literal, List
+from typing import Dict, Literal, List, Any
 import torch
 import numpy as np
+from scipy import stats
 
 # Fitness oeprates as a `layer` over the fitness landscape object.
 class BaseFitnessLayer(ABC):
@@ -20,6 +21,7 @@ class BaseFitnessLayer(ABC):
         
         self.name = name
         self.metadata = metadata or {}
+
 
     @property
     @abstractmethod
@@ -41,6 +43,14 @@ class BaseFitnessLayer(ABC):
                   **kwargs) -> np.ndarray:
         """
         Method to convert the fitness layer to a scalar representation.
+        """
+        pass
+
+    @abstractmethod
+    def get_value(self,
+                  sequence_index: int) -> Any:
+        """
+        Retrieves the native fitness value(s) for a single sequence.
         """
         pass
 
@@ -122,6 +132,25 @@ class NumericFitness(BaseFitnessLayer):
             using the specified aggregation function (default is mean).
         """
         return np.array([aggregate_func(r) for r in self._replicates])
+
+    def get_value(self,
+                  sequence_index: int) -> Dict[str, float]:
+        """
+        Returns the full set of values for a single sequence.
+        
+        Parameters
+        ----------
+        sequence_index : int
+            The index of the sequence for which to retrieve the
+            probability distribution.
+
+        Returns
+        -------
+        Dict[str, float]
+            A dictionary mapping each category to its probability for
+            the specified sequence.
+        """
+        return self._replicates[sequence_index]
 
 
 class CategoricalFitness(FitnessLayer):
@@ -212,6 +241,27 @@ class CategoricalFitness(FitnessLayer):
             raise ValueError("The provided rank_map does not cover all categories.")
             
         return np.array([_rank_map[v] for v in self._values], dtype=int)
+    
+    def get_value(self,
+                  sequence_index: int) -> Dict[str, float]:
+        """
+        Returns the full set of values for a single sequence.
+        
+        Parameters
+        ----------
+        sequence_index : int
+            The index of the sequence for which to retrieve the
+            probability distribution.
+
+        Returns
+        -------
+        Dict[str, float]
+            A dictionary mapping each category to its probability for
+            the specified sequence.
+        """
+        return self._values[sequence_index]
+    
+
 
 class ProbabilisticCategoricalFitness(BaseFitnessLayer):
     """
