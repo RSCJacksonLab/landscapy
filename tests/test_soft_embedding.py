@@ -99,7 +99,7 @@ def test_batch_embedding(embedder):
     """
     Tests that the high-level embedding functions work correctly for a batch.
     """
-    sequences = ["ACD", "GWYQ"]
+    sequences = ["ACD", "GWYQ", "RNSAA"]
     num_sequences = len(sequences)
     seq_len = len(sequences[0])
     embedding_dim = embedder.model.config.hidden_size

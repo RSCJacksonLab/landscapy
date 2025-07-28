@@ -28,7 +28,7 @@ class ESMEmbedder:
                  model_name: str = "facebook/esm2_t6_8M_UR50D",
                  device: Optional[str] = None,
                  alphabet: List = list('ACDEFGHIKLMNPQRSTVWY-') + ['<cls>', '<eos>', '<pad>', '-', '<mask>'],
-                 batch_size: int = 6) -> None:
+                 batch_size: int = 1) -> None:
         """
         Initialise PLM embedder class by initialising the provided
         model.
@@ -44,7 +44,7 @@ class ESMEmbedder:
         alphabet : str
             Amino acids expected for embedding.
 
-        batch_size : int, default = 6
+        batch_size : int, default = 1
         """
         
         # device management
@@ -155,6 +155,10 @@ class ESMEmbedder:
     def batch_iterator(self,
                    sequences: Union[np.ndarray, torch.Tensor, List[Union[str, np.ndarray, torch.Tensor]]],
                    batch_size: Optional[int] = None):
+        """
+        Batch iterator for sequences of strings, numpy arrays, or torch tensors.
+        Handles sorting for efficiency and yields batches of padded sequences, attention masks, original lengths, and batch indices.
+        """
 
         if not isinstance(sequences, list):
             sequences = [sequences]
@@ -251,17 +255,14 @@ class ESMEmbedder:
         Returns
         -------
         np.ndarray
-            Extracted features [seq, embedding_dim].
+            Extracted features [number_of_sequences, embedding_dimension].
         """
         sequences_as_list = sequences if isinstance(sequences, list) else [sequences]
         features = [None] * len(sequences_as_list)
 
-        iterator = self.batch_iterator(sequences, batch_size)
-        
-        _batch_size = batch_size if batch_size is not None else self.batch_size
-        total_batches = (len(sequences_as_list) + _batch_size - 1) // _batch_size
+        iterator = list(self.batch_iterator(sequences, batch_size))
 
-        for seq_batch, mask_batch, original_lengths, batch_indices in tqdm(iterator, total=total_batches, desc="Embedding"):
+        for seq_batch, mask_batch, original_lengths, batch_indices in tqdm(iterator, desc="Embedding"):
             with torch.no_grad():
                 hidden_states = self.forward_pass(seq_batch, mask_batch)
 
@@ -290,17 +291,14 @@ class ESMEmbedder:
         Returns
         -------
         np.ndarray
-            Extracted features [seq, embedding_dim].
+            Extracted features [number_of_sequences, embedding_dimension].
         """
         features = []
         features = [None] * len(sequences)
 
-        iterator = self.batch_iterator(sequences, batch_size)
-        
-        _batch_size = batch_size if batch_size is not None else self.batch_size
-        total_batches = (len(sequences) + _batch_size - 1) // _batch_size
+        iterator = list(self.batch_iterator(sequences, batch_size))
 
-        for seq_batch, mask_batch, original_lengths, batch_indices in tqdm(iterator, total=total_batches, desc="Embedding"):
+        for seq_batch, mask_batch, original_lengths, batch_indices in tqdm(iterator, desc="Embedding"):
             with torch.no_grad():
                 hidden_states = self.forward_pass(seq_batch, mask_batch)
 
@@ -347,7 +345,6 @@ class ESMEmbedder:
         embedding_path : Path
             Path to load the embeddings from
         """
-        # save embeddings
         np.save(embedding_path, embeddings)
 
     def load_embeddings(self,
