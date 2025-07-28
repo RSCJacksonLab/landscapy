@@ -3,13 +3,13 @@ import networkx as nx
 from typing import Optional, Tuple
 from ..core.landscape import FitnessLandscape
 from ..core.fitness import NumericFitness
-from ..core.sequence import BaseNumpySequence
+from ..core.sequence import BaseNumpySequence, BinarySequence, MultialleleSequence
 from itertools import product
 
 def generate_NK_states(N: int,
-                          K: int,
-                          alphabet_size: int = 2,
-                          seed: int = None) -> tuple[np.ndarray, np.ndarray]:
+                       K: int,
+                       alphabet_size: int = 2,
+                       seed: int = None) -> tuple[np.ndarray, np.ndarray]:
     """
     Generate all possible sequences and fitness values for an NK
     landscape.
@@ -71,8 +71,8 @@ def generate_NK_states(N: int,
     return sequences, fitness_values
 
 
-
-def create_nk_landscape(N: int,
+#TODO: fix GNK for generic sequence type.
+def create_gnk_landscape(N: int,
                         K: int,
                         alphabet_size: int = 2,
                         seed: Optional[int] = None,
@@ -111,11 +111,11 @@ def create_nk_landscape(N: int,
     
     # Create the fitness layer
     fitness_layers = {
-        f'fitness_nk_k={K}': NumericFitness(name=f'fitness_nk_k={K}',
-                                            values=replicates,
-                                            metadata={'N' : N,
-                                                      'K' : K,
-                                                      'alphabet_size' : alphabet_size})
+        f'nk_k={K}': NumericFitness(name=f'nk_k={K}',
+                                    values=replicates,
+                                    metadata={'N' : N,
+                                              'K' : K,
+                                              'alphabet_size' : alphabet_size})
     }
     
     return FitnessLandscape(
@@ -123,4 +123,113 @@ def create_nk_landscape(N: int,
         fitness_layers=fitness_layers,
         **kwargs
     )
+
+
+def create_nk_binary_landscape(N: int,
+                               K: int,
+                               seed: Optional[int] = None,
+                               **kwargs) -> FitnessLandscape:
+    """
+    Factory function to create a binary NK fitness landscape.
+    Sequence types are `BinarySequence`.
+
+    Parameters
+    ----------
+    N : int
+        Number of sites in each sequence.
+    K : int
+        Number of interacting neighbors for each gene (epistatic
+        interactions).
+    alphabet_size : int, default=`2`
+        Number of possible states per site (default is 2 for binary
+        sequences).
+    seed : int, optional
+        Random seed for reproducibility.
+    **kwargs : dict, optional
+        Additional keyword arguments to pass to the FitnessLandscape
+        constructor.
+
+    Returns
+    -------
+    FitnessLandscape
+        An instance of the FitnessLandscape class representing the NK
+        landscape.
+    """
+    sequences_np, fitness_values = generate_NK_states(N, K, alphabet_size=2, seed=seed)
+    
+    sequences = [BinarySequence(seq) for seq in sequences_np]
+
+    # Wrap the single fitness array into a list of lists for the NumericFitness layer
+    replicates = [[val] for val in fitness_values]
+    
+    # Create the fitness layer
+    fitness_layers = {
+        f'nk_k={K}': NumericFitness(name=f'nk_k={K}',
+                                    values=replicates,
+                                    metadata={'N' : N,
+                                              'K' : K,
+                                              'alphabet_size' : 2,
+                                              'type': 'binary'})
+    }
+    
+    return FitnessLandscape(
+        sequences=sequences,
+        fitness_layers=fitness_layers,
+        **kwargs
+    )
+
+def create_nk_multi_landscape(N: int,
+                               K: int,
+                               alphabet_size: int,
+                               seed: Optional[int] = None,
+                               **kwargs) -> FitnessLandscape:
+    """
+    Factory function to create a binary NK fitness landscape.
+    Sequence types are `BinarySequence`.
+
+    Parameters
+    ----------
+    N : int
+        Number of sites in each sequence.
+    K : int
+        Number of interacting neighbors for each gene (epistatic
+        interactions).
+    alphabet_size : int, default=`2`
+        Number of possible states per site (default is 2 for binary
+        sequences).
+    seed : int, optional
+        Random seed for reproducibility.
+    **kwargs : dict, optional
+        Additional keyword arguments to pass to the FitnessLandscape
+        constructor.
+
+    Returns
+    -------
+    FitnessLandscape
+        An instance of the FitnessLandscape class representing the NK
+        landscape.
+    """
+    sequences_np, fitness_values = generate_NK_states(N, K, alphabet_size=alphabet_size, seed=seed)
+    
+    sequences = [MultialleleSequence(seq) for seq in sequences_np]
+
+    # Wrap the single fitness array into a list of lists for the NumericFitness layer
+    replicates = [[val] for val in fitness_values]
+    
+    # Create the fitness layer
+    fitness_layers = {
+        f'nk_k={K}': NumericFitness(name=f'nk_k={K}',
+                                    values=replicates,
+                                    metadata={'N' : N,
+                                              'K' : K,
+                                              'alphabet_size' : alphabet_size,
+                                              'type' : 'multi-allele'})
+    }
+    
+    return FitnessLandscape(
+        sequences=sequences,
+        fitness_layers=fitness_layers,
+        **kwargs
+    )
+
 

@@ -25,14 +25,14 @@ def additive_landscape():
     """
     A purely additive NK landscape with K=0, N=4.
     """
-    return create_nk_landscape(N=4, K=0, alphabet_size=2, seed=42)
+    return create_nk_binary_landscape(N=4, K=0, seed=42)
 
 @pytest.fixture
 def epistatic_landscape():
     """
     An epistatic NK landscape with K=2, N=4.
     """
-    return create_nk_landscape(N=4, K=2, alphabet_size=2, seed=42)
+    return create_nk_binary_landscape(N=4, K=2, seed=42)
 
 @pytest.fixture(params=[1, 5, 10]) # Test with 3 different eigenvectors
 def elementary_landscape(request):
@@ -401,7 +401,7 @@ def test_gft_reconstruction():
     for i, node in enumerate(graph.nodes()):
 
         graph.nodes[node]['sequence'] = BaseNumpySequence([i])
-        graph.nodes[node]['fitness'] = signal[i]
+        graph.nodes[node]['fitness_default'] = signal[i]
         graph.nodes[node]['gapped_arr'] = np.zeros((1, 21))
         graph.nodes[node]['ungapped_arr'] = np.zeros((1, 20))
     

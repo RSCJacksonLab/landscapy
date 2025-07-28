@@ -193,7 +193,9 @@ class FitnessSuperscape:
                 latent_probabilities = weighted_sum_of_one_hots / total_prob_per_latent[:, np.newaxis]
                 latent_fitness_layers[name] = ProbabilisticCategoricalFitness(name, latent_probabilities, categories)
 
-        
+        for i, seq in enumerate(latent_sequences):
+            if i in self.latent_graph.nodes:
+                self.latent_graph.nodes[i]['sequence'] = seq
         
         self.latent_landscape = FitnessLandscape(
             sequences=latent_sequences,
@@ -216,12 +218,6 @@ class FitnessSuperscape:
             for node, data in G.nodes(data=True):
                 try:
                     EmbNodeModel(**data) # will raise if missing/invalid
-                except ValidationError as e:
-                    raise ValueError(f"{node!r}: {e}") from None
-                
-                # Node model missed if input is just graphs and not landscape.
-                try: 
-                    NodeModel(**data)  # will raise if missing/invalid
                 except ValidationError as e:
                     raise ValueError(f"{node!r}: {e}") from None
     

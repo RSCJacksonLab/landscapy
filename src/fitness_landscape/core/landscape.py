@@ -4,6 +4,7 @@ from typing import List, Union, Dict, Any, Iterable, Literal,  Protocol, runtime
 from dataclasses import dataclass
 from .sequence import BaseNumpySequence, make_sequence
 from .graph import create_hamming_graph
+from .fitness import NumericFitness, CategoricalFitness
 from abc import ABC, abstractmethod
 from .graph import create_knn_graph, create_hamming_graph
 from ..embedding.soft_embedding import ESMEmbedder
@@ -11,7 +12,7 @@ from .fitness import BaseFitnessLayer
 import inspect
 from collections import defaultdict
 
-#TODO: Make fitness values optional.
+
 class FitnessLandscape:
     """
     FitnessLandscape is a class that represents a fitness landscape
@@ -45,10 +46,12 @@ class FitnessLandscape:
         if self.graph is not None:
             # Pre-computed graph was provided.
             self.graph_type = 'precomputed'
+            
+            self._annotate_graph_nodes()
             # Validate that the provided sequences and layers are consistent with the graph.
             self._validate_data_against_graph(sequences,
                                               self.fitness_layers)
-            self._annotate_graph_nodes()
+            
         else:
             # No graph was provided and must build one.
             if not self.graph_type:
@@ -196,7 +199,7 @@ class FitnessLandscape:
                 fitness_layers[name] = CategoricalFitness(name=name, values=values, categories=all_categories)
         
         # Call the main constructor with the prepared data
-        return cls(sequences, fitness_layers, graph_type=None, **kwargs)
+        return cls(sequences, fitness_layers, graph=graph, graph_type=None, **kwargs)
     
     #TODO: Add to_graph_tensor() method.
     

@@ -1,5 +1,7 @@
 from .nk import (
-    create_nk_landscape
+    create_gnk_landscape,
+    create_nk_binary_landscape,
+    create_nk_multi_landscape
 )
 
 from .rmf import (
@@ -11,7 +13,9 @@ from .elementary_landscape import (
 )
 
 __all__ = [
-    'create_nk_landscape',
+    'create_gnk_landscape',
+    'create_nk_multi_landscape',
+    'create_nk_binary_landscape',
     'create_rmf_landscape',
     'create_elementary_landscape',
 ]

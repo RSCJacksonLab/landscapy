@@ -55,8 +55,8 @@ def create_elementary_landscape(j: int,
     replicates = [[val] for val in fitness_values]
     
     fitness_layers = {
-        f'fitness_elementary_eign_index={j}': NumericFitness(
-            name=f'fitness_elementary_eign_index={j}',
+        f'elementary_eign_index={j}': NumericFitness(
+            name=f'elementary_eign_index={j}',
             values=replicates,
             metadata={'eigenvector_index': j,
                       'N' : kwargs.get('N', 5),

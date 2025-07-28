@@ -58,13 +58,13 @@ def create_rmf_landscape(N: int,
     replicates = [[val] for val in fitness_values]
     
     fitness_layers = {
-        f'fitness_rmf_sigma={sigma}_slope={slope}': NumericFitness(name=f'fitness_rmf_sigma={sigma}_slope={slope}',
-                                                                   values=replicates,
-                                                                   metadata={
-                                                                       'slope' : slope,
-                                                                       'sigma' : sigma,
-                                                                       'optimum_seq' : optimum_seq
-                                                                   })
+        f'rmf_sigma={sigma}_slope={slope}': NumericFitness(name=f'rmf_sigma={sigma}_slope={slope}',
+                                                           values=replicates,
+                                                           metadata={
+                                                               'slope' : slope,
+                                                               'sigma' : sigma,
+                                                               'optimum_seq' : optimum_seq
+                                                               })
     }
 
     return FitnessLandscape(

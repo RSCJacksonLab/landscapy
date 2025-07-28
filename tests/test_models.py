@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import networkx as nx
 
-from fitness_landscape.models.nk import create_nk_landscape
+from fitness_landscape.models.nk import create_gnk_landscape, create_nk_binary_landscape
 from fitness_landscape.models.rmf import create_rmf_landscape
 from fitness_landscape.models.elementary_landscape import create_elementary_landscape
 from fitness_landscape.core.sequence import generate_sequences, BaseNumpySequence
@@ -43,14 +43,14 @@ def test_nk_landscape_initialization_and_seeding():
     """
     Tests the basic initialization and reproducibility of the NK model.
     """
-    landscape1 = create_nk_landscape(N=5, K=1, seed=123, alphabet_size=2)
+    landscape1 = create_gnk_landscape(N=5, K=1, seed=123, alphabet_size=2)
     assert len(landscape1.sequences) == 2**5
     assert len(landscape1.get_signal()) == 2**5
 
-    landscape2 = create_nk_landscape(N=5, K=1, seed=123, alphabet_size=2)
+    landscape2 = create_gnk_landscape(N=5, K=1, seed=123, alphabet_size=2)
     assert np.array_equal(landscape1.get_signal(), landscape2.get_signal())
 
-    landscape3 = create_nk_landscape(N=5, K=1, seed=456, alphabet_size=2)
+    landscape3 = create_gnk_landscape(N=5, K=1, seed=456, alphabet_size=2)
     assert not np.array_equal(landscape1.get_signal(), landscape3.get_signal())
 
 def test_nk_landscape_is_additive_for_k0():
@@ -58,7 +58,7 @@ def test_nk_landscape_is_additive_for_k0():
     Tests the additive property of an NK landscape with K=0.
     """
     N = 4
-    landscape = create_nk_landscape(N=N, K=0, seed=42, alphabet_size=2)
+    landscape = create_gnk_landscape(N=N, K=0, seed=42, alphabet_size=2)
     
     ref_seq = BaseNumpySequence([0] * N)
     ref_fitness = landscape.get_fitness(ref_seq)
