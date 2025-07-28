@@ -38,7 +38,7 @@ class FitnessSuperscape:
 
     def __init__(self,
                  
-                 landscapes: List[Union[FitnessLandscape, _GraphLike]],
+                 landscapes: List[Union[FitnessLandscape, nx.Graph]],
                  posterior_prob_cutoff: float = 0.1,
                  **sampler_kwargs) -> None:
         
@@ -276,7 +276,6 @@ class FitnessSuperscape:
                 
     @staticmethod
     def _extract_graphs(landscapes: Iterable[Union[FitnessLandscape,
-                                                   _GraphLike,
                                                    nx.Graph]]) -> list[nx.Graph]:
         """
         Helper method to extract directed graphs from directed fitness
@@ -285,7 +284,7 @@ class FitnessSuperscape:
         Parameters
         ----------
         landscapes : Iterable
-            The list of DirectedFitnessLandscapes, _GraphLike or
+            The list of DirectedFitnessLandscapes, or
             nx.Graph objects.
 
         Returns
@@ -300,8 +299,6 @@ class FitnessSuperscape:
                 G = obj.graph
             elif isinstance(obj, nx.Graph):
                 G = nx.Graph(obj)  # copy/upgrade
-            elif isinstance(obj, _GraphLike):
-                G = nx.Graph(obj) # last resort
             else:
                 raise TypeError(f"Unsupported landscape/graph type: {type(obj)}")
             if not isinstance(G, nx.Graph):

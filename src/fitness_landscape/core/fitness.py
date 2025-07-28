@@ -153,7 +153,7 @@ class NumericFitness(BaseFitnessLayer):
         return self._replicates[sequence_index]
 
 
-class CategoricalFitness(FitnessLayer):
+class CategoricalFitness(BaseFitnessLayer):
     """
     Fitness layer that represents categorical fitness values.
 

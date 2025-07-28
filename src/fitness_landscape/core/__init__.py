@@ -10,6 +10,12 @@ from .landscape import (
     FitnessLandscape,
 )
 
+from .fitness import (
+    NumericFitness,
+    CategoricalFitness,
+    ProbabilisticCategoricalFitness
+)
+
 
 from .graph import (
     create_hamming_graph,
@@ -28,4 +34,7 @@ __all__ = [
     'ASRLandscapeConstructor',
     'create_hamming_graph',
     'create_knn_graph',
+    'NumericFitness',
+    'CategoricalFitness',
+    'ProbabilisticCategoricalFitness'
 ]

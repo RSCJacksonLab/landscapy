@@ -25,14 +25,14 @@ def additive_landscape():
     """
     A purely additive NK landscape with K=0, N=4.
     """
-    return NKFitnessLandscape(N=4, K=0, alphabet_size=2, seed=42)
+    return create_nk_landscape(N=4, K=0, alphabet_size=2, seed=42)
 
 @pytest.fixture
 def epistatic_landscape():
     """
     An epistatic NK landscape with K=2, N=4.
     """
-    return NKFitnessLandscape(N=4, K=2, alphabet_size=2, seed=42)
+    return create_nk_landscape(N=4, K=2, alphabet_size=2, seed=42)
 
 @pytest.fixture(params=[1, 5, 10]) # Test with 3 different eigenvectors
 def elementary_landscape(request):
@@ -42,9 +42,8 @@ def elementary_landscape(request):
     """
     j = request.param
     sequences = generate_sequences(length=5, alphabet=[0, 1]) # N=5 -> 32 nodes.
-    k = 4 
-    landscape = ElementaryFitnessLandscape(
-        sequences=sequences, j=j, k=k, seed=42, emb_nodes=False
+    landscape = create_elementary_landscape(
+        sequences=sequences, j=j, graph_type='hamming', seed=42
     )
     return landscape, j
 
@@ -62,14 +61,14 @@ def random_rmf_landscape():
     """
     An uncorrelated RMF landscape (pure noise).
     """
-    return RMFFitnessLandscape(N=8, slope=0.0, sigma=10.0, seed=42)
+    return create_rmf_landscape(N=8, slope=0.0, sigma=10.0, seed=42)
 
 @pytest.fixture
 def linear_rmf_landscape():
     """
     An RMF landscape with no noise and a perfect linear relationship.
     """
-    return RMFFitnessLandscape(N=8, slope=1.0, sigma=0.0, seed=42)
+    return create_rmf_landscape(N=8, slope=1.0, sigma=0.0, seed=42)
 
 
 # Adaptive walk tests

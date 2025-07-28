@@ -1,17 +1,17 @@
 from .nk import (
-    NKFitnessLandscape
+    create_nk_landscape
 )
 
 from .rmf import (
-    RMFFitnessLandscape
+    create_rmf_landscape
 )
 
 from .elementary_landscape import (
-    ElementaryFitnessLandscape
+    create_elementary_landscape
 )
 
 __all__ = [
-    'NKFitnessLandscape',
-    'RMFFitnessLandscape',
-    'ElementaryFitnessLandscape',
+    'create_nk_landscape',
+    'create_rmf_landscape',
+    'create_elementary_landscape',
 ]

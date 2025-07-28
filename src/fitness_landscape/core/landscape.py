@@ -177,9 +177,6 @@ class FitnessLandscape:
                 all_categories = sorted(list(set(values)))
                 fitness_layers[name] = CategoricalFitness(name=name, values=values, categories=all_categories)
         
-        if not fitness_layers:
-            raise ValueError("No fitness data found in graph. Node attributes must be prefixed with 'fitness_'.")
-
         # Call the main constructor with the prepared data
         return cls(sequences, fitness_layers, graph_type=None, **kwargs)
     
