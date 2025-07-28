@@ -271,6 +271,42 @@ class ESMEmbedder:
         
         return np.array(features)
     
+    def lm_output_probabilities(self,
+                        sequences: Union[np.ndarray, torch.Tensor, List[Union[str, np.ndarray, torch.Tensor]]],
+                        batch_size: Optional[int] = None) -> List[np.ndarray]:
+        """
+        Embeds sequences of strings, numpy arrays, or torch tensors.
+        Handles sorting for efficiency and reorders the output to match the input order.
+
+        Parameters
+        ----------
+        sequences : Union[np.ndarray, torch.Tensor, List[Union[str, np.ndarray, torch.Tensor]]]
+            A single sequence or a list of sequences to embed.
+
+        batch_size : int, optional
+            The batch size for processing. Defaults to the one set in the constructor.
+
+        Returns
+        -------
+        List[np.ndarray]
+            Extracted probabilities list of arrays, each of shape [sequence_length, alphabet_size].
+        """
+        sequences_as_list = sequences if isinstance(sequences, list) else [sequences]
+        output_probabilities = [None] * len(sequences_as_list)
+
+        iterator = list(self.batch_iterator(sequences, batch_size))
+
+        for seq_batch, mask_batch, original_lengths, batch_indices in tqdm(iterator, desc="Embedding"):
+            with torch.no_grad():
+                probabilities = self.forward_pass(seq_batch, mask_batch, return_probabilities=True)
+
+            for j, original_idx in enumerate(batch_indices):
+                length = original_lengths[j]
+                probability = probabilities[j, 1:length + 1].cpu().numpy()
+                output_probabilities[original_idx] = probability.astype(np.float32)
+        
+        return output_probabilities
+    
     def embed_sequences(self,
                         sequences: List[str],
                         batch_size: Optional[int] = None) -> np.ndarray:
