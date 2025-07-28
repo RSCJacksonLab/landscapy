@@ -297,6 +297,77 @@ class FitnessLandscape:
             pooled_array = np.mean(embedding_array, axis=0)
             self.graph.nodes[node_identifier][self._emb_arr_key] = pooled_array
 
+    def attach(self,
+               layer: BaseFitnessLayer) -> None:
+        """
+        Attaches a new fitness layer to the landscape. Fitness value
+        indices must match the sequence indices.
+        
+        Parameters
+        ----------
+        layer : BaseFitnessLayer
+            The initialised fitness layer to attach.    
+            
+        """
+        # Validate the incoming layer
+        if len(layer.to_scalar()) != len(self.sequences):
+            raise ValueError(
+                f"Cannot attach layer '{layer.name}': its length ({len(layer.to_scalar())}) "
+                f"does not match the number of sequences in the landscape ({len(self.sequences)})."
+            )
+        
+        layer_name = layer.name
+        if layer_name in self.fitness_layers:
+            raise ValueError(f"A layer with the name '{layer_name}' already exists.")
+
+        # Add the layer to the dictionary
+        self.fitness_layers[layer_name] = layer
+        
+        # If a graph exists, annotate its nodes
+        if self.graph:
+            seq_to_node_map = {tuple(data['sequence'].to_array()): node_idx
+                               for node_idx, data in self.graph.nodes(data=True)}
+            
+            for i, seq in enumerate(self.sequences):
+                node_idx = seq_to_node_map.get(tuple(seq.to_array()))
+                if node_idx is not None:
+                    attribute_name = f"fitness_{layer_name}"
+                    self.graph.nodes[node_idx][attribute_name] = layer.get_value(i)
+
+        # If this is the first layer being added, set it as the active view
+        if self._active_view_name is None:
+            self._active_view_name = layer_name
+
+    def detach(self,
+               layer_name: str):
+        """
+        Detaches a fitness layer from the landscape.
+
+        layer_name : str
+            The layer key to remove.
+        """
+        if layer_name not in self.fitness_layers:
+            raise KeyError(f"Layer '{layer_name}' not found in the landscape.")
+
+        # Remove the layer from the dictionary
+        del self.fitness_layers[layer_name]
+
+        # If a graph exists, remove the corresponding node attributes
+        if self.graph:
+            attribute_name = f"fitness_{layer_name}"
+            for node_idx in self.graph.nodes():
+                if attribute_name in self.graph.nodes[node_idx]:
+                    del self.graph.nodes[node_idx][attribute_name]
+
+        # If the detached layer was the active one, update the active view
+        if self._active_view_name == layer_name:
+            if self.fitness_layers:
+                # Set the new active layer to the first available one
+                self._active_view_name = next(iter(self.fitness_layers.keys()))
+            else:
+                # No layers left
+                self._active_view_name = None
+
     
     # Legacy methods for compatibility with old code.
     def get_fitness(self, sequence: BaseNumpySequence) -> float:
