@@ -1,6 +1,6 @@
 import numpy as np
 import networkx as nx
-from typing import Optional, Tuple
+from typing import Optional, List
 from ..core.landscape import FitnessLandscape
 from ..core.fitness import NumericFitness
 from ..core.sequence import BaseNumpySequence, BinarySequence, MultialleleSequence
@@ -8,114 +8,156 @@ from itertools import product
 
 def generate_NK_states(N: int,
                        K: int,
-                       alphabet_size: int = 2,
-                       seed: int = None) -> tuple[np.ndarray, np.ndarray]:
+                       alphabet: List = [0,1],
+                       seed: int = None,
+                       adj_mat: Optional[np.ndarray] = None,
+                       base_sequence: Optional[List] = None,
+                       variable_sites: Optional[List[int]] = None) -> tuple[np.ndarray, np.ndarray]:
     """
-    Generate all possible sequences and fitness values for an NK
-    landscape.
+    Generate sequences and fitness values for a generalized NK landscape.
 
     Parameters
     ----------
     N : int
         Number of sites in each sequence.
     K : int
-        Number of interacting neighbors for each gene (epistatic
-        interactions).
-    alphabet_size : int, default=`2`
-        Number of possible states per site (default is 2 for binary
-        sequences).
+        Number of interacting neighbors for each site.
+    alphabet : list
+        The alphabet of characters or symbols to use for the sequences.
     seed : int, optional
         Random seed for reproducibility.
+    adj_mat : np.ndarray, optional
+        Adjacency matrix defining epistatic interactions. If None, a
+        circular neighborhood is used.
+    base_sequence : list, optional
+        A template sequence. If provided, only the sites specified in
+        `variable_sites` will be varied.
+    variable_sites : list of int, optional
+        Indices of the sites to be varied in the `base_sequence`.
 
     Returns
     -------
     sequences : np.ndarray
-        Array of sequences (each sequence is an array of integers).
+        Array of generated sequences.
     fitness_values : np.ndarray
-        Array of fitness values corresponding to each sequence.
-
+        Array of corresponding fitness values.
     """
     if seed is not None:
         np.random.seed(seed)
 
-    # Generate all possible sequences
-    alleles = range(alphabet_size)
-    sequences = np.array(list(product(alleles, repeat=N)))
+    alphabet_size = len(alphabet)
+    allele_map = {allele: i for i, allele in enumerate(alphabet)}
+
+    if base_sequence is not None and variable_sites is not None: 
+        
+        if len(base_sequence) != N:
+            raise ValueError("Length of base_sequence must be equal to N.")
+        if any(i >= N for i in variable_sites):
+            raise IndexError("All indices in variable_sites must be less than N.")
+        # Check that all non-variable sites in the base sequence are in the alphabet
+        fixed_sites = [idx for idx in range(N) if idx not in variable_sites]
+        for idx in fixed_sites:
+            if base_sequence[idx] not in alphabet:
+                raise ValueError(
+                    f"Character '{base_sequence[idx]}' at position {idx} of base_sequence "
+                    f"is not in the provided alphabet."
+                )
+
+        num_variable_sites = len(variable_sites)
+        variant_combinations = list(product(alphabet, repeat=num_variable_sites))
+        
+        sequences = []
+        for combo in variant_combinations:
+            new_sequence = list(base_sequence)
+            for i, site_idx in enumerate(variable_sites):
+                new_sequence[site_idx] = combo[i]
+            sequences.append(new_sequence)
+        sequences = np.array(sequences)
+    else:
+        sequences = np.array(list(product(alphabet, repeat=N)))
+
     num_sequences = len(sequences)
     fitness_values = np.zeros(num_sequences)
 
-    # Create fitness contribution tables
     fitness_contrib = []
     for _ in range(N):
         table_size = alphabet_size ** (K + 1)
         fitness_contrib.append(np.random.rand(table_size))
 
-    # Calculate fitness for each sequence
     for i, seq in enumerate(sequences):
         total_fit = 0.0
         for j in range(N):
+            if adj_mat is not None:
+                neighbors = np.where(adj_mat[j] == 1)[0]
+                if len(neighbors) > K:
+                    neighbors = np.random.choice(neighbors, K, replace=False)
+                indices = np.sort(np.append(neighbors, j))
+            else:
+                indices = [(j + offset) % N for offset in range(K + 1)]
             
-            # Define a circular neighborhood
-            indices = [(j + offset) % N for offset in range(K + 1)]
             config = seq[indices]
-
-            # Calculate index for the fitness contribution table
+            
             index = 0
             for allele_idx, allele in enumerate(config):
-                index += allele * (alphabet_size ** (K - allele_idx))
-
+                numeric_allele = allele_map[allele]
+                index += numeric_allele * (alphabet_size ** (len(config) - 1 - allele_idx))
+            
             total_fit += fitness_contrib[j][index]
 
         fitness_values[i] = total_fit / N
 
     return sequences, fitness_values
 
-
-#TODO: fix GNK for generic sequence type.
 def create_gnk_landscape(N: int,
-                        K: int,
-                        alphabet_size: int = 2,
-                        seed: Optional[int] = None,
-                        **kwargs) -> FitnessLandscape:
+                         K: int,
+                         alphabet: List = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y'],
+                         seed: Optional[int] = None,
+                         adj_mat: Optional[np.ndarray] = None,
+                         base_sequence: Optional[List] = None,
+                         variable_sites: Optional[List[int]] = None,
+                         **kwargs) -> FitnessLandscape:
     """
-    Factory function to create an NK fitness landscape.
+    Factory function to create a generalized NK fitness landscape.
 
     Parameters
     ----------
     N : int
         Number of sites in each sequence.
     K : int
-        Number of interacting neighbors for each gene (epistatic
-        interactions).
-    alphabet_size : int, default=`2`
-        Number of possible states per site (default is 2 for binary
-        sequences).
+        Number of interacting neighbors for each site.
+    alphabet : list
+        The alphabet of characters or symbols to use for the sequences.
     seed : int, optional
         Random seed for reproducibility.
+    adj_mat : np.ndarray, optional
+        Adjacency matrix defining epistatic interactions.
+    base_sequence : list, optional
+        A template sequence.
+    variable_sites : list of int, optional
+        Indices of the sites to be varied.
     **kwargs : dict, optional
-        Additional keyword arguments to pass to the FitnessLandscape
-        constructor.
+        Additional keyword arguments for the FitnessLandscape constructor.
 
     Returns
     -------
     FitnessLandscape
-        An instance of the FitnessLandscape class representing the NK
-        landscape.
+        An instance of the FitnessLandscape class.
     """
-    sequences_np, fitness_values = generate_NK_states(N, K, alphabet_size=alphabet_size, seed=seed)
-    
-    sequences = [BaseNumpySequence(seq) for seq in sequences_np]
+    alphabet_size = len(alphabet)
+    sequences_np, fitness_values = generate_NK_states(
+        N, K, alphabet, seed, adj_mat, base_sequence, variable_sites
+    )
 
-    # Wrap the single fitness array into a list of lists for the NumericFitness layer
+    sequences = [BaseNumpySequence(seq, alphabet=alphabet) for seq in sequences_np]
+
     replicates = [[val] for val in fitness_values]
     
-    # Create the fitness layer
     fitness_layers = {
-        f'nk_k={K}': NumericFitness(name=f'nk_k={K}',
-                                    values=replicates,
-                                    metadata={'N' : N,
-                                              'K' : K,
-                                              'alphabet_size' : alphabet_size})
+        f'nk_k={K}': NumericFitness(
+            name=f'nk_k={K}',
+            values=replicates,
+            metadata={'N': N, 'K': K, 'alphabet_size': alphabet_size}
+        )
     }
     
     return FitnessLandscape(
@@ -123,7 +165,6 @@ def create_gnk_landscape(N: int,
         fitness_layers=fitness_layers,
         **kwargs
     )
-
 
 def create_nk_binary_landscape(N: int,
                                K: int,
@@ -155,7 +196,7 @@ def create_nk_binary_landscape(N: int,
         An instance of the FitnessLandscape class representing the NK
         landscape.
     """
-    sequences_np, fitness_values = generate_NK_states(N, K, alphabet_size=2, seed=seed)
+    sequences_np, fitness_values = generate_NK_states(N, K, alphabet=[0,1], seed=seed)
     
     sequences = [BinarySequence(seq) for seq in sequences_np]
 
@@ -180,7 +221,7 @@ def create_nk_binary_landscape(N: int,
 
 def create_nk_multi_landscape(N: int,
                                K: int,
-                               alphabet_size: int,
+                               alphabet: List,
                                seed: Optional[int] = None,
                                **kwargs) -> FitnessLandscape:
     """
@@ -209,7 +250,7 @@ def create_nk_multi_landscape(N: int,
         An instance of the FitnessLandscape class representing the NK
         landscape.
     """
-    sequences_np, fitness_values = generate_NK_states(N, K, alphabet_size=alphabet_size, seed=seed)
+    sequences_np, fitness_values = generate_NK_states(N, K, alphabet=alphabet, seed=seed)
     
     sequences = [MultialleleSequence(seq) for seq in sequences_np]
 
