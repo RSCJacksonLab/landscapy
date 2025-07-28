@@ -194,7 +194,7 @@ class FitnessSuperscape:
                 latent_fitness_layers[name] = ProbabilisticCategoricalFitness(name, latent_probabilities, categories)
 
         
-        # TODO: Add validator to FitnessLandscape for data and type consistency.
+        
         self.latent_landscape = FitnessLandscape(
             sequences=latent_sequences,
             fitness_layers=latent_fitness_layers,

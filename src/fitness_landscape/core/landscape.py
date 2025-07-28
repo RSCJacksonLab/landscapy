@@ -11,6 +11,7 @@ from .fitness import BaseFitnessLayer
 import inspect
 from collections import defaultdict
 
+#TODO: Make fitness values optional.
 class FitnessLandscape:
     """
     FitnessLandscape is a class that represents a fitness landscape
@@ -35,8 +36,16 @@ class FitnessLandscape:
         
         self.sequences = sequences
         self.fitness_layers = fitness_layers
-        self.graph_type = graph_type if graph is None else 'precomputed'
-        self.graph = graph
+        
+        if graph is not None: 
+            graph_type = 'precomputed'
+            self.graph = graph
+            
+            # Validate the graph against the provided sequences and fitness layers.
+            self._validate_data_against_graph(sequences=sequences,
+                                              fitness_layers=fitness_layers,)
+        
+        self.graph_type = graph_type 
         self._res_emb_arr_key = res_emb_arr_key
         self._emb_arr_key = emb_arr_key
 
@@ -175,7 +184,81 @@ class FitnessLandscape:
         return cls(sequences, fitness_layers, graph_type=None, **kwargs)
     
     #TODO: Add to_graph_tensor() method.
+    
+    def _validate_data_against_graph(self,
+                                     sequences: List[BaseNumpySequence],
+                                     fitness_layers: Dict[str, BaseFitnessLayer]):
+        """
+        Method to validate the provided sequences and fitness layers
+        against the current graph structure. This ensures that the
+        sequences match the nodes in the graph and that the fitness
+        layers are consistent with the node attributes.
 
+        Parameters
+        ----------
+        sequences : List[BaseNumpySequence]
+            List of sequences to validate against the graph.
+        fitness_layers : Dict[str, BaseFitnessLayer]
+            Dictionary of fitness layers to validate against the
+            graph.
+
+        Raises
+        ------
+        ValueError
+            If there is a mismatch between the sequences and the graph
+            nodes, or if the fitness layers do not match the attributes
+            of the graph nodes.
+        
+        """
+        if len(sequences) != self.graph.number_of_nodes():
+            raise ValueError(
+                f"Data inconsistency: The number of provided sequences ({len(sequences)}) "
+                f"does not match the number of nodes in the graph ({self.graph.number_of_nodes()})."
+            )
+
+        graph_sequences = {
+            node: tuple(data['sequence'].to_array())
+            for node, data in self.graph.nodes(data=True)
+        }
+        provided_sequences = {i: tuple(s.to_array()) for i, s in enumerate(sequences)}
+
+        if len(graph_sequences) != len(provided_sequences) or \
+           set(graph_sequences.values()) != set(provided_sequences.values()):
+            raise ValueError(
+                "Data inconsistency: The set of provided sequences does not match "
+                "the set of sequences stored in the graph nodes."
+            )
+
+        seq_to_node_map = {data['sequence']: node 
+                           for node, data in self.graph.nodes(data=True)}
+
+        for i, seq in enumerate(sequences):
+            node_idx = seq_to_node_map.get(seq)
+            if node_idx is None:
+
+                continue
+
+            graph_node_data = self.graph.nodes[node_idx]
+
+            for layer_name, layer in fitness_layers.items():
+                attribute_name = f"fitness_{layer_name}"
+                
+                if attribute_name not in graph_node_data:
+                    raise ValueError(
+                        f"Data inconsistency: Fitness layer '{layer_name}' exists in the "
+                        f"provided dictionary but no corresponding '{attribute_name}' "
+                        f"attribute was found on node {node_idx} in the graph."
+                    )
+                
+                layer_value = layer.get_value(i)
+                graph_value = graph_node_data[attribute_name]
+                
+                if layer_value != graph_value:
+                    raise ValueError(
+                        f"Data inconsistency for layer '{layer_name}' at sequence index {i} "
+                        f"(node {node_idx}): The provided layer value ({layer_value}) does not "
+                        f"match the graph attribute value ({graph_value})."
+                    )
 
     def compute_node_embeddings(self,
                                 model_name: str = 'facebook/esm2_t6_8M_UR50D',

@@ -2,9 +2,10 @@ import numpy as np
 import networkx as nx
 from typing import Optional, Tuple
 from ..core.landscape import FitnessLandscape
+from ..core.fitness import NumericFitness
 from itertools import product
 
-def generate_NK_landscape(N: int,
+def generate_NK_states(N: int,
                           K: int,
                           alphabet_size: int = 2,
                           seed: int = None) -> tuple[np.ndarray, np.ndarray]:
@@ -68,43 +69,55 @@ def generate_NK_landscape(N: int,
 
     return sequences, fitness_values
 
-class NKFitnessLandscape(FitnessLandscape):
-    """
-    NK Landscape FitnessLanscape subclass.
 
-    Attributes
+
+def create_nk_landscape(N: int,
+                        K: int,
+                        alphabet_size: int = 2,
+                        seed: Optional[int] = None,
+                        **kwargs) -> FitnessLandscape:
+    """
+    Factory function to create an NK fitness landscape.
+
+    Parameters
     ----------
     N : int
-        Number of genes in each sequence.
+        Number of sites in each sequence.
     K : int
-        Number of interactions per gene.
-    alleles : int, optional
-        Number of states per gene (default is 2 for binary sequences).
+        Number of interacting neighbors for each gene (epistatic
+        interactions).
+    alphabet_size : int, default=`2`
+        Number of possible states per site (default is 2 for binary
+        sequences).
     seed : int, optional
         Random seed for reproducibility.
-    graph_type : str, default=`Hamming`
-        Graph type for creating the network representation ('hamming'
-        or 'knn').
+    **kwargs : dict, optional
+        Additional keyword arguments to pass to the FitnessLandscape
+        constructor.
+
+    Returns
+    -------
+    FitnessLandscape
+        An instance of the FitnessLandscape class representing the NK
+        landscape.
     """
+    sequences, fitness_values = generate_NK_states(N, K, alphabet_size=alphabet_size, seed=seed)
+    
+    # Wrap the single fitness array into a list of lists for the NumericFitness layer
+    replicates = [[val] for val in fitness_values]
+    
+    # Create the fitness layer
+    fitness_layers = {
+        f'fitness_nk_k={N}': NumericFitness(name=f'fitness_nk_k={N}',
+                                            values=replicates,
+                                            metadata={'N' : N,
+                                                      'K' : K,
+                                                      'alphabet_size' : alphabet_size})
+    }
+    
+    return FitnessLandscape(
+        sequences=sequences,
+        fitness_layers=fitness_layers,
+        **kwargs
+    )
 
-    def __init__(self, N: int,
-                 K: int,
-                 alphabet_size: int,
-                 seed: Optional[int] = None,
-                 graph_type: str = 'hamming',
-                 **kwargs):
-
-        sequences, fitness_values = generate_NK_landscape(N,
-                                                          K,
-                                                          alphabet_size=alphabet_size,
-                                                          seed=seed)
-        self.K = K
-        self.N = N
-        self.alphabet_size = alphabet_size
-        self.seed = seed
-
-        super().__init__(sequences=sequences,
-                         fitness_values=fitness_values,
-                         graph_type=graph_type,
-                         **kwargs)
-        

@@ -324,6 +324,7 @@ class BaseFitnessWrapper(BaseFitnessLayer):
                  **kwargs):
         super().__init__(name=kwargs.get('name', layer.name),
                          metadata=kwargs.get('metadata',layer.metadata))
+        # TODO: Add callable transofmrmations to the wrapper.
         self._wrapped_layer = layer
 
     @property
