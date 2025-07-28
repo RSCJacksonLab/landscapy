@@ -41,17 +41,14 @@ class ESMEmbedder:
         device : str, default = None
             Device to use, if None will autoselect.
 
-        alphabet : str
-            Amino acids expected for embedding.
+        alphabet : List
+            Tokens expected for embedding.
 
         batch_size : int, default = 1
         """
         
         # device management
-        if device is None:
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        else:
-            self.device = device
+        self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
         
         # load model
         self.alphabet = alphabet
@@ -120,7 +117,7 @@ class ESMEmbedder:
         Parameters
         ----------
         relaxed_seqs : torch.Tensor
-            Array of shape [L * alphabet_size] or [B * L * alphabet_size] 
+            Array of shape [L, alphabet_size] or [B, L, alphabet_size] 
             containing distribution of AAs at each position.
 
         Returns
@@ -274,60 +271,19 @@ class ESMEmbedder:
         
         return np.array(features)
     
-    def extract_features(self,
-                         sequences: List[str],
-                         batch_size: int = 32) -> np.ndarray:
-        """"
-        Extract features from protein sequences.
-
-        Parameters
-        ----------
-        sequences : List[str]
-            List of protein sequences.
-
-        batch_size : int
-            Batch size for processing.
-
-        Returns
-        -------
-        np.ndarray
-            Extracted features [number_of_sequences, embedding_dimension].
-        """
-        features = []
-        features = [None] * len(sequences)
-
-        iterator = list(self.batch_iterator(sequences, batch_size))
-
-        for seq_batch, mask_batch, original_lengths, batch_indices in tqdm(iterator, desc="Embedding"):
-            with torch.no_grad():
-                hidden_states = self.forward_pass(seq_batch, mask_batch)
-
-            for j, original_idx in enumerate(batch_indices):
-                length = original_lengths[j]
-                embedding = hidden_states[j, 1:length + 1].cpu().numpy()
-                embedding = embedding.mean(axis=0)
-                features[original_idx] = embedding.astype(np.float32)
-
-        return np.array(features)
-        
     def embed_sequences(self,
+                        sequences: List[str],
+                        batch_size: Optional[int] = None) -> np.ndarray:
+            """
+            Alias for embed_relaxed_seqs for embedding string sequences.
+            """
+            return self.embed_relaxed_seqs(sequences, batch_size)
+        
+    def extract_features(self,
                        sequences: List[str],
                        batch_size: int = 32) -> np.ndarray:
         """
-        Alias for extract_features for consistency with embed_relaxed_seqs.
-        
-        Parameters
-        ----------
-        sequences : List[str]
-            List of protein sequences.
-            
-        batch_size : int
-            Batch size for processing.
-            
-        Returns
-        -------
-        np.ndarray
-            Extracted features.
+        Alias for embed_relaxed_seqs for consistency.
         """
         return self.extract_features(sequences, batch_size)
 
@@ -338,7 +294,7 @@ class ESMEmbedder:
         Save embeddings.
         
         Parameters:
-        -----------
+        ----------
         embeddings : np.ndarray
             Embeddings to save.
             
