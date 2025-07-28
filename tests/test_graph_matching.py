@@ -6,6 +6,7 @@ from unittest.mock import patch
 from fitness_landscape.core.landscape import FitnessLandscape
 from fitness_landscape.core.sequence import BaseNumpySequence
 from fitness_landscape.core.superscape import FitnessSuperscape
+from fitness_landscape.core.fitness import NumericFitness
 
 from fitness_landscape.graph_matching.latent_alignment import (
     BernoulliBeta,
@@ -186,6 +187,11 @@ def simple_landscape_factory():
         seq2 = seq1.mutate(positions=[1])
         sequences = [seq1, seq2]
         fitnesses = [0.5, 0.8]
+
+        fitness_layers = {
+            'default': NumericFitness(name='default', values=[[f] for f in fitnesses])
+        }
+        landscape = FitnessLandscape(sequences=sequences, fitness_layers=fitness_layers, graph_type='hamming')
         
         landscape = FitnessLandscape(sequences=sequences, fitness_values=fitnesses, graph_type='hamming')
         

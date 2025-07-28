@@ -24,47 +24,65 @@ class FitnessLandscape:
     """
     def __init__(self,
                  sequences: List[BaseNumpySequence],
-                 fitness_layers: Dict[str, BaseFitnessLayer],
+                 fitness_layers: Dict[str, BaseFitnessLayer] = None,
                  *,
                  graph_type: Literal['hamming', 'knn'] = 'hamming',
                  graph: nx.Graph = None,
                  emb_nodes: bool = False,
                  res_emb_arr_key: str = 'residue_emb_arr',
                  emb_arr_key: str = 'emb_arr',
-
                  **kwargs) -> None:
         
+        # Initialize Core Attributes
         self.sequences = sequences
-        self.fitness_layers = fitness_layers
-        
-        if graph is not None: 
-            graph_type = 'precomputed'
-            self.graph = graph
-            
-            # Validate the graph against the provided sequences and fitness layers.
-            self._validate_data_against_graph(sequences=sequences,
-                                              fitness_layers=fitness_layers,)
-        
-        self.graph_type = graph_type 
+        self.fitness_layers = fitness_layers if fitness_layers is not None else {}
+        self.graph = graph
+        self.graph_type = graph_type
         self._res_emb_arr_key = res_emb_arr_key
         self._emb_arr_key = emb_arr_key
 
-        # Internal mapping from sequence to its integer index for quick lookups
+        # Determine State and Execute Logic 
+        if self.graph is not None:
+            # Pre-computed graph was provided.
+            self.graph_type = 'precomputed'
+            # Validate that the provided sequences and layers are consistent with the graph.
+            self._validate_data_against_graph(sequences,
+                                              self.fitness_layers)
+            self._annotate_graph_nodes()
+        else:
+            # No graph was provided and must build one.
+            if not self.graph_type:
+                raise ValueError("`graph_type` must be specified if no graph is provided.")
+            
+            # This method builds the graph and annotates its nodes.
+            self.to_graph(**kwargs)
+
+        # Finalise Setup
         self._records = {tuple(seq.to_array()): i for i, seq in enumerate(self.sequences)}
 
-        # Set the initial active view for legacy method compatibility
         if self.fitness_layers:
             self._active_view_name = next(iter(self.fitness_layers.keys()))
         else:
             self._active_view_name = None
 
-        # Build the graph if one wasn't provided
-        if self.graph is None and self.graph_type:
-            self.to_graph(**kwargs)
-
-        # Optionally compute embeddings
         if emb_nodes:
             self.compute_node_embeddings(**kwargs)
+
+    def _annotate_graph_nodes(self):
+        """Helper function to add all fitness layer data to graph nodes."""
+        if not self.graph or not self.fitness_layers:
+            return
+            
+        seq_to_node_map = {tuple(data['sequence'].to_array()): node_idx
+                           for node_idx, data in self.graph.nodes(data=True)}
+
+        for i, seq in enumerate(self.sequences):
+            node_idx = seq_to_node_map.get(tuple(seq.to_array()))
+            if node_idx is None: continue
+
+            for name, layer in self.fitness_layers.items():
+                attribute_name = f"fitness_{name}"
+                self.graph.nodes[node_idx][attribute_name] = layer.get_value(i)
 
     @property
     def active_layer(self) -> BaseFitnessLayer:

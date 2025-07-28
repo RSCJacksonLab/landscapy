@@ -3,6 +3,7 @@ import networkx as nx
 from typing import Optional, Tuple
 from ..core.landscape import FitnessLandscape
 from ..core.fitness import NumericFitness
+from ..core.sequence import BaseNumpySequence
 from itertools import product
 
 def generate_NK_states(N: int,
@@ -101,14 +102,16 @@ def create_nk_landscape(N: int,
         An instance of the FitnessLandscape class representing the NK
         landscape.
     """
-    sequences, fitness_values = generate_NK_states(N, K, alphabet_size=alphabet_size, seed=seed)
+    sequences_np, fitness_values = generate_NK_states(N, K, alphabet_size=alphabet_size, seed=seed)
     
+    sequences = [BaseNumpySequence(seq) for seq in sequences_np]
+
     # Wrap the single fitness array into a list of lists for the NumericFitness layer
     replicates = [[val] for val in fitness_values]
     
     # Create the fitness layer
     fitness_layers = {
-        f'fitness_nk_k={N}': NumericFitness(name=f'fitness_nk_k={N}',
+        f'fitness_nk_k={K}': NumericFitness(name=f'fitness_nk_k={K}',
                                             values=replicates,
                                             metadata={'N' : N,
                                                       'K' : K,

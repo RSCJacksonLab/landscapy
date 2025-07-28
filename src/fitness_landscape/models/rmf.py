@@ -34,7 +34,9 @@ def create_rmf_landscape(N: int,
         An instance of the FitnessLandscape class representing the RMF
         landscape.
     """
-    sequences = generate_sequences(length=N, alphabet=[0, 1])
+    sequences_np = generate_sequences(length=N, alphabet=[0, 1])
+
+    sequences = [BaseNumpySequence(seq) for seq in sequences_np]
     
     if optimum is None:
         optimum_seq = BaseNumpySequence(np.zeros(N, dtype=int))

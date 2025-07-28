@@ -38,7 +38,9 @@ def create_elementary_landscape(j: int,
         sequences = generate_sequences(length=kwargs.get('N', 5),
                                        alphabet=kwargs.get('alphabet',
                                                            [0,1]))
-
+    if not isinstance(sequences, BaseNumpySequence):
+        sequences = [BaseNumpySequence(seq) for seq in sequences]
+        
     if graph_type == 'knn':
         k = kwargs.get('k', int(np.sqrt(len(sequences))))
         graph = create_knn_graph(sequences=sequences, k=k)

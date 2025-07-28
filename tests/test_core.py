@@ -3,6 +3,7 @@ import pytest
 import networkx as nx
 from fitness_landscape.core.sequence import *
 from fitness_landscape.core.graph import *
+from fitness_landscape.core.landscape import FitnessLandscape
 from fitness_landscape.core.fitness import NumericFitness, CategoricalFitness
 
 
@@ -84,12 +85,9 @@ def test_create_knn_graph():
     for node in graph.nodes():
         assert graph.degree[node] >= k
 
-
 @pytest.fixture
 def basic_landscape():
-    """
-    Provides a basic FitnessLandscape with a numeric layer for testing.
-    """
+    """Provides a basic FitnessLandscape with a numeric layer for testing."""
     sequences = generate_sequences(length=3, alphabet=[0, 1])
     fitness_values = [[val] for val in np.random.rand(8)]
     fitness_layers = {
