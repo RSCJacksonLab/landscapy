@@ -4,50 +4,70 @@ from ..core.landscape import FitnessLandscape
 from ..core.sequence import BaseNumpySequence, generate_sequences
 from ..core.graph import create_knn_graph, create_hamming_graph
 from ..analysis.eigenmode import eigenmode_decomposition
+from ..core.fitness import NumericFitness # Import NumericFitness
 
-class ElementaryFitnessLandscape(FitnessLandscape):
+def create_elementary_landscape(j: int,
+                                sequences: List[BaseNumpySequence]=None,
+                                graph_type: Literal['knn', 'hamming'] = 'hamming',
+                                **kwargs) -> FitnessLandscape:
     """
-    Elementary fitness landscape subclass of FitnessLandscape. The
-    fitness function of an elementary fitness landscape is an
-    eigenfunction of the graph Laplacian.
+    Factory function to create an elementary fitness landscape, where
+    the fitness function is an eigenfunction of the graph Laplacian.
 
-    Attributes
+    Parameters
     ----------
+    j : int
+        The eigenfunction index to use as fitness signal.
+    
+    sequences : List[BaseNumpySequence], default=`None`
+        List of optional sequences to construct the graph from. If
+        `None`, combinatorially complete sequence dataset is 
+        constructed and used. 
+    
+    graph_type : str, default=`hamming`
+        The graph type to use.
 
+        
+    Returns
+    -------
+    FitnessLandscape
+        The constructed elementary landscape.
     """
-    def __init__(self,
-                 j: int,
-                 N: int = None,
-                 sequences: List[BaseNumpySequence] = None,
-                 seed: Optional[int] = None,
-                 alphabet: List = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y'],
-                 graph_type: Literal['knn', 'hamming'] = 'hamming',
-                 **kwargs):
-
-        if sequences is None and N is None:
-            raise ValueError("Either `sequences` or `N` must be provided.")
+    if sequences is None:
+        # Consistent kwargs with NK landscape
+        sequences = generate_sequences(length=kwargs.get('N', 5),
+                                       alphabet=kwargs.get('alphabet',
+                                                           [0,1]))
+    if not isinstance(sequences, BaseNumpySequence):
+        sequences = [BaseNumpySequence(seq) for seq in sequences]
         
-        # CORRECTED: Infer N from sequences if not provided
-        if N is None and sequences is not None:
-            N = len(sequences[0])
+    if graph_type == 'knn':
+        k = kwargs.get('k', int(np.sqrt(len(sequences))))
+        graph = create_knn_graph(sequences=sequences, k=k)
+    elif graph_type == 'hamming':
+        graph = create_hamming_graph(sequences)
+    else:
+        raise ValueError(f"Unsupported graph type: {graph_type}")
 
-        if graph_type == 'knn':
-            if sequences is None:
-                raise ValueError("`sequences` must be provided for kNN graph.")
-            graph = create_knn_graph(sequences=sequences,
-                                     k=int(np.sqrt(len(sequences))))
+    _, eigenvectors = eigenmode_decomposition(graph)
+    fitness_values = eigenvectors[:, j]
 
-        elif graph_type == 'hamming':
-            if N is None:
-                raise ValueError("`N` must be provided for Hamming graph.")
-            if sequences is None:
-                sequences = generate_sequences(N, alphabet)
-            graph = create_hamming_graph(sequences)
-        
-        eigenvalues, eigenvectors = eigenmode_decomposition(graph)
-        fitness_values = eigenvectors[:, j]
-        
-        super().__init__(sequences=sequences,
-                         fitness_values=fitness_values,
-                         graph_type=graph_type,
-                         **kwargs)
+    replicates = [[val] for val in fitness_values]
+    
+    fitness_layers = {
+        f'elementary_eign_index={j}': NumericFitness(
+            name=f'elementary_eign_index={j}',
+            values=replicates,
+            metadata={'eigenvector_index': j,
+                      'N' : kwargs.get('N', 5),
+                      'alphabet' : kwargs.get('alphabet', [0,1]),
+                      'graph_type' : graph_type}
+        )
+    }
+    
+    return FitnessLandscape(
+        sequences=sequences,
+        fitness_layers=fitness_layers,
+        graph=graph, # Pass the pre-computed graph to the constructor
+        **kwargs
+    )

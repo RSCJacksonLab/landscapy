@@ -1,11 +1,13 @@
 from pydantic import BaseModel, Field, field_validator, ValidationError, ConfigDict
 from typing import Union, List, Literal, Iterable
 import numpy as np
-from ..core.landscape import FitnessLandscape, _GraphLike, NodeModel
+from ..core.landscape import FitnessLandscape
 from ..core.sequence import BaseNumpySequence, SoftSequence
+from ..core.fitness import NumericFitness, CategoricalFitness, ProbabilisticCategoricalFitness
 from ..graph_matching.latent_alignment import RJMCMCAligner
 import networkx as nx
 from softalign.soft_alignment import align_soft_sequences
+
 
 class EmbNodeModel(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -36,7 +38,7 @@ class FitnessSuperscape:
 
     def __init__(self,
                  
-                 landscapes: List[Union[FitnessLandscape, _GraphLike]],
+                 landscapes: List[Union[FitnessLandscape, nx.Graph]],
                  posterior_prob_cutoff: float = 0.1,
                  **sampler_kwargs) -> None:
         
@@ -57,8 +59,14 @@ class FitnessSuperscape:
         self._posterior_mapping = self.graph_aligner.posterior_match_probabilities()
         self._latent_mappings = self.graph_aligner.get_node_to_latent_mapping()
         self._posterior_prob_cutoff = posterior_prob_cutoff
+
+        self.back_reference = [
+            (k, node_id)
+            for k, landscape in enumerate(self.landscapes)
+            for node_id in landscape.graph.nodes()
+        ]
         
-        
+
     def construct_latent_landscape(self) :
         """
         Construct the latent graph from the posterior mapping.
@@ -67,10 +75,7 @@ class FitnessSuperscape:
 
         # Aggregate data into flat data structures.
         all_prob_maps = np.vstack(list(self._latent_mappings.values()))
-        all_fitnesses = np.concatenate([
-            landscape.get_signal() for landscape in self.landscapes
-        ])
-        
+
         # Collect all ungapped arrays from the nodes
         all_ungapped_arrs = [
             node_data['ungapped_arr']
@@ -78,21 +83,10 @@ class FitnessSuperscape:
             for _, node_data in landscape.graph.nodes(data=True)
         ]
 
-        # Back referece map for quick lookup.
-        back_reference = [
-            (k, node_id)
-            for k, landscape in enumerate(self.landscapes)
-            for node_id in landscape.graph.nodes()
-        ]
-
         # Collect distribution of sequence lengths for ambiguous soft sequences.
         all_lengths = [len(seq) for landscape in self.landscapes for seq in landscape.sequences]
         default_length = int(np.median(all_lengths)) if all_lengths else 1
 
-        # Vectorised latent fitnesses.
-        total_prob_per_latent = all_prob_maps.sum(axis=0) + 1e-12
-        weighted_fitness_sum = all_prob_maps.T @ all_fitnesses
-        latent_fitnesses_array = weighted_fitness_sum / total_prob_per_latent
         latent_sequences = []
         num_latent_nodes = self.latent_graph.number_of_nodes()
 
@@ -102,26 +96,26 @@ class FitnessSuperscape:
 
             # Find indices of sequences that contribute to latent node.
             contributor_indices = np.where(prob_col > 0)[0]
-            
+
             observed_mappings = []
             for flat_idx in contributor_indices:
-                graph_idx, node_id = back_reference[flat_idx]
+                graph_idx, node_id = self.back_reference[flat_idx]
                 probability = prob_col[flat_idx]
                 observed_mappings.append({
                     "node_id": node_id,
                     "probability": probability,
                     "graph_index": graph_idx
                 })
-            
+
             observed_mappings.sort(key=lambda x: x['probability'], reverse=True)
-            self.latent_graph.nodes[latent_node_idx]['observed_node_mappings'] = observed_mappings            
-            
+            self.latent_graph.nodes[latent_node_idx]['observed_node_mappings'] = observed_mappings
+
             if len(contributor_indices) == 0:
                 uniform_probability = 1.0 / len(self.alphabet)
                 uniform_posterior = np.full(
                     (default_length, len(self.alphabet)),
                     uniform_probability)
-                
+
                 ambiguous_sequence = SoftSequence(
                     uniform_posterior,
                     self.alphabet
@@ -133,7 +127,7 @@ class FitnessSuperscape:
                 self.latent_graph.nodes[latent_node_idx]['gapped_arr'] = gapped_arr
                 self.latent_graph.nodes[latent_node_idx]['ungapped_arr'] = uniform_posterior
                 continue
-        
+
             # Gather the specific ungapped arrays and their corresponding probabilities
             ungapped_arrs_to_align = [all_ungapped_arrs[i] for i in contributor_indices]
             contributor_probs = prob_col[contributor_indices]
@@ -146,14 +140,16 @@ class FitnessSuperscape:
 
             aligned_tensor = np.array(aligned_arrays)
             
+            total_prob_for_node = np.sum(contributor_probs) + 1e-12
+            
             weighted_sum_posterior = np.einsum(
                 'i,ija->ja', contributor_probs, aligned_tensor
             )
-            final_posterior = weighted_sum_posterior / total_prob_per_latent[latent_node_idx]
+            final_posterior = weighted_sum_posterior / total_prob_for_node
 
             # `final_posterior` is the gapped array
             self.latent_graph.nodes[latent_node_idx]['gapped_arr'] = final_posterior
-            
+
             # Derive the ungapped array from the final_posterior
             ungapped_arr = final_posterior[:, :-1]
             # Renormalize
@@ -172,10 +168,40 @@ class FitnessSuperscape:
                 )
             )
 
+        latent_fitness_layers = {}
+        all_layer_names = set(name for l in self.landscapes for name in l.fitness_layers)
+
+        for name in all_layer_names:
+            first_layer = next(l.fitness_layers[name] for l in self.landscapes if name in l.fitness_layers)
+
+            if first_layer.dtype == 'numeric':
+                all_means = np.concatenate([
+                    l.view(name).to_scalar() for l in self.landscapes
+                ])
+                total_prob_per_latent = all_prob_maps.sum(axis=0) + 1e-12
+                weighted_sum = all_prob_maps.T @ all_means
+                latent_means = (weighted_sum / total_prob_per_latent).tolist()
+                latent_fitness_layers[name] = NumericFitness(name, [[m] for m in latent_means])
+
+            elif first_layer.dtype == 'categorical':
+                categories = first_layer.categories
+                all_one_hot = np.concatenate([
+                    l.view(name).get_tensor().numpy() for l in self.landscapes
+                ])
+                total_prob_per_latent = all_prob_maps.sum(axis=0) + 1e-12
+                weighted_sum_of_one_hots = all_prob_maps.T @ all_one_hot
+                latent_probabilities = weighted_sum_of_one_hots / total_prob_per_latent[:, np.newaxis]
+                latent_fitness_layers[name] = ProbabilisticCategoricalFitness(name, latent_probabilities, categories)
+
+        for i, seq in enumerate(latent_sequences):
+            if i in self.latent_graph.nodes:
+                self.latent_graph.nodes[i]['sequence'] = seq
+        
         self.latent_landscape = FitnessLandscape(
-            sequences=latent_sequences, fitness_values=latent_fitnesses_array
+            sequences=latent_sequences,
+            fitness_layers=latent_fitness_layers,
+            graph=self.latent_graph
         )
-        self.latent_landscape.graph = self.latent_graph
 
 
     @staticmethod
@@ -192,12 +218,6 @@ class FitnessSuperscape:
             for node, data in G.nodes(data=True):
                 try:
                     EmbNodeModel(**data) # will raise if missing/invalid
-                except ValidationError as e:
-                    raise ValueError(f"{node!r}: {e}") from None
-                
-                # Node model missed if input is just graphs and not landscape.
-                try: 
-                    NodeModel(**data)  # will raise if missing/invalid
                 except ValidationError as e:
                     raise ValueError(f"{node!r}: {e}") from None
     
@@ -252,7 +272,6 @@ class FitnessSuperscape:
                 
     @staticmethod
     def _extract_graphs(landscapes: Iterable[Union[FitnessLandscape,
-                                                   _GraphLike,
                                                    nx.Graph]]) -> list[nx.Graph]:
         """
         Helper method to extract directed graphs from directed fitness
@@ -261,7 +280,7 @@ class FitnessSuperscape:
         Parameters
         ----------
         landscapes : Iterable
-            The list of DirectedFitnessLandscapes, _GraphLike or
+            The list of DirectedFitnessLandscapes, or
             nx.Graph objects.
 
         Returns
@@ -276,8 +295,6 @@ class FitnessSuperscape:
                 G = obj.graph
             elif isinstance(obj, nx.Graph):
                 G = nx.Graph(obj)  # copy/upgrade
-            elif isinstance(obj, _GraphLike):
-                G = nx.Graph(obj) # last resort
             else:
                 raise TypeError(f"Unsupported landscape/graph type: {type(obj)}")
             if not isinstance(G, nx.Graph):

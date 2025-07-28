@@ -2,7 +2,8 @@ import numpy as np
 import pytest
 import networkx as nx
 
-from fitness_landscape.models import NKFitnessLandscape
+from fitness_landscape.core.sequence import BaseNumpySequence
+from fitness_landscape.models.nk import create_nk_binary_landscape
 from fitness_landscape.core.landscape import FitnessLandscape
 from fitness_landscape.transforms.walsh_hadamard import *
 from fitness_landscape.transforms.graph_fourier import *
@@ -19,7 +20,7 @@ def test_walsh_transform_reconstruction():
         If the reconstructed signal does not match the original
         fitness signal.
     """
-    landscape = NKFitnessLandscape(N=4, K=1, alphabet_size=2, seed=42)
+    landscape = create_nk_binary_landscape(N=4, K=1, seed=42)
     fitness_signal = landscape.get_signal()
     
     # Perform Walsh transform
@@ -40,7 +41,7 @@ def test_walsh_coefficients_extraction():
         If the coefficients dictionary does not contain expected keys
         or if high-order terms are not zero for a K=0 landscape.
     """
-    landscape = NKFitnessLandscape(N=3, K=0, alphabet_size=2, seed=42)
+    landscape = create_nk_binary_landscape(N=4, K=0 , seed=42)
     coeffs_dict = walsh_coefficients(landscape, order=3)
     
     # Check for expected keys
@@ -61,7 +62,7 @@ def test_graph_fourier_transform_reconstruction():
     for i, node in enumerate(graph.nodes()):
 
         graph.nodes[node]['sequence'] = BaseNumpySequence([i]) 
-        graph.nodes[node]['fitness'] = signal[i]
+        graph.nodes[node]['fitness_default'] = signal[i]
         graph.nodes[node]['gapped_arr'] = np.zeros((1, 21)) # Dummy data
         graph.nodes[node]['ungapped_arr'] = np.zeros((1, 20)) # Dummy data
     
@@ -71,4 +72,3 @@ def test_graph_fourier_transform_reconstruction():
     reconstructed_signal = inverse_graph_fourier_transform(eigenvectors, coefficients)
     
     assert np.allclose(signal, reconstructed_signal, atol=1e-9)
-

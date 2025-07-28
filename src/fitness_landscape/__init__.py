@@ -12,12 +12,15 @@ from .core import (
     sequence_distance,
     create_hamming_graph,
     create_knn_graph,
+    NumericFitness,
+    CategoricalFitness,
+    ProbabilisticCategoricalFitness
 
 )
 
 from .utils import cosine_similarity_matrix
 
-__version__ = '0.2.0'
+__version__ = '0.5.0'
 
 __all__ = [
     'core',
@@ -32,4 +35,7 @@ __all__ = [
     'FitnessLandscape',
     'create_hamming_graph',
     'create_knn_graph',
+    'NumericFitness',
+    'CategoricalFitness',
+    'ProbabilisticCategoricalFitness'
 ]
