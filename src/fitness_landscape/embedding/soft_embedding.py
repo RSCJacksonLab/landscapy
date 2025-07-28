@@ -302,6 +302,9 @@ class ESMEmbedder:
             for j, original_idx in enumerate(batch_indices):
                 length = original_lengths[j]
                 probability = probabilities[j, 1:length + 1].cpu().numpy()
+                # extract only vocab positions
+                probability = probability[:, [self.vocab_dict[aa] for aa in self.alphabet]]
+                # ensure the output is float32
                 output_probabilities[original_idx] = probability.astype(np.float32)
         
         return output_probabilities
