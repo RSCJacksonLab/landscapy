@@ -132,6 +132,8 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
 def create_tda_graph(sequences: List[BaseNumpySequence],
                      embeddings: np.ndarray,
                      n_components: int = 3,
+                     *
+                     reweight_simplex_edges: bool = False,
                      **kwargs) -> nx.Graph:
     """
 
@@ -175,7 +177,52 @@ def create_tda_graph(sequences: List[BaseNumpySequence],
             dist = np.linalg.norm(low_dim_data[node1] - low_dim_data[node2])
             G.add_edge(node1, node2, weight=dist, distance=dist)
             
+    if reweight_simplex_edges:
+        G = _reweight_graph_by_simplices(G=G,
+                                         simplex_tree=simplex_tree)
+
     return G
+
+def _reweight_graph_by_simplices(G: nx.Graph,
+                                 simplex_tree) -> nx.Graph:
+    """
+    Helper function to reweight the edges of a graph based on how many
+    triangles are present in the TDA.
+
+    Parameters
+    ----------
+    G : nx.Graph
+        The constructed network graph to reweight.
+    
+    simplex_tree : Any
+        The 0d persistence simplex tree used to construct `G`.
+    
+    Returns
+    -------
+    G : nx.Graph
+        The input network graph with updated simplex edge weights.
+    """
+    G_weighted = G.copy()
+    
+    # A dictionary to count triangle participation for each edge
+    triangle_counts = {}
+    
+    # Iterate through all triangles in the simplex tree
+    for simplex, _ in simplex_tree.get_skeleton(2):
+        if len(simplex) == 3:
+            # For each edge in the triangle, increment its count
+            for i in range(3):
+                u, v = simplex[i], simplex[(i + 1) % 3]
+                # Ensure the edge is stored in a canonical order (u < v)
+                edge = tuple(sorted((u, v)))
+                triangle_counts[edge] = triangle_counts.get(edge, 0) + 1
+    
+    # Update the weights in the new graph
+    for u, v in G_weighted.edges():
+        edge = tuple(sorted((u, v)))
+        G_weighted[u][v]['simplicial_weight'] = 1 + triangle_counts.get(edge, 0)
+        
+    return G_weighted
 
 #TODO: Diffusion connectivity
 
