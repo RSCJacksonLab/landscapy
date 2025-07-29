@@ -160,9 +160,10 @@ def create_gnk_landscape(N: int,
         )
     }
     
-    return FitnessLandscape(
+    return FitnessLandscape.from_sequences(
         sequences=sequences,
         fitness_layers=fitness_layers,
+        graph_type='hamming',
         **kwargs
     )
 
@@ -213,9 +214,10 @@ def create_nk_binary_landscape(N: int,
                                               'type': 'binary'})
     }
     
-    return FitnessLandscape(
+    return FitnessLandscape.from_sequences(
         sequences=sequences,
         fitness_layers=fitness_layers,
+        graph_type='hamming',
         **kwargs
     )
 
@@ -267,9 +269,10 @@ def create_nk_multi_landscape(N: int,
                                               'type' : 'multi-allele'})
     }
     
-    return FitnessLandscape(
+    return FitnessLandscape.from_sequences(
         sequences=sequences,
         fitness_layers=fitness_layers,
+        graph_type='hamming',
         **kwargs
     )
 

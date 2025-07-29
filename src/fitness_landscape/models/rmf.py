@@ -67,8 +67,9 @@ def create_rmf_landscape(N: int,
                                                                })
     }
 
-    return FitnessLandscape(
+    return FitnessLandscape.from_sequences(
         sequences=sequences,
         fitness_layers=fitness_layers,
+        graph_type='hamming',
         **kwargs
     )

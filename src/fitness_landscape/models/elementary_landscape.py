@@ -68,6 +68,5 @@ def create_elementary_landscape(j: int,
     return FitnessLandscape(
         sequences=sequences,
         fitness_layers=fitness_layers,
-        graph=graph, # Pass the pre-computed graph to the constructor
-        **kwargs
+        graph=graph,
     )
