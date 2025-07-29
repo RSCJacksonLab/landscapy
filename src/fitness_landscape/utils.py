@@ -1,5 +1,6 @@
 import numpy as np
 
+
 def cosine_similarity_matrix(A, B):
     """
     Computes cosine similarity between two matrices of vectors.
@@ -23,3 +24,33 @@ def cosine_similarity_matrix(A, B):
     A_norm = A / (np.linalg.norm(A, axis=1, keepdims=True) + 1e-9)
     B_norm = B / (np.linalg.norm(B, axis=1, keepdims=True) + 1e-9)
     return A_norm @ B_norm.T
+
+
+def get_landscape_dist_mat(landscape: 'FitnessLandscape',
+                           representation: Optional[Literal['ohe']] = None,
+                           weighted: bool = False) -> np.ndarray:
+    """
+    Compute the distance matrix for a fitness landscape.
+
+    Parameters
+    ----------
+    landscape : FitnessLandscape
+        The fitness landscape to analyze.
+.
+    weighted : bool, default=`False`
+        Whether to use weighted edges in the graph representation.
+
+    Returns
+    -------
+    dist_mat : np.ndarray
+        The distance matrix for the fitness landscape.
+    """
+
+    if weighted:
+        dist_mat = nx.floyd_warshall_numpy(landscape.graph, 
+                                            weight='weight')
+    else:
+        dist_mat = nx.floyd_warshall_numpy(landscape.graph,
+                                            weight=None)
+
+    return dist_mat
