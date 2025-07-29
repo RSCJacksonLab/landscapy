@@ -40,14 +40,14 @@ def vietoris_rips_complex(landscape: FitnessLandscape,
         List of simplices in the Vietoris-Rips complex.
     '''
     # get distance matrix
-    if dist_mat is None:
-        dist_mat = get_landscape_dist_mat(landscape,
+    if dist_matrix is None:
+        dist_matrix = get_landscape_dist_mat(landscape,
                                         weighted=weighted)
 
     # get vietoris-rips complex
     if max_distance is None:
-        max_distance = np.max(dist_mat[np.isfinite(dist_mat)])
-    rips_complex = gudhi.RipsComplex(distance_matrix=dist_mat,
+        max_distance = np.max(dist_matrix[np.isfinite(dist_matrix)])
+    rips_complex = gudhi.RipsComplex(distance_matrix=dist_matrix,
                                      max_edge_length=max_distance)
     # create simplex tree
     simplex_tree = rips_complex.create_simplex_tree(max_dimension=max_dim)
