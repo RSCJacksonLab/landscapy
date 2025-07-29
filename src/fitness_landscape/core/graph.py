@@ -5,6 +5,8 @@ from .sequence import BaseNumpySequence, sequence_distance
 import gudhi
 from sklearn.decomposition import PCA
 from sklearn.metrics.pairwise import euclidean_distances, rbf_kernel
+from sklearn.neighbors import NearestNeighbors
+from sklearn.metrics.pairwise import euclidean_distances
 
 # Simple graph constructors
 
@@ -64,7 +66,87 @@ def create_hamming_graph(sequences: List[BaseNumpySequence],
                     G.add_edge(i, j, weight=1.0, distance=dist)
     return G
 
-#TODO: Continuous KNN (density dependent)
+def create_cknn_graph(sequences: List[BaseNumpySequence],
+                      embeddings: np.ndarray = None,
+                      k: int = 3,
+                      **kwargs) -> nx.Graph:
+    """
+    Creates a graph using the Continuous k-Nearest Neighbors (ck-NN)
+    algorithm, which is parameter-free and density adaptive.
+
+    Parameters
+    ----------
+    sequences : List[BaseNumpySequence]
+        Sequences to form the nodes of the graph.
+
+    embeddings : np.ndarray, default=`None`
+        A numpy array of shape (n_sequences, n_dimensions) containing
+        the high-dimensional embeddings for each sequence. If `None`,
+        Hamming distance matrix is computed and used.
+
+    k : int, default=3
+        The number of neighbors to use for the initial local density
+        estimation. This is not a sensitive parameter, and small
+        values (3-5) typically work well.
+
+    **kwargs : dict, optional
+        Additional keyword arguments for API consistency.
+
+    Returns
+    -------
+    networkx.Graph
+        A graph where nodes are sequence indices and edges represent
+        adaptive, density-aware proximity.
+    """
+
+        if embeddings is not None:
+
+            n_sequences = embeddings.shape[0]
+            if n_sequences < k + 1:
+                raise ValueError(
+                    f"The number of sequences ({n_sequences}) must be greater "
+                    f"than k ({k})."
+                )
+
+            nn = NearestNeighbors(n_neighbors=k + 1, algorithm='auto', metric='euclidean')
+            nn.fit(embeddings)
+            distances, _ = nn.kneighbors(embeddings)
+        
+        else:
+            n_sequences = len(sequences)
+            distances = np.zeros((n_sequences, n_sequences))
+    
+            for i in range(n_sequences):
+                for j in range(i + 1, n_sequences):
+                    
+                    # Euclidean distances in OHE domain.
+                    dist = sequence_distance(sequences[i], sequences[j], metric='euclidean')
+                    distances[i, j] = dist
+                    distances[j, i] = dist
+    
+    sigma_k = distances[:, k]
+    sigma_k[sigma_k == 0] = 1e-9
+    
+    dist_matrix = euclidean_distances(embeddings)
+    sigma_product = np.outer(sigma_k, sigma_k)
+    exp_term = np.exp(-dist_matrix**2 / sigma_product)
+    
+    k_continuous = exp_term.sum(axis=1)
+
+    G = nx.Graph()
+
+    for i, seq in enumerate(sequences):
+        G.add_node(i, sequence=seq)
+
+    k_product_matrix = np.outer(k_continuous, k_continuous)
+    rows, cols = np.where(np.triu(k_product_matrix >= n_sequences, k=1))
+    
+    for i, j in zip(rows, cols):
+        weight = dist_matrix[i, j]
+        G.add_edge(i, j, weight=weight, distance=weight)
+
+    return G
+
 
 def create_knn_graph(sequences: List[BaseNumpySequence],
                      k: int,
