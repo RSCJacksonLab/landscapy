@@ -4,6 +4,7 @@ from typing import List, Union, Literal
 from .sequence import BaseNumpySequence, sequence_distance
 import gudhi
 from sklearn.decomposition import PCA
+from sklearn.metrics.pairwise import euclidean_distances, rbf_kernel
 
 # Simple graph constructors
 
@@ -246,5 +247,59 @@ def _reweight_graph_by_simplices(G: nx.Graph,
         
     return G_weighted
 
-#TODO: Diffusion connectivity
+def create_diffusion_graph(sequences: List[BaseNumpySequence],
+                           embeddings: np.ndarray,
+                           t: int = 5,
+                           connectivity_threshold: float = 1e-4,
+                           **kwargs) -> nx.Graph:
+    """
+    Function to construct a graph based on expected diffusion
+    behaviour in a high-dimensional embedding space. 
+
+    Parameters
+    ----------
+    sequences : List[BaseNumpySequences]
+        Sequences to connect.
+    
+    embeddings : np.ndarray
+        The sequence embeddings, indexed according to sequence order.
+
+    t : int, default=`5`
+        The Markov transition matrix exponent.
+    
+    connectivity_threshold : float, default=`1e-04`
+        The threshold the define discrete connectivity.
+
+    Returns
+    -------
+    G : nx.graph
+        The constructed graph with `BaseNumpySequence` features stored
+        under `sequence`.
+    """
+
+    # Build a Gaussian similarity kernel, gamma based on median dist.
+    distances = euclidean_distances(embeddings, squared=True)
+    gamma = 1.0 / (2 * np.median(distances)**2)
+    kernel_matrix = rbf_kernel(embeddings, gamma=gamma)
+    
+    # Create the Markov transition matrix.
+    row_sums = kernel_matrix.sum(axis=1, keepdims=True)
+    transition_matrix = kernel_matrix / row_sums
+
+    # Power the matrix for diffusion process.
+    diffused_matrix = np.linalg.matrix_power(transition_matrix, t)
+    
+    G = nx.Graph()
+    G.add_nodes_from(range(len(sequences)))
+    
+    # Get the upper triangle to avoid duplicate edges
+    rows, cols = np.where(np.triu(diffused_matrix > connectivity_threshold, k=1))
+    
+    for i, j in zip(rows, cols):
+        G.add_edge(i, j, weight=diffused_matrix[i, j])
+        
+    for i, seq in enumerate(sequences):
+        G.nodes[i]['sequence'] = seq
+        
+    return G
 
