@@ -40,6 +40,7 @@ setup(
         "pytest-cov>=6",
         "faiss-cpu>=1.11",
         "ray>=2.48",
+        "gudhi>=3.11",
         "softalign @ git+https://github.com/RSCJacksonLab/softalign.git@9127e3a"
     ],
     extras_require={

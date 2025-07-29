@@ -2,6 +2,8 @@ import numpy as np
 import networkx as nx
 from typing import List, Union, Literal
 from .sequence import BaseNumpySequence, sequence_distance
+import gudhi
+from sklearn.decomposition import PCA
 
 # Simple graph constructors
 
@@ -61,9 +63,10 @@ def create_hamming_graph(sequences: List[BaseNumpySequence],
                     G.add_edge(i, j, weight=1.0, distance=dist)
     return G
 
+#TODO: Continuous KNN (density dependent)
+
 def create_knn_graph(sequences: List[BaseNumpySequence],
                      k: int,
-                     fitness_values: Union[List, np.ndarray] = None,
                      metric: Literal['hamming'] = 'hamming', 
                      weight_by_distance: bool = True, **kwargs) -> nx.Graph:
     """
@@ -77,8 +80,6 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
         Sequences to connect.
     k : int
         Number of neighbors.
-    fitness_values : array-like or None
-        Fitness values corresponding to sequences.
     metric : str, optional
         Distance metric ('hamming') // More to add
     weight_by_distance : bool, default=`True`
@@ -100,9 +101,6 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
         # Add node with sequence attribute
         G.add_node(i, sequence=seq)
         
-        # Add fitness attribute if provided
-        if fitness_values is not None:
-            G.nodes[i]['fitness'] = float(fitness_values[i])
     
     # Calculate all pairwise distances
     n_sequences = len(sequences)
@@ -131,9 +129,53 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
     
     return G
 
+def create_tda_graph(sequences: List[BaseNumpySequence],
+                     embeddings: np.ndarray,
+                     n_components: int = 3,
+                     **kwargs) -> nx.Graph:
+    """
 
+    """
+    if len(sequences) != embeddings.shape[0]:
+        raise ValueError("Number of sequences must match the number of embeddings.")
 
-#TODO: Evolutionary velocity connectivity
-#TODO: TDA persistant homology connectivity
-#TODO: density dependent kNN connectivity
-#TODO: pyHMM connectivity
+    if embeddings.shape[0] == 0:
+        return nx.Graph()
+
+    # Reduce dimensionality with PCA.
+    # Alpha complex scales with dimension.
+    pca = PCA(n_components=n_components)
+    low_dim_data = pca.fit_transform(embeddings)
+    alpha_complex = gudhi.AlphaComplex(points=low_dim_data)
+    simplex_tree = alpha_complex.create_simplex_tree()
+    persistence_0d = simplex_tree.persistence(homology_coeff_field=2, min_persistence=0)
+    e.
+    # Get all finite death times for 0D features (connected components)
+    finite_deaths = [p[1][1] for p in persistence_0d if p[0] == 0 and p[1][1] < float('inf')]
+    
+    if not finite_deaths:
+        # If all points are isolated or form one component, use a small default
+        chosen_alpha_square = 0.01 
+    else:
+        # Choose the 95th percentile of death times as a robust threshold
+        chosen_alpha_square = np.percentile(finite_deaths, 95)
+
+    alpha_complex_for_graph = gudhi.AlphaComplex(points=low_dim_data)
+    simplex_tree_for_graph = alpha_complex_for_graph.create_simplex_tree(max_alpha_square=chosen_alpha_square)
+    edge_generator = simplex_tree_for_graph.get_skeleton(1)
+
+    G = nx.Graph()
+    
+    for i, seq in enumerate(sequences):
+        G.add_node(i, sequence=seq)
+
+    for simplex, _ in edge_generator:
+        if len(simplex) == 2:
+            node1, node2 = simplex[0], simplex[1]
+            dist = np.linalg.norm(low_dim_data[node1] - low_dim_data[node2])
+            G.add_edge(node1, node2, weight=dist, distance=dist)
+            
+    return G
+
+#TODO: Diffusion connectivity
+

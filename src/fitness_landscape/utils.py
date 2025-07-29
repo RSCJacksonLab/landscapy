@@ -23,3 +23,4 @@ def cosine_similarity_matrix(A, B):
     A_norm = A / (np.linalg.norm(A, axis=1, keepdims=True) + 1e-9)
     B_norm = B / (np.linalg.norm(B, axis=1, keepdims=True) + 1e-9)
     return A_norm @ B_norm.T
+
