@@ -296,8 +296,8 @@ class ESMEmbedder:
 
         for seq_batch, mask_batch, original_lengths, batch_indices in tqdm(iterator, desc="Embedding"):
             with torch.no_grad():
-                probabilities = self.forward_pass(seq_batch, mask_batch)
-                probabilities = probabilities.logits.softmax(dim=-1)
+                out = self.forward_pass(seq_batch, mask_batch)
+                probabilities = out.logits.softmax(dim=-1)
 
             for j, original_idx in enumerate(batch_indices):
                 length = original_lengths[j]
