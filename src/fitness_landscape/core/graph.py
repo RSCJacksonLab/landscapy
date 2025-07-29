@@ -136,7 +136,29 @@ def create_tda_graph(sequences: List[BaseNumpySequence],
                      reweight_simplex_edges: bool = False,
                      **kwargs) -> nx.Graph:
     """
+    Function to construct a graph based on persisent homology, using
+    the alpha complex and dimensionality reduced embedding features.
 
+    Parameters
+    ----------
+    sequences : List[BaseNumpySequences]
+        Sequences to connect.
+    
+    embeddings : np.ndarray
+        The sequence embeddings, indexed according to sequence order.
+
+    n_components : int, default=3
+        The number of principle components to use for alpha complex
+        creation.
+    
+    reweight_simplex_edges : bool, default=`False`
+        Bool to reweight graph edges by triangle simplexes.
+    
+    Returns
+    -------
+    G : nx.graph
+        The constructed graph with `BaseNumpySequence` features stored
+        under `sequence`.
     """
     if len(sequences) != embeddings.shape[0]:
         raise ValueError("Number of sequences must match the number of embeddings.")
