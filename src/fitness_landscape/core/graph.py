@@ -8,7 +8,6 @@ from sklearn.metrics.pairwise import euclidean_distances, rbf_kernel
 from sklearn.neighbors import NearestNeighbors
 from sklearn.metrics.pairwise import euclidean_distances
 
-# Simple graph constructors
 
 def create_hamming_graph(sequences: List[BaseNumpySequence],
                          fitness_values: Union[np.ndarray, List] = None,
@@ -215,7 +214,6 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
 def create_tda_graph(sequences: List[BaseNumpySequence],
                      embeddings: np.ndarray,
                      n_components: int = 3,
-                     *
                      reweight_simplex_edges: bool = False,
                      **kwargs) -> nx.Graph:
     """
