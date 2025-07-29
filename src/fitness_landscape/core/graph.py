@@ -98,30 +98,30 @@ def create_cknn_graph(sequences: List[BaseNumpySequence],
         adaptive, density-aware proximity.
     """
 
-        if embeddings is not None:
+    if embeddings is not None:
 
-            n_sequences = embeddings.shape[0]
-            if n_sequences < k + 1:
-                raise ValueError(
-                    f"The number of sequences ({n_sequences}) must be greater "
-                    f"than k ({k})."
-                )
+        n_sequences = embeddings.shape[0]
+        if n_sequences < k + 1:
+            raise ValueError(
+                f"The number of sequences ({n_sequences}) must be greater "
+                f"than k ({k})."
+            )
 
-            nn = NearestNeighbors(n_neighbors=k + 1, algorithm='auto', metric='euclidean')
-            nn.fit(embeddings)
-            distances, _ = nn.kneighbors(embeddings)
-        
-        else:
-            n_sequences = len(sequences)
-            distances = np.zeros((n_sequences, n_sequences))
+        nn = NearestNeighbors(n_neighbors=k + 1, algorithm='auto', metric='euclidean')
+        nn.fit(embeddings)
+        distances, _ = nn.kneighbors(embeddings)
     
-            for i in range(n_sequences):
-                for j in range(i + 1, n_sequences):
-                    
-                    # Euclidean distances in OHE domain.
-                    dist = sequence_distance(sequences[i], sequences[j], metric='euclidean')
-                    distances[i, j] = dist
-                    distances[j, i] = dist
+    else:
+        n_sequences = len(sequences)
+        distances = np.zeros((n_sequences, n_sequences))
+
+        for i in range(n_sequences):
+            for j in range(i + 1, n_sequences):
+                
+                # Euclidean distances in OHE domain.
+                dist = sequence_distance(sequences[i], sequences[j], metric='euclidean')
+                distances[i, j] = dist
+                distances[j, i] = dist
     
     sigma_k = distances[:, k]
     sigma_k[sigma_k == 0] = 1e-9
@@ -254,7 +254,7 @@ def create_tda_graph(sequences: List[BaseNumpySequence],
     alpha_complex = gudhi.AlphaComplex(points=low_dim_data)
     simplex_tree = alpha_complex.create_simplex_tree()
     persistence_0d = simplex_tree.persistence(homology_coeff_field=2, min_persistence=0)
-    e.
+    
     # Get all finite death times for 0D features (connected components)
     finite_deaths = [p[1][1] for p in persistence_0d if p[0] == 0 and p[1][1] < float('inf')]
     

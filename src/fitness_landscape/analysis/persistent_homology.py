@@ -99,7 +99,7 @@ def compute_persistent_homology(landscape: FitnessLandscape,
                                 method: Literal['vietoris_rips', 
                                                 'delaunay_cech'] = 'vietoris_rips',
                                 max_dim: int = 2,
-                                dist_matrix: np.ndarray,
+                                dist_matrix: np.ndarray = None,
                                 max_distance: Optional[float] = None,
                                 weighted: bool = False) -> dict:
     """

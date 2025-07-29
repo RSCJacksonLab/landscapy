@@ -93,7 +93,11 @@ def basic_landscape():
     fitness_layers = {
         'default': NumericFitness(name='default', values=fitness_values)
     }
-    return FitnessLandscape(sequences=sequences, fitness_layers=fitness_layers)
+    return FitnessLandscape.from_sequences(
+        sequences=sequences,
+        fitness_layers=fitness_layers,
+        graph_type='hamming' 
+    )
 
 def test_landscape_initialization_with_layers(basic_landscape):
     """
@@ -110,7 +114,11 @@ def test_fitness_free_landscape_initialization():
     Tests that a landscape can be initialized without any fitness layers.
     """
     sequences = generate_sequences(length=3, alphabet=[0, 1])
-    landscape = FitnessLandscape(sequences=sequences, fitness_layers={})
+    landscape = FitnessLandscape.from_sequences(
+        sequences=sequences,
+        fitness_layers={},
+        graph_type='hamming'
+    )
     assert len(landscape) == 8
     assert landscape.graph.number_of_nodes() == 8
     with pytest.raises(ValueError):

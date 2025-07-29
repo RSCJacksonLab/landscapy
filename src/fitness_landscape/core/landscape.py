@@ -148,6 +148,10 @@ class FitnessLandscape:
                 all_categories = sorted(list(set(values)))
                 fitness_layers[name] = CategoricalFitness(name=name, values=values, categories=all_categories)
         
+        # Pop irrelevant keywords.
+        kwargs.pop('graph_type', None)
+        kwargs.pop('emb_nodes', None)
+        
         # Call the simple constructor
         return cls(sequences=sequences,
                    graph=graph,

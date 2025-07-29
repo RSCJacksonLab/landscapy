@@ -32,7 +32,6 @@ def cosine_similarity_matrix(A, B):
 
 
 def get_landscape_dist_mat(landscape: 'FitnessLandscape',
-                           representation: Optional[Literal['ohe']] = None,
                            weighted: bool = False) -> np.ndarray:
     """
     Compute the distance matrix for a fitness landscape.
