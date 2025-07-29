@@ -44,6 +44,10 @@ from .statistics import (
     permutation_test
 )
 
+from .persistent_homology import (
+    compute_persistent_homology
+)
+
 __all__ = [
     'find_greedy_accessible_paths',
     'analyze_path_accessibility',
@@ -68,5 +72,6 @@ __all__ = [
     'regression_analysis',
     'hypothesis_testing',
     'bootstrap_analysis',
-    'permutation_test'
+    'permutation_test',
+    'compute_persistent_homology'
 ]
