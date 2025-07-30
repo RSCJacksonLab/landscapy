@@ -72,7 +72,8 @@ def test_forward_pass_shapes(embedder):
     dummy_ohe[:, :, 0] = 1.0
     
     with torch.no_grad():
-        hidden_state = embedder.forward_pass(dummy_ohe)
+        out = embedder.forward_pass(dummy_ohe)
+        hidden_state = out['hidden_states'][-1] 
     
     expected_shape = (batch_size, seq_len, embedding_dim)
     assert hidden_state.shape == expected_shape
