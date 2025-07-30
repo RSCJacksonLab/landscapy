@@ -98,42 +98,31 @@ def create_cknn_graph(sequences: List[BaseNumpySequence],
         adaptive, density-aware proximity.
     """
 
+    n_sequences = len(sequences)
+    if n_sequences < k + 1:
+        raise ValueError(f"Number of sequences ({n_sequences}) must be > k ({k}).")
+
     if embeddings is not None:
-
-        n_sequences = embeddings.shape[0]
-        if n_sequences < k + 1:
-            raise ValueError(
-                f"The number of sequences ({n_sequences}) must be greater "
-                f"than k ({k})."
-            )
-
-        nn = NearestNeighbors(n_neighbors=k + 1, algorithm='auto', metric='euclidean')
-        nn.fit(embeddings)
-        distances, _ = nn.kneighbors(embeddings)
-    
+        dist_matrix = euclidean_distances(embeddings)
     else:
-        n_sequences = len(sequences)
-        distances = np.zeros((n_sequences, n_sequences))
+        # Fallback to OHE euclidean distance if no embeddings are provided
+        from ..utils import get_distance_matrix
+        dist_matrix = get_distance_matrix(sequences, metric='euclidean')
 
-        for i in range(n_sequences):
-            for j in range(i + 1, n_sequences):
-                
-                # Euclidean distances in OHE domain.
-                dist = sequence_distance(sequences[i], sequences[j], metric='euclidean')
-                distances[i, j] = dist
-                distances[j, i] = dist
-    
-    sigma_k = distances[:, k]
-    sigma_k[sigma_k == 0] = 1e-9
-    
-    dist_matrix = euclidean_distances(embeddings)
+    # --- Step 2: Calculate sigma_k from the distance matrix ---
+    # Sort each row to find the k-th nearest neighbor distance
+    sorted_distances = np.sort(dist_matrix, axis=1)
+    # The k-th neighbor is at index k, as index 0 is the point itself.
+    sigma_k = sorted_distances[:, k]
+    sigma_k[sigma_k == 0] = 1e-9  # Avoid division by zero
+
+    # --- Step 3: Calculate continuous k ---
     sigma_product = np.outer(sigma_k, sigma_k)
     exp_term = np.exp(-dist_matrix**2 / sigma_product)
-    
     k_continuous = exp_term.sum(axis=1)
 
+    # --- Step 4: Build Graph ---
     G = nx.Graph()
-
     for i, seq in enumerate(sequences):
         G.add_node(i, sequence=seq)
 
@@ -327,9 +316,11 @@ def _reweight_graph_by_simplices(G: nx.Graph,
         
     return G_weighted
 
+
 def create_diffusion_graph(sequences: List[BaseNumpySequence],
                            embeddings: np.ndarray,
                            t: int = 5,
+                           k: int = 5,
                            connectivity_threshold: float = 1e-4,
                            **kwargs) -> nx.Graph:
     """
@@ -347,6 +338,9 @@ def create_diffusion_graph(sequences: List[BaseNumpySequence],
     t : int, default=`5`
         The Markov transition matrix exponent.
     
+    k : int, default=`5`
+        Nearest neighbors to scale the rbf gamma parameter.
+    
     connectivity_threshold : float, default=`1e-04`
         The threshold the define discrete connectivity.
 
@@ -356,14 +350,28 @@ def create_diffusion_graph(sequences: List[BaseNumpySequence],
         The constructed graph with `BaseNumpySequence` features stored
         under `sequence`.
     """
+    k_for_scale = k
+    if embeddings.shape[0] <= k_for_scale:
+        k_for_scale = embeddings.shape[0] - 1
 
-    # Build a Gaussian similarity kernel, gamma based on median dist.
-    distances = euclidean_distances(embeddings, squared=True)
-    gamma = 1.0 / (2 * np.median(distances)**2)
+    nn = NearestNeighbors(n_neighbors=k_for_scale + 1)
+    nn.fit(embeddings)
+    distances, _ = nn.kneighbors(embeddings)
+    
+    # The scale for each point is the distance to its k-th neighbor
+    sigma = distances[:, k_for_scale]
+    median_sigma_sq = np.median(sigma[sigma > 0])**2
+
+    if median_sigma_sq == 0:
+        median_sigma_sq = 1.0
+        
+    gamma = 1.0 / (2 * median_sigma_sq)
     kernel_matrix = rbf_kernel(embeddings, gamma=gamma)
     
     # Create the Markov transition matrix.
     row_sums = kernel_matrix.sum(axis=1, keepdims=True)
+    # Avoid division by zero for isolated points
+    row_sums[row_sums == 0] = 1.0
     transition_matrix = kernel_matrix / row_sums
 
     # Power the matrix for diffusion process.
