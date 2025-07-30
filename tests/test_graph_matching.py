@@ -179,26 +179,26 @@ def simple_landscape_factory():
     """
     def _factory():
         alphabet = AMINO_ACID_ALPHABET
-        alphabet_size = len(alphabet)
         seq_length = 4
-
         seq1_list = np.random.choice(alphabet, seq_length).tolist()
         seq1 = BaseNumpySequence(seq1_list, alphabet=alphabet)
         seq2 = seq1.mutate(positions=[1])
         sequences = [seq1, seq2]
         fitnesses = [0.5, 0.8]
-
         fitness_layers = {
             'default': NumericFitness(name='default', values=[[f] for f in fitnesses])
         }
-        landscape = FitnessLandscape(sequences=sequences, fitness_layers=fitness_layers, graph_type='hamming')
-        
-        landscape = FitnessLandscape(sequences=sequences, fitness_values=fitnesses, graph_type='hamming')
+
+        landscape = FitnessLandscape.from_sequences(
+            sequences=sequences,
+            fitness_layers=fitness_layers,
+            graph_type='hamming'
+        )
         
         for i, node in enumerate(landscape.graph.nodes()):
             landscape.graph.nodes[node]['emb_arr'] = np.random.rand(10)
-            landscape.graph.nodes[node]['ungapped_arr'] = np.random.rand(seq_length, alphabet_size)
-            landscape.graph.nodes[node]['gapped_arr'] = np.random.rand(seq_length, alphabet_size + 1)
+            landscape.graph.nodes[node]['ungapped_arr'] = np.random.rand(seq_length, len(alphabet))
+            landscape.graph.nodes[node]['gapped_arr'] = np.random.rand(seq_length, len(alphabet) + 1)
             
         return landscape
     return _factory

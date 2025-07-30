@@ -20,6 +20,7 @@ from .fitness import (
 from .graph import (
     create_hamming_graph,
     create_knn_graph,
+    create_tda_graph
 )
 
 
@@ -36,5 +37,6 @@ __all__ = [
     'create_knn_graph',
     'NumericFitness',
     'CategoricalFitness',
-    'ProbabilisticCategoricalFitness'
+    'ProbabilisticCategoricalFitness',
+    'create_tda_graph'
 ]

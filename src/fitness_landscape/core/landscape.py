@@ -3,11 +3,11 @@ import networkx as nx
 from typing import List, Union, Dict, Any, Iterable, Literal,  Protocol, runtime_checkable, Hashable
 from dataclasses import dataclass
 from .sequence import BaseNumpySequence, make_sequence
-from .graph import create_hamming_graph
+from .graph import create_cknn_graph, create_diffusion_graph, create_hamming_graph, create_tda_graph
 from .fitness import NumericFitness, CategoricalFitness
 from abc import ABC, abstractmethod
 from .graph import create_knn_graph, create_hamming_graph
-from ..embedding.soft_embedding import ESMEmbedder
+from ..utils import _compute_embeddings_from_sequences
 from .fitness import BaseFitnessLayer
 import inspect
 from collections import defaultdict
@@ -20,59 +20,149 @@ class FitnessLandscape:
     fitness layers, sequences, and their relationships.
 
     Attributes
-    ----------
+    ---------- 
+    sequences : List[BaseNumpySequence]
+        The sequences in the fitness landscape
 
+    graph : nx.Graph
+        The instantianted graph.
+    
+    embeddings : np.ndarray, default=`None`
+        The node embeddings.
+    
+    emb_arr_key.: str, default=`emb_arr`
+        The keyword embeddings are stored under.
     """
     def __init__(self,
                  sequences: List[BaseNumpySequence],
+                 graph: nx.Graph,
                  fitness_layers: Dict[str, BaseFitnessLayer] = None,
-                 *,
-                 graph_type: Literal['hamming', 'knn'] = 'hamming',
-                 graph: nx.Graph = None,
-                 emb_nodes: bool = False,
-                 res_emb_arr_key: str = 'residue_emb_arr',
-                 emb_arr_key: str = 'emb_arr',
-                 **kwargs) -> None:
+                 embeddings: np.ndarray = None,
+                 emb_arr_key: str = 'emb_arr'):
         
-        # Initialize Core Attributes
+        # Initialize Core Attributes with pre-computed objects
         self.sequences = sequences
-        self.fitness_layers = fitness_layers if fitness_layers is not None else {}
         self.graph = graph
-        self.graph_type = graph_type
-        self._res_emb_arr_key = res_emb_arr_key
+        self.fitness_layers = fitness_layers if fitness_layers is not None else {}
+        self.embeddings = embeddings
         self._emb_arr_key = emb_arr_key
 
-        # Determine State and Execute Logic 
-        if self.graph is not None:
-            # Pre-computed graph was provided.
-            self.graph_type = 'precomputed'
-            
-            self._annotate_graph_nodes()
-            # Validate that the provided sequences and layers are consistent with the graph.
-            self._validate_data_against_graph(sequences,
-                                              self.fitness_layers)
-            
-        else:
-            # No graph was provided and must build one.
-            if not self.graph_type:
-                raise ValueError("`graph_type` must be specified if no graph is provided.")
-            
-            # This method builds the graph and annotates its nodes.
-            self.to_graph(**kwargs)
+        # Finalize Setup and Annotate Graph
+        self._annotate_graph_nodes_with_fitness()
+        if self.embeddings is not None:
+            self._annotate_graph_nodes_with_embeddings()
 
-        # Finalise Setup
         self._records = {tuple(seq.to_array()): i for i, seq in enumerate(self.sequences)}
+        self._active_view_name = next(iter(self.fitness_layers.keys())) if self.fitness_layers else None
 
-        if self.fitness_layers:
-            self._active_view_name = next(iter(self.fitness_layers.keys()))
-        else:
-            self._active_view_name = None
 
-        if emb_nodes:
-            self.compute_node_embeddings(**kwargs)
 
-    def _annotate_graph_nodes(self):
-        """Helper function to add all fitness layer data to graph nodes."""
+    @classmethod
+    def from_sequences(cls,
+                       sequences: List[BaseNumpySequence],
+                       fitness_layers: Dict[str, BaseFitnessLayer] = None,
+                       graph_type: Literal['hamming', 'knn', 'tda', 'cknn', 'diffusion'] = 'hamming',
+                       embeddings: np.ndarray = None,
+                       attach_embeddings: bool = True,
+                       **kwargs) -> 'FitnessLandscape':
+        """
+        Primary factory method to create a FitnessLandscape from a list
+        of sequences.
+
+        This method orchestrates the computation of embeddings (if needed)
+        and the construction of the graph based on the specified type.
+        """
+        embedding_based_graphs = {'knn', 'tda', 'cknn', 'diffusion'}
+
+        # Secure Embeddings.
+        if graph_type in embedding_based_graphs:
+            if embeddings is None:
+
+                model_name = kwargs.get('model_name', 'facebook/esm2_t6_8M_UR50D')
+                batch_size = kwargs.get('batch_size', 64)
+                embeddings = _compute_embeddings_from_sequences(
+                    sequences,
+                    model_name=model_name,
+                    batch_size=batch_size
+                )
+        
+        #  Build the Graph 
+        graph_constructors = {
+            'hamming': create_hamming_graph,
+            'knn': create_knn_graph,
+            'tda': create_tda_graph,
+            'cknn': create_cknn_graph,
+            'diffusion': create_diffusion_graph
+        }
+        if graph_type not in graph_constructors:
+            raise ValueError(f"Unsupported graph type for construction: {graph_type}")
+        
+        constructor_kwargs = kwargs
+        if embeddings is not None:
+            constructor_kwargs['embeddings'] = embeddings
+
+        graph = graph_constructors[graph_type](sequences, **constructor_kwargs)
+
+        #Instantiate the class using the simple __init__ 
+        # The `attach_embeddings` flag controls embeddings in final graph.
+        final_embeddings = embeddings if attach_embeddings else None
+        
+        return cls(sequences=sequences,
+                   graph=graph,
+                   fitness_layers=fitness_layers,
+                   embeddings=final_embeddings,
+                   emb_arr_key=kwargs.get('emb_arr_key', 'emb_arr')
+                   )
+
+    @classmethod
+    def from_graph(cls,
+                   graph: nx.Graph, **kwargs) -> 'FitnessLandscape':
+        """
+        Factory method to create a FitnessLandscape from an existing,
+        annotated networkx graph.
+        """
+
+        sequences = []
+        raw_layer_data = defaultdict(list)
+        node_order = list(graph.nodes())
+
+        for node in node_order:
+            data = graph.nodes[node]
+            if 'sequence' not in data:
+                raise ValueError(f"Node {node} is missing 'sequence' attribute.")
+            sequences.append(data['sequence'])
+            
+            for key, value in data.items():
+                if key.startswith('fitness_'):
+                    layer_name = key.replace('fitness_', '', 1)
+                    raw_layer_data[layer_name].append(value)
+        
+        fitness_layers = {}
+        for name, values in raw_layer_data.items():
+
+            is_numeric = isinstance(values[0], (list, float, int, np.number))
+            if is_numeric:
+                numeric_values = [v if isinstance(v, list) else [v] for v in values]
+                fitness_layers[name] = NumericFitness(name=name, values=numeric_values)
+            else:
+                all_categories = sorted(list(set(values)))
+                fitness_layers[name] = CategoricalFitness(name=name, values=values, categories=all_categories)
+        
+        # Pop irrelevant keywords.
+        kwargs.pop('graph_type', None)
+        kwargs.pop('emb_nodes', None)
+        
+        # Call the simple constructor
+        return cls(sequences=sequences,
+                   graph=graph,
+                   fitness_layers=fitness_layers,
+                   **kwargs)
+    
+    # Annotation methods.
+    def _annotate_graph_nodes_with_fitness(self):
+        """
+        Helper function to add all fitness layer data to graph nodes.
+        """
         if not self.graph or not self.fitness_layers:
             return
             
@@ -87,122 +177,16 @@ class FitnessLandscape:
                 attribute_name = f"fitness_{name}"
                 self.graph.nodes[node_idx][attribute_name] = layer.get_value(i)
 
-    @property
-    def active_layer(self) -> BaseFitnessLayer:
+    def _annotate_graph_nodes_with_embeddings(self):
         """
-        Dynamic property to get the active fitness layer.
+        Helper to attach the stored embeddings to the graph nodes.
         """
-        if self._active_view_name is None:
-            raise ValueError("No active fitness layer. Use .view(layer_name) to set one.")
-        return self.fitness_layers[self._active_view_name]
-    
-    def view(self, name: str) -> BaseFitnessLayer:
-        """
-        Retrieves a fitness layer and sets it as the new active view.
-        """
-        if name not in self.fitness_layers:
-            raise KeyError(f"Fitness layer '{name}' not found.")
-        self._active_view_name = name
-        return self.fitness_layers[name]
-    
-    def to_graph(self,
-                 **kwargs) -> None:
-        """
-        Method to construct a networkx graph from the sequences and
-        fitness layers. Symmetrical with the `from_graph` method.
-        """
-        if self.graph_type == 'hamming':
-            self.graph = create_hamming_graph(self.sequences, **kwargs)
-        elif self.graph_type == 'knn':
-            self.graph = create_knn_graph(self.sequences, **kwargs)
-        else:
-            raise ValueError(f"Unsupported graph type for construction: {self.graph_type}")
+        if self.graph is None or self.embeddings is None:
+            return
+        attrs = {i: {self._emb_arr_key: self.embeddings[i]} for i in self.graph.nodes()}
+        nx.set_node_attributes(self.graph, attrs)
 
-        seq_to_node_map = {tuple(data['sequence'].to_array()): node_idx
-                           for node_idx, data in self.graph.nodes(data=True)}
-
-        for i, seq in enumerate(self.sequences):
-            node_idx = seq_to_node_map.get(tuple(seq.to_array()))
-            if node_idx is None: continue
-
-            for name, layer in self.fitness_layers.items():
-                attribute_name = f"fitness_{name}"
-                # get_value() retrieves the native data (e.g., list of floats, or a string)
-                self.graph.nodes[node_idx][attribute_name] = layer.get_value(i)
-    
-    @classmethod
-    def from_graph(cls,
-                   graph: nx.Graph,
-                   layer_type_map: Dict[str, str] = None,
-                   **kwargs) -> 'FitnessLandscape':
-        """
-        Creates a FitnessLandscape instance from a networkx graph.
-
-        This method automatically detects fitness data stored in node 
-        attributes that are prefixed with `fitness_`. It constructs
-        the appropriate `FitnessLayer` objects for each detected
-        attribute.
-
-        Parameters
-        ----------
-        graph : nx.Graph
-            The input graph. Nodes must have a 'sequence' attribute and
-            none or more 'fitness_*' attributes.
-        
-        layer_type_map : Dict[str, str], optional
-             A map to manually specify the type ('numeric' or
-             'categorical') for ambiguous layers.
-
-        Returns
-        -------
-        FitnessLandscape 
-            A new landscape instance.
-        """
-        sequences = []
-        # Use defaultdict to easily collect values for each layer
-        raw_layer_data = defaultdict(list)
-        
-        # Ensure a consistent node order
-        node_order = list(graph.nodes())
-
-        for node in node_order:
-            data = graph.nodes[node]
-            if 'sequence' not in data:
-                raise ValueError(f"Node {node} is missing the required 'sequence' attribute.")
-            
-            sequences.append(data['sequence'])
-            
-            for key, value in data.items():
-                if key.startswith('fitness_'):
-                    layer_name = key.replace('fitness_', '', 1)
-                    raw_layer_data[layer_name].append(value)
-        
-        # Create FitnessLayer objects from the parsed data.
-        fitness_layers = {}
-        for name, values in raw_layer_data.items():
-            
-            # Infer the layer type based on the data
-            inferred_type = 'numeric' if isinstance(values[0], (list, float, int)) else 'categorical'
-            
-            # Allow user to override inferred type
-            layer_type = layer_type_map.get(name, inferred_type) if layer_type_map else inferred_type
-
-            if layer_type == 'numeric':
-
-                # Ensure all values are lists for NumericFitness
-                numeric_values = [v if isinstance(v, list) else [v] for v in values]
-                fitness_layers[name] = NumericFitness(name=name, values=numeric_values)
-            
-            elif layer_type == 'categorical':
-                # For CategoricalFitness, we can infer all possible categories
-                all_categories = sorted(list(set(values)))
-                fitness_layers[name] = CategoricalFitness(name=name, values=values, categories=all_categories)
-        
-        # Call the main constructor with the prepared data
-        return cls(sequences, fitness_layers, graph=graph, graph_type=None, **kwargs)
-    
-    #TODO: Add to_graph_tensor() method.
-    
+    # Validation method.
     def _validate_data_against_graph(self,
                                      sequences: List[BaseNumpySequence],
                                      fitness_layers: Dict[str, BaseFitnessLayer]):
@@ -278,42 +262,76 @@ class FitnessLandscape:
                         f"match the graph attribute value ({graph_value})."
                     )
 
-    def compute_node_embeddings(self,
-                                model_name: str = 'facebook/esm2_t6_8M_UR50D',
-                                batch_size: int = 64) -> None:
+    @property
+    def active_layer(self) -> BaseFitnessLayer:
         """
-        Method to get node embeddings from soft sequence OHE. Inplace
-        node attribute updates.
-
-        Parameters
-        ----------
-        model_name : str, optional
-            Name of the ESM model to use for embeddings. If not provided,
-            defaults to 'esm2_t33_650M_UR50D'.
-        batch_size : int, optional
-            Batch size for embedding computation. If not provided,
-            defaults to 64.
+        Dynamic property to get the active fitness layer.
         """
-
-        if not hasattr(self, 'emb_model'):
-            
-            self.emb_model = ESMEmbedder(model_name=model_name)
-
-        ohe_arr = np.stack([node[1]['ungapped_arr'] for node in self.graph.nodes(data=True)])
-
-        emb_arr = self.emb_model.embed_relaxed_seqs(relaxed_seqs=ohe_arr,
-                                                batch_size=batch_size)
+        if self._active_view_name is None:
+            raise ValueError("No active fitness layer. Use .view(layer_name) to set one.")
+        return self.fitness_layers[self._active_view_name]
+    
+    
+    def to_graph(self,
+                 **kwargs) -> None:
+        """
+        Method to construct a networkx graph from the sequences and
+        fitness layers. Symmetrical with the `from_graph` method.
+        """
+        if self.graph_type in self._embedding_based_graphs and self.embeddings is None:
+            raise ValueError('Node embeddings not computed.')
         
-        # Iterate through nodes and update data attributes.
-        for node_identifier, embedding_array in zip(self.graph.nodes(), emb_arr):
-            # Update attribute in the node data.
-            
-            # Store residue-wise embeddings.
-            self.graph.nodes[node_identifier][self._res_emb_arr_key] = embedding_array
-            
-            # Pool and store sequence-wise embeddings.
-            pooled_array = np.mean(embedding_array, axis=0)
-            self.graph.nodes[node_identifier][self._emb_arr_key] = pooled_array
+        if self.graph_type == 'hamming':
+            self.graph = create_hamming_graph(self.sequences,
+                                              weight_by_fitness=kwargs.get('weight_by_fitness', False))
+        
+        elif self.graph_type == '_knn':
+            self.graph = create_knn_graph(self.sequences, 
+                                          k=kwargs.get('k', int(np.sqrt(len(self.sequences)))),
+                                          metric=kwargs.get('metric', 'hamming'),
+                                          weight_by_distance=kwargs.get('weight_by_distance', True))
+        elif self.graph_type == 'cknn':
+            self.graph = create_cknn_graph(self.sequences,
+                                           embeddings=self.embeddings,
+                                           k=kwargs.get('k', 3))
+        
+        elif self.graph_type == 'diffusion':
+            self.graph = create_diffusion_graph(self.sequences, 
+                                                embeddings=self.embeddings,
+                                                t=kwargs.get('t', 5),
+                                                connectivity_threshold=kwargs.get('connectivity_threshold', 0.0001))
+        
+        elif self.graph_type == 'tda':
+            self.graph = create_tda_graph(self.sequences,
+                                          embeddings=self.embeddings,
+                                          n_components=kwargs.get('n_components', 3),
+                                          reweight_simplex_edges=kwargs.get('reweight_simplex_edges', False))
+        
+        else:
+            raise ValueError(f"Unsupported graph type for construction: {self.graph_type}")
+
+        seq_to_node_map = {tuple(data['sequence'].to_array()): node_idx
+                           for node_idx, data in self.graph.nodes(data=True)}
+
+        for i, seq in enumerate(self.sequences):
+            node_idx = seq_to_node_map.get(tuple(seq.to_array()))
+            if node_idx is None: continue
+
+            for name, layer in self.fitness_layers.items():
+                attribute_name = f"fitness_{name}"
+                # get_value() retrieves the native data (e.g., list of floats, or a string)
+                self.graph.nodes[node_idx][attribute_name] = layer.get_value(i)
+    
+    #Fitness layer appending, modifying and viewing methods.
+
+    def view(self, name: str) -> BaseFitnessLayer:
+        """
+        Retrieves a fitness layer and sets it as the new active view.
+        """
+        if name not in self.fitness_layers:
+            raise KeyError(f"Fitness layer '{name}' not found.")
+        self._active_view_name = name
+        return self.fitness_layers[name]
 
     def attach(self,
                layer: BaseFitnessLayer) -> None:
@@ -386,7 +404,7 @@ class FitnessLandscape:
                 # No layers left
                 self._active_view_name = None
 
-    
+
     # Legacy methods for compatibility with old code.
     def get_fitness(self, sequence: BaseNumpySequence) -> float:
         """
