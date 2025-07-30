@@ -429,30 +429,16 @@ class FitnessLandscape:
             - Additional attributes corresponding to each fitness
             layer, named after the layer.
         """
-        if not self.graph:
-            raise ValueError("Cannot export to PyG Data without a graph. "
-                             "Please construct the graph first.")
-
-        # Convert the networkx graph to a PyG Data object. This will
-        # handle the edge_index and edge_attr.
+        if not self.graph: raise ValueError("Graph not constructed.")
         pyg_data = from_networkx(self.graph)
-
-        # 1. Set the primary node features (x)
         if self.embeddings is not None:
             pyg_data.x = torch.tensor(self.embeddings, dtype=torch.float32)
         else:
-            # Fallback to one-hot encoded sequences if embeddings are not available
-            one_hot_sequences = [seq.to_one_hot() for seq in self.sequences]
-            pyg_data.x = torch.tensor(np.array(one_hot_sequences),
-                                      dtype=torch.float32)
-
-        # 2. Attach each fitness layer as a separate attribute
-        for layer_name, layer in self.fitness_layers.items():
-            setattr(pyg_data, layer_name, layer.get_tensor())
-
-        # Ensure the number of nodes is set correctly
+            x_tensor = torch.tensor(np.array([s.to_one_hot() for s in self.sequences]), dtype=torch.float32)
+            pyg_data.x = x_tensor.view(len(self.sequences), -1)
+        for name, layer in self.fitness_layers.items():
+            setattr(pyg_data, name, layer.get_tensor())
         pyg_data.num_nodes = self.graph.number_of_nodes()
-
         return pyg_data
 
     def to_sequence_tensors(self,
@@ -487,44 +473,22 @@ class FitnessLandscape:
             for that sequence.
         """
         target_indices = []
-
         if sequence_idx is not None:
-            if isinstance(sequence_idx, int):
-                target_indices = [sequence_idx]
-            else:
-                target_indices = sequence_idx
+            target_indices = [sequence_idx] if isinstance(sequence_idx, int) else sequence_idx
         elif sequence is not None:
-            if isinstance(sequence, str):
-                sequence_list = [sequence]
-            else:
-                sequence_list = sequence
-            
+            sequence_list = [sequence] if isinstance(sequence, str) else sequence
+            dtype = self.sequences[0].to_array().dtype
             for seq_str in sequence_list:
-                seq_tuple = tuple(np.array(list(seq_str), dtype=object))
+                seq_tuple = tuple(np.array(list(seq_str)).astype(dtype))
                 idx = self._records.get(seq_tuple)
-                if idx is not None:
-                    target_indices.append(idx)
-                else:
-                    raise ValueError(f"Sequence '{seq_str}' not found in landscape.")
+                if idx is not None: target_indices.append(idx)
+                else: raise ValueError(f"Sequence '{seq_str}' not found.")
         else:
-            # Default to all sequences if no specific indices or sequences are provided
             target_indices = range(len(self.sequences))
-
-        dataset = []
-        for i in target_indices:
-            seq = self.sequences[i]
-            fitness_tensors = {
-                name: layer.get_tensor()[i]
-                for name, layer in self.fitness_layers.items()
-            }
-            
-            dataset.append({
-                'sequence_tensor': torch.tensor(seq.to_one_hot(),
-                                                dtype=torch.float32),
-                'fitness_tensors': fitness_tensors
-            })
-            
-        return dataset
+        
+        return [{'sequence_tensor': torch.tensor(self.sequences[i].to_one_hot(), dtype=torch.float32),
+                 'fitness_tensors': {name: layer.get_tensor()[i] for name, layer in self.fitness_layers.items()}}
+                for i in target_indices]
 
 
     # Legacy methods for compatibility with old code.

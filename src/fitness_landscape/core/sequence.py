@@ -460,11 +460,13 @@ def generate_sequences(length: int,
     if length == 0:
         return []
     if length == 1:
-        return [BaseNumpySequence([s]) for s in alphabet]
+
+        return [BaseNumpySequence([s], alphabet=alphabet) for s in alphabet]
     sequences = []
     for s in alphabet:
         for sub_sequence in generate_sequences(length - 1, alphabet):
-            sequences.append(BaseNumpySequence([s] + sub_sequence.to_array().tolist()))
+            # Pass the alphabet to the constructor
+            sequences.append(BaseNumpySequence([s] + sub_sequence.to_array().tolist(), alphabet=alphabet))
     return sequences
 
 # TODO: Functional code to convert BaseNumpySequence class to Binary or multiallelic.
