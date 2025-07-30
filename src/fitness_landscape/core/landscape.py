@@ -1,5 +1,8 @@
 import numpy as np
 import networkx as nx
+import torch
+from torch_geometric.data import Data
+from torch_geometric.utils import from_networkx
 from typing import List, Union, Dict, Any, Iterable, Literal,  Protocol, runtime_checkable, Hashable
 from dataclasses import dataclass
 from .sequence import BaseNumpySequence, make_sequence
@@ -403,6 +406,125 @@ class FitnessLandscape:
             else:
                 # No layers left
                 self._active_view_name = None
+
+
+    def to_graph_tensor(self) -> 'Data':
+        """
+        Exports the entire fitness landscape to a PyTorch Geometric
+        Data object.
+
+        This method converts the landscape's graph structure, node
+        features (from embeddings or sequences), and all associated
+        fitness layers into a format suitable for graph machine
+        learning with PyTorch Geometric.
+
+        Returns
+        -------
+        torch_geometric.data.Data
+            A PyG Data object with the following attributes:
+            - x: Node features (embeddings or one-hot encoded
+            sequences).
+            - edge_index: Graph connectivity in COO format.
+            - edge_attr: Edge weights, if they exist.
+            - Additional attributes corresponding to each fitness
+            layer, named after the layer.
+        """
+        if not self.graph:
+            raise ValueError("Cannot export to PyG Data without a graph. "
+                             "Please construct the graph first.")
+
+        # Convert the networkx graph to a PyG Data object. This will
+        # handle the edge_index and edge_attr.
+        pyg_data = from_networkx(self.graph)
+
+        # 1. Set the primary node features (x)
+        if self.embeddings is not None:
+            pyg_data.x = torch.tensor(self.embeddings, dtype=torch.float32)
+        else:
+            # Fallback to one-hot encoded sequences if embeddings are not available
+            one_hot_sequences = [seq.to_one_hot() for seq in self.sequences]
+            pyg_data.x = torch.tensor(np.array(one_hot_sequences),
+                                      dtype=torch.float32)
+
+        # 2. Attach each fitness layer as a separate attribute
+        for layer_name, layer in self.fitness_layers.items():
+            setattr(pyg_data, layer_name, layer.get_tensor())
+
+        # Ensure the number of nodes is set correctly
+        pyg_data.num_nodes = self.graph.number_of_nodes()
+
+        return pyg_data
+
+    def to_sequence_tensors(self,
+                            *,
+                            sequence_idx: Union[List[int], int] = None,
+                            sequence: Union[List[str], str] = None) -> List[Dict[str, Any]]:
+        """
+        Exports the sequences and their fitness layers as a list of
+        dictionaries containing tensors. Supports indexing by sequence
+        and by int.
+
+        Parameters
+        ----------
+        sequence_idx : List or int, default=`None`
+            Indices of sequences to export as tensors. If `None`, all
+            sequences are exported.
+        
+        sequence : List of str, default=`None`
+            Sequence to export as tensors. If `None`, all sequences
+            are exported.
+
+        Returns
+        -------
+        List[Dict[str, Any]]
+            A list where each item is a dictionary representing a
+            single sequence and its associated data. Each dictionary
+            has the keys:
+            - 'sequence_tensor': The one-hot encoded sequence or
+            embedding.
+            - 'fitness_tensors': A dictionary where keys are layer
+            names and values are the corresponding fitness tensors
+            for that sequence.
+        """
+        target_indices = []
+
+        if sequence_idx is not None:
+            if isinstance(sequence_idx, int):
+                target_indices = [sequence_idx]
+            else:
+                target_indices = sequence_idx
+        elif sequence is not None:
+            if isinstance(sequence, str):
+                sequence_list = [sequence]
+            else:
+                sequence_list = sequence
+            
+            for seq_str in sequence_list:
+                seq_tuple = tuple(np.array(list(seq_str), dtype=object))
+                idx = self._records.get(seq_tuple)
+                if idx is not None:
+                    target_indices.append(idx)
+                else:
+                    raise ValueError(f"Sequence '{seq_str}' not found in landscape.")
+        else:
+            # Default to all sequences if no specific indices or sequences are provided
+            target_indices = range(len(self.sequences))
+
+        dataset = []
+        for i in target_indices:
+            seq = self.sequences[i]
+            fitness_tensors = {
+                name: layer.get_tensor()[i]
+                for name, layer in self.fitness_layers.items()
+            }
+            
+            dataset.append({
+                'sequence_tensor': torch.tensor(seq.to_one_hot(),
+                                                dtype=torch.float32),
+                'fitness_tensors': fitness_tensors
+            })
+            
+        return dataset
 
 
     # Legacy methods for compatibility with old code.

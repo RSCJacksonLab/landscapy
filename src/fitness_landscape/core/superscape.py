@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, field_validator, ValidationError, ConfigDict
-from typing import Union, List, Literal, Iterable
+from typing import Union, List, Literal, Iterable, Dict, Any
 import numpy as np
 from ..core.landscape import FitnessLandscape
 from ..core.sequence import BaseNumpySequence, SoftSequence
@@ -301,6 +301,74 @@ class FitnessSuperscape:
                 G = nx.Graph(G)
             out.append(G)
         return out
+    
+    # Delegate tensor methods to latent graph FitnessLandscape class.
+    def to_graph_tensor(self) -> 'Data':
+        """
+        Exports the entire fitness landscape to a PyTorch Geometric
+        Data object.
+
+        This method converts the landscape's graph structure, node
+        features (from embeddings or sequences), and all associated
+        fitness layers into a format suitable for graph machine
+        learning with PyTorch Geometric.
+
+        Returns
+        -------
+        torch_geometric.data.Data
+            A PyG Data object with the following attributes:
+            - x: Node features (embeddings or one-hot encoded
+            sequences).
+            - edge_index: Graph connectivity in COO format.
+            - edge_attr: Edge weights, if they exist.
+            - Additional attributes corresponding to each fitness
+            layer, named after the layer.
+        """
+        if not hasattr(self, 'latent_landscape'):
+            raise RuntimeError("The latent landscape has not been constructed yet. "
+                             "Run `construct_latent_landscape()` first.")
+        
+        return self.latent_landscape.to_graph_tensor()
+
+    def to_sequence_tensors(self,
+                            *,
+                            sequence_idx: Union[List[int], int] = None,
+                            sequence: Union[List[str], str] = None) -> List[Dict[str, Any]]:
+        """
+        Exports the sequences and their fitness layers as a list of
+        dictionaries containing tensors. Supports indexing by sequence
+        and by int.
+
+        Parameters
+        ----------
+        sequence_idx : List or int, default=`None`
+            Indices of sequences to export as tensors. If `None`, all
+            sequences are exported.
+        
+        sequence : List of str, default=`None`
+            Sequence to export as tensors. If `None`, all sequences
+            are exported.
+
+        Returns
+        -------
+        List[Dict[str, Any]]
+            A list where each item is a dictionary representing a
+            single sequence and its associated data. Each dictionary
+            has the keys:
+            - 'sequence_tensor': The one-hot encoded sequence or
+            embedding.
+            - 'fitness_tensors': A dictionary where keys are layer
+            names and values are the corresponding fitness tensors
+            for that sequence.
+        """
+        if not hasattr(self, 'latent_landscape'):
+            raise RuntimeError("The latent landscape has not been constructed yet. "
+                             "Run `construct_latent_landscape()` first.")
+            
+        return self.latent_landscape.to_sequence_tensors(
+            sequence_idx=sequence_idx,
+            sequence=sequence
+        )
     
     def save(self, filepath: str):
         """Saves the FitnessSuperscape object to a file."""
