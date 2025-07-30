@@ -5,6 +5,8 @@ from fitness_landscape.core.sequence import *
 from fitness_landscape.core.graph import *
 from fitness_landscape.core.landscape import FitnessLandscape
 from fitness_landscape.core.fitness import NumericFitness, CategoricalFitness
+import torch
+from torch_geometric.data import Data
 
 @pytest.fixture
 def basic_landscape():
@@ -257,3 +259,82 @@ def test_create_diffusion_graph_structure(clustered_data):
     # For diffusion maps, we also expect the intra-cluster connection to be very strong
     assert nx.is_connected(subgraph_c1)
     assert nx.is_connected(subgraph_c2)
+
+def test_to_pyg_data_export(basic_landscape):
+    """
+    Tests that the landscape can be correctly exported to a PyTorch
+    Geometric Data object.
+    """
+    try:
+        pyg_data = basic_landscape.to_graph_tensor()
+    except (ImportError, NameError):
+        pytest.skip("torch or torch_geometric not installed.")
+
+    assert isinstance(pyg_data, Data)
+    assert hasattr(pyg_data, 'x')
+    assert hasattr(pyg_data, 'edge_index')
+    
+    num_nodes = basic_landscape.graph.number_of_nodes()
+    seq_len = len(basic_landscape.sequences[0])
+    alphabet_size = len(basic_landscape.sequences[0].alphabet)
+    expected_feature_shape = (num_nodes, seq_len * alphabet_size)
+    assert pyg_data.x.shape == expected_feature_shape
+    
+    assert hasattr(pyg_data, 'default')
+    assert pyg_data.default.shape[0] == num_nodes
+
+def test_to_sequence_tensors_full_export(basic_landscape):
+    """
+    Tests the export of all sequences to a list of tensor dictionaries.
+    """
+    try:
+        dataset = basic_landscape.to_sequence_tensors()
+    except (ImportError, NameError):
+        pytest.skip("torch not installed.")
+
+    assert isinstance(dataset, list)
+    assert len(dataset) == len(basic_landscape.sequences)
+    
+    first_item = dataset[0]
+    assert 'sequence_tensor' in first_item
+    assert 'fitness_tensors' in first_item
+    assert 'default' in first_item['fitness_tensors']
+    assert isinstance(first_item['sequence_tensor'], torch.Tensor)
+
+def test_to_sequence_tensors_indexed_export(basic_landscape):
+    """
+    Tests the export of a single sequence by its index.
+    """
+    try:
+        dataset = basic_landscape.to_sequence_tensors(sequence_idx=3)
+    except (ImportError, NameError):
+        pytest.skip("torch not installed.")
+
+    assert isinstance(dataset, list)
+    assert len(dataset) == 1
+    
+    original_seq_ohe = basic_landscape.sequences[3].to_one_hot()
+    assert torch.allclose(dataset[0]['sequence_tensor'],
+                          torch.tensor(original_seq_ohe, dtype=torch.float32))
+
+    original_fitness = basic_landscape.view('default').get_tensor()[3]
+    assert torch.allclose(dataset[0]['fitness_tensors']['default'],
+                          original_fitness)
+
+def test_to_sequence_tensors_sequence_string_export(basic_landscape):
+    """
+    Tests the export of a single sequence by its string representation.
+    """
+    target_sequence_obj = basic_landscape.sequences[5]
+    target_sequence_str = "".join(map(str, target_sequence_obj.to_array()))
+
+    try:
+        dataset = basic_landscape.to_sequence_tensors(sequence=target_sequence_str)
+    except (ImportError, NameError):
+        pytest.skip("torch not installed.")
+
+    assert len(dataset) == 1
+    
+    original_seq_ohe = target_sequence_obj.to_one_hot()
+    assert torch.allclose(dataset[0]['sequence_tensor'],
+                          torch.tensor(original_seq_ohe, dtype=torch.float32))
