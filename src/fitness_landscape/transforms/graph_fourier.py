@@ -47,7 +47,7 @@ def graph_fourier_transform(graph: Union[nx.Graph, FitnessLandscape],
     if backend == 'numpy':
         return _graph_fourier_transform_numpy(graph, signal, k)
     elif backend == 'torch':
-        return _graph_fourier_transform_torch(graph, signal, k)
+        return _graph_fourier_transform_torch(graph, signal)
     else:
         raise ValueError(f"Unsupported backend: {backend}")
 

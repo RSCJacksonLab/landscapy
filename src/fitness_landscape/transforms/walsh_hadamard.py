@@ -286,44 +286,48 @@ def _inverse_walsh_transform_torch(coefficients: Union[torch.Tensor, np.ndarray]
     # Convert to PyTorch tensor
     if isinstance(coefficients, np.ndarray):
         coefficients = torch.tensor(coefficients, dtype=torch.float32)
-    
+
     if sequences is None:
         # Determine sequence length from coefficients
         seq_length = int(torch.log2(torch.tensor(len(coefficients))))
-        
+
         # Generate all possible binary sequences
-        sequences = generate_sequences(seq_length, [0, 1], strategy='complete')
-        sequences = torch.tensor([seq.to_array() for seq in sequences], dtype=torch.float32)
+        sequences = generate_sequences(seq_length, [0, 1])
+        # Convert to a single NumPy array before creating the tensor
+        sequence_data = np.array([seq.to_array() for seq in sequences])
+        sequences = torch.tensor(sequence_data, dtype=torch.float32)
     else:
         # Convert sequences to torch tensor if needed
         if isinstance(sequences[0], BaseNumpySequence):
-            sequences = torch.tensor([seq.to_array() for seq in sequences], dtype=torch.float32)
+            # The efficient way: create a NumPy array first
+            sequence_data = np.array([seq.to_array() for seq in sequences])
+            sequences = torch.tensor(sequence_data, dtype=torch.float32)
         else:
             sequences = torch.tensor(sequences, dtype=torch.float32)
-    
+
     n_sequences, seq_length = sequences.shape
-    
+
     # Initialize fitness values
     fitness_values = torch.zeros(n_sequences)
-    
+
     # Compute fitness values using inverse Walsh transform
     for i in range(n_sequences):
         seq = sequences[i]
-        
+
         # Compute fitness as sum of coefficients * basis functions
         for mask in range(len(coefficients)):
             # Convert mask to binary
             mask_bits = [(mask >> j) & 1 for j in range(seq_length)]
-            
+
             # Compute Walsh basis function
             walsh_basis = torch.tensor(1.0)
             for j in range(seq_length):
                 if mask_bits[j] == 1:
                     walsh_basis *= (-1)**seq[j].item()
-            
+
             # Update fitness
             fitness_values[i] += coefficients[mask] * walsh_basis
-    
+
     return fitness_values
 
 

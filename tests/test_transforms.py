@@ -72,3 +72,48 @@ def test_graph_fourier_transform_reconstruction():
     reconstructed_signal = inverse_graph_fourier_transform(eigenvectors, coefficients)
     
     assert np.allclose(signal, reconstructed_signal, atol=1e-9)
+
+def test_walsh_transform_torch():
+    """Tests Walsh transform with torch backend."""
+    landscape = create_nk_binary_landscape(N=4, K=1, seed=42)
+    coeffs = walsh_transform(landscape, backend='torch')
+    assert coeffs is not None
+
+def test_inverse_walsh_transform_torch():
+    """Tests inverse Walsh transform with torch backend."""
+    landscape = create_nk_binary_landscape(N=4, K=1, seed=42)
+    fitness_signal = landscape.get_signal()
+    coeffs = walsh_transform(landscape, backend='torch')
+    reconstructed_signal = inverse_walsh_transform(coeffs, sequences=landscape.sequences, backend='torch')
+    assert np.allclose(fitness_signal, reconstructed_signal.numpy())
+
+# New tests for graph_fourier.py
+def test_graph_fourier_transform_torch():
+    """Tests GFT with torch backend."""
+    graph = nx.cycle_graph(8)
+    signal = np.sin(np.linspace(0, 2 * np.pi, 8, endpoint=False))
+    for i, node in enumerate(graph.nodes()):
+        graph.nodes[node]['sequence'] = BaseNumpySequence([i])
+        graph.nodes[node]['fitness_default'] = signal[i]
+        graph.nodes[node]['gapped_arr'] = np.zeros((1, 21))
+        graph.nodes[node]['ungapped_arr'] = np.zeros((1, 20))
+
+    landscape = FitnessLandscape.from_graph(graph, emb_nodes=False)
+    eigenvectors, _, coefficients = graph_fourier_transform(landscape, backend='torch')
+    assert eigenvectors is not None
+    assert coefficients is not None
+
+def test_inverse_graph_fourier_transform_torch():
+    """Tests inverse GFT with torch backend."""
+    graph = nx.cycle_graph(8)
+    signal = np.sin(np.linspace(0, 2 * np.pi, 8, endpoint=False))
+    for i, node in enumerate(graph.nodes()):
+        graph.nodes[node]['sequence'] = BaseNumpySequence([i])
+        graph.nodes[node]['fitness_default'] = signal[i]
+        graph.nodes[node]['gapped_arr'] = np.zeros((1, 21))
+        graph.nodes[node]['ungapped_arr'] = np.zeros((1, 20))
+
+    landscape = FitnessLandscape.from_graph(graph, emb_nodes=False)
+    eigenvectors, _, coefficients = graph_fourier_transform(landscape, backend='torch')
+    reconstructed_signal = inverse_graph_fourier_transform(eigenvectors, coefficients, backend='torch')
+    assert np.allclose(signal, reconstructed_signal.numpy(), atol=1e-6)
