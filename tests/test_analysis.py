@@ -261,31 +261,14 @@ def test_total_dirichlet_energy_equals_eigenvalue(elementary_landscape):
     """
     Tests that the total Dirichlet energy of an elementary landscape equals its
     defining eigenvalue.
-    
-    Theory: For a fitness signal f = v_j (the j-th eigenvector of the Laplacian L),
-    the Dirichlet energy E = f'Lf = v_j'Lv_j = v_j'(λ_j*v_j) = λ_j * ||v_j||^2.
-    Since eigenvectors are normalized (||v_j||^2 = 1), E = λ_j.
-    The function normalizes by N, so we test against E / N.
     """
     landscape, j = elementary_landscape
-    
-    # 1. Calculate the Dirichlet energy using the function to be tested.
-    # Note: The function normalizes by N, so we get E/N.
     energy_results = calculate_ruggedness_dirichlet_energy(landscape)
     calculated_energy_per_node = energy_results['total_dirichlet_energy']
-
-    # 2. Get the true eigenvalues from a separate decomposition.
     eigenvalues, _ = eigenmode_decomposition(landscape.graph, matrix='laplacian')
-    
-    # Eigenvalues are sorted in ascending order by default in many libraries,
-    # but let's sort them to be sure.
     eigenvalues.sort()
     true_eigenvalue = eigenvalues[j]
-    
-    # 3. The total energy is E = λ_j. The function returns E / N.
     expected_energy_per_node = true_eigenvalue / len(landscape.sequences)
-
-    # 4. Assert that the calculated energy matches the theoretical expectation.
     assert np.isclose(calculated_energy_per_node, expected_energy_per_node)
 
 def test_sum_of_local_contributions_equals_total_energy(elementary_landscape):
