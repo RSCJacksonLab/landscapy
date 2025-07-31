@@ -126,26 +126,30 @@ def _eigenmode_decomposition_torch(eig_mat: Union[np.ndarray, torch.Tensor],
     eigenvectors : np.ndarray or torch.Tensor
         The eig_mat eigenvectors.
     """
-    if isinstance(eig_mat, np.ndarray):    
-
-        # Convert to dense matrix for eigendecomposition
-        mat_dense = eig_mat.todense()
+    if isinstance(eig_mat, torch.Tensor):
+        mat_tensor = eig_mat.float()
+    else:
+        # Handle both sparse and dense numpy arrays
+        if hasattr(eig_mat, "todense"):
+            mat_dense = eig_mat.todense()
+        else:
+            mat_dense = np.asarray(eig_mat)
         # Convert to PyTorch tensor
         mat_tensor = torch.tensor(mat_dense, dtype=torch.float32)
-    
+
     # Compute eigendecomposition
     eigenvalues, eigenvectors = torch.linalg.eigh(mat_tensor)
-    
+
     # Sort eigenvalues and eigenvectors in descending order
     idx = torch.argsort(eigenvalues, descending=True)
     eigenvalues = eigenvalues[idx]
     eigenvectors = eigenvectors[:, idx]
-    
+
     # Limit to k eigenvectors if specified
     if k is not None:
         eigenvalues = eigenvalues[:k]
         eigenvectors = eigenvectors[:, :k]
-    
+
     if not return_torch:
 
         eigenvalues = eigenvalues.numpy()
@@ -215,7 +219,7 @@ def _reconstruct_from_eigenmodes_numpy(eigenvectors: np.ndarray,
 
 def _reconstruct_from_eigenmodes_torch(eigenvectors: Union[np.ndarray, torch.Tensor],
                                        coefficients: Union[np.ndarray, torch.Tensor],
-                                       return_torch: bool = False) -> Union[np.ndarray, torch.Tensor]:
+                                       return_torch: bool = True) -> Union[np.ndarray, torch.Tensor]:
     """
     Helper function to reconstruct a matrix from eigenvectors and
     eigenvectors using the torch backend.

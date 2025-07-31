@@ -767,3 +767,38 @@ def test_compute_betti_curves(homology_landscape):
     assert 1 in betti_curves
     assert 2 in betti_curves
     assert len(betti_curves[0]) == len(filtration_range)
+
+def test_eigenmode_decomposition_torch():
+    """Tests eigenmode decomposition with torch backend."""
+    graph = nx.path_graph(4)
+    eigenvalues, eigenvectors = eigenmode_decomposition(graph, matrix='laplacian', backend='torch')
+    assert eigenvalues is not None
+    assert eigenvectors is not None
+
+def test_reconstruct_from_eigenmodes_torch():
+    """Tests reconstruction from eigenmodes with torch backend."""
+    graph = nx.path_graph(4)
+    L = nx.laplacian_matrix(graph).toarray()
+    eigenvalues, eigenvectors = eigenmode_decomposition(graph, matrix='laplacian', backend='torch')
+    reconstructed_L = reconstruct_from_eigenmodes(eigenvectors, eigenvalues, backend='torch')
+    assert np.allclose(L, reconstructed_L.numpy(), atol=1e-6)
+
+def test_graph_spectral_analysis(additive_landscape):
+    """Tests graph spectral analysis."""
+    results = graph_spectral_analysis(additive_landscape, matrix='laplacian')
+    assert 'eigenvalues' in results
+    assert 'participation_ratios' in results
+    assert 'localization' in results
+    assert 'node_centralities' in results
+
+# New tests for dirichlet_energy.py
+def test_calculate_ruggedness_dirichlet_energy_weighted(additive_landscape):
+    """Tests Dirichlet energy with a weighted Laplacian."""
+    results = calculate_ruggedness_dirichlet_energy(additive_landscape, weighted_laplacian=True)
+    assert 'total_dirichlet_energy' in results
+
+def test_local_dirichlet_energy_contribution(additive_landscape):
+    """Tests local Dirichlet energy contribution."""
+    local_energies = local_dirichlet_energy_contribution(additive_landscape)
+    assert len(local_energies) == len(additive_landscape.sequences)
+    assert sum(local_energies.values()) > 0
