@@ -58,7 +58,12 @@ class BaseNumpySequence:
 
         self._np: np.ndarray = _to_numpy(sequence)
         self._c3_seq = sequence if is_c3_seq else None
-        self.id = sequence_id if sequence_id is not None else str(sequence)
+
+        # Correctly handle sequence ID from cogent3 objects
+        if is_c3_seq and hasattr(sequence, 'name'):
+            self.id = sequence.name
+        else:
+            self.id = sequence_id if sequence_id is not None else str(self._np)
         
         # If an alphabet is explicitly provided, ALWAYS use it.
         if alphabet is not None:
@@ -333,7 +338,7 @@ class SoftSequence(BaseNumpySequence):
         Generate a new hard proxy by sampling each posterior row.
         """
         return SoftSequence(self.posterior,
-                            self.alphabet,
+                            alphabet=self.alphabet,
                             hard_rule="sample",
                             rng=self._rng)
 
@@ -360,9 +365,13 @@ class SoftSequence(BaseNumpySequence):
             raise ValueError("aa_post_dist and gap_post_dist must share length L")
 
         d = gap_post_dist[:, 0:1]
-        cond = np.empty((aa_post_dist.shape[0], 21), dtype=float)
-        cond[:, :20] = aa_post_dist * (1.0 - d)
-        cond[:, 20]  = d[:, 0]
+        num_sites, num_alleles = aa_post_dist.shape
+        # Create the conditional matrix with the correct dimensions
+        cond = np.empty((num_sites, num_alleles + 1), dtype=float)
+        # Fill the allele probabilities
+        cond[:, :num_alleles] = aa_post_dist * (1.0 - d)
+        # Fill the gap probability
+        cond[:, num_alleles]  = d[:, 0]
         return cond
 
 
@@ -394,6 +403,7 @@ def make_sequence(sequence: _SeqConvertible,
     if isinstance(sequence, BaseNumpySequence) and alphabet is None:
         return sequence
 
+    seq_id = getattr(sequence, 'name', None)
     seq_np = _to_numpy(sequence)
     
     # If an alphabet wasn't passed, but the original object had one, use it.
@@ -403,7 +413,7 @@ def make_sequence(sequence: _SeqConvertible,
     if binary is True or (binary is None and set(seq_np).issubset({0, 1})):
         return BinarySequence(seq_np)
     
-    return BaseNumpySequence(seq_np, alphabet=alphabet, moltype=moltype)
+    return BaseNumpySequence(seq_np, sequence_id=seq_id, alphabet=alphabet, moltype=moltype)
 
 
 def sequence_distance(seq1: Union[BaseNumpySequence, np.ndarray],

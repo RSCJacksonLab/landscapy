@@ -55,9 +55,7 @@ def vietoris_rips_complex(landscape: FitnessLandscape,
     return simplex_tree
 
 
-def delauny_cech_complex(landscape: FitnessLandscape,
-                         max_dim: int = 2,
-                         max_distance: Optional[float] = None) -> SimplexTree:
+def delauny_cech_complex(landscape: FitnessLandscape) -> SimplexTree:
     """
     Compute the Čech complex of a fitness landscape.
 
@@ -84,20 +82,15 @@ def delauny_cech_complex(landscape: FitnessLandscape,
         raise ValueError("Landscape contains no sequences.")
     
     reps = np.array([seq.to_array() for seq in sequences])
-    delaunay_cech_complex = gudhi.DelaunayComplex(points=reps,
-                                                  max_edge_length=max_distance)
+    delaunay_cech_complex = gudhi.DelaunayComplex(points=reps)
     
     # create simplex tree
-    simplex_tree = delaunay_cech_complex.create_simplex_tree(
-        max_dimension=max_dim
-    )
+    simplex_tree = delaunay_cech_complex.create_simplex_tree()
 
     return simplex_tree
 
 
 def compute_persistent_homology(landscape: FitnessLandscape,
-                                method: Literal['vietoris_rips', 
-                                                'delaunay_cech'] = 'vietoris_rips',
                                 max_dim: int = 2,
                                 dist_matrix: np.ndarray = None,
                                 max_distance: Optional[float] = None,
@@ -124,20 +117,13 @@ def compute_persistent_homology(landscape: FitnessLandscape,
     max_dim : int, default=2
         The maximum dimension of the simplices to compute.
     """
-    # landscape filtration
-    if method == 'vietoris_rips':
-        simplex_tree = vietoris_rips_complex(landscape,
-                                             max_dim=max_dim,
-                                             max_distance=max_distance,
-                                             dist_matrix=dist_matrix,
-                                             weighted=weighted)
-    elif method == 'delaunay_cech':
-        simplex_tree = delauny_cech_complex(landscape,
+    # landscape filtration via vietoris-rips complex
+    simplex_tree = vietoris_rips_complex(landscape,
                                             max_dim=max_dim,
-                                            max_distance=max_distance)
-    else:
-        raise ValueError(f"Method {method} is not supported.")
-    
+                                            max_distance=max_distance,
+                                            dist_matrix=dist_matrix,
+                                            weighted=weighted)
+
     # compute persistent homology
     simplex_tree.compute_persistence()
 

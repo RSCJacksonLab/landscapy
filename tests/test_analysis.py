@@ -17,9 +17,28 @@ from fitness_landscape.models.elementary_landscape import *
 from fitness_landscape.models.nk import *
 from fitness_landscape.models.rmf import *
 from math import factorial
+from fitness_landscape.analysis.persistent_homology import (
+    vietoris_rips_complex,
+    delauny_cech_complex,
+    compute_persistent_homology,
+    compute_betti_curves,
+)
+from fitness_landscape.core.fitness import NumericFitness
 
-# Pytest fixtures for landscapes
-# Pytest fixtures for landscapes
+@pytest.fixture
+def homology_landscape():
+    """Provides a basic FitnessLandscape for homology testing."""
+    sequences = generate_sequences(length=4, alphabet=[0, 1])
+    fitness_values = [[val] for val in np.random.rand(16)]
+    fitness_layers = {
+        'default': NumericFitness(name='default', values=fitness_values)
+    }
+    return FitnessLandscape.from_sequences(
+        sequences=sequences,
+        fitness_layers=fitness_layers,
+        graph_type='hamming'
+    )
+
 @pytest.fixture
 def additive_landscape():
     """
@@ -242,31 +261,14 @@ def test_total_dirichlet_energy_equals_eigenvalue(elementary_landscape):
     """
     Tests that the total Dirichlet energy of an elementary landscape equals its
     defining eigenvalue.
-    
-    Theory: For a fitness signal f = v_j (the j-th eigenvector of the Laplacian L),
-    the Dirichlet energy E = f'Lf = v_j'Lv_j = v_j'(λ_j*v_j) = λ_j * ||v_j||^2.
-    Since eigenvectors are normalized (||v_j||^2 = 1), E = λ_j.
-    The function normalizes by N, so we test against E / N.
     """
     landscape, j = elementary_landscape
-    
-    # 1. Calculate the Dirichlet energy using the function to be tested.
-    # Note: The function normalizes by N, so we get E/N.
     energy_results = calculate_ruggedness_dirichlet_energy(landscape)
     calculated_energy_per_node = energy_results['total_dirichlet_energy']
-
-    # 2. Get the true eigenvalues from a separate decomposition.
     eigenvalues, _ = eigenmode_decomposition(landscape.graph, matrix='laplacian')
-    
-    # Eigenvalues are sorted in ascending order by default in many libraries,
-    # but let's sort them to be sure.
     eigenvalues.sort()
     true_eigenvalue = eigenvalues[j]
-    
-    # 3. The total energy is E = λ_j. The function returns E / N.
     expected_energy_per_node = true_eigenvalue / len(landscape.sequences)
-
-    # 4. Assert that the calculated energy matches the theoretical expectation.
     assert np.isclose(calculated_energy_per_node, expected_energy_per_node)
 
 def test_sum_of_local_contributions_equals_total_energy(elementary_landscape):
@@ -725,3 +727,95 @@ def test_permutation_test(additive_landscape: additive_landscape):
     
     assert results['significant'] == True
     assert results['p_value'] < 0.05
+
+def test_vietoris_rips_complex(homology_landscape):
+    """Tests the Vietoris-Rips complex computation."""
+    simplex_tree = vietoris_rips_complex(homology_landscape, max_dim=2)
+    assert simplex_tree.num_simplices() > 0
+    assert simplex_tree.dimension() == 2
+
+def test_compute_persistent_homology(homology_landscape):
+    """Tests the persistent homology computation."""
+    persistence = compute_persistent_homology(homology_landscape, max_dim=2)
+    assert "persistence_intervals" in persistence
+    assert "betti_numbers" in persistence
+    assert "stats" in persistence
+    assert len(persistence["betti_numbers"]) > 0
+
+def test_compute_betti_curves(homology_landscape):
+    """Tests the Betti curve computation."""
+    persistence = compute_persistent_homology(homology_landscape, max_dim=2)
+    betti_curves, filtration_range = compute_betti_curves(persistence["persistence_intervals"], max_dim=2)
+    assert 0 in betti_curves
+    assert 1 in betti_curves
+    assert 2 in betti_curves
+    assert len(betti_curves[0]) == len(filtration_range)
+
+def test_eigenmode_decomposition_torch():
+    """Tests eigenmode decomposition with torch backend."""
+    graph = nx.path_graph(4)
+    eigenvalues, eigenvectors = eigenmode_decomposition(graph, matrix='laplacian', backend='torch')
+    assert eigenvalues is not None
+    assert eigenvectors is not None
+
+def test_reconstruct_from_eigenmodes_torch():
+    """Tests reconstruction from eigenmodes with torch backend."""
+    graph = nx.path_graph(4)
+    L = nx.laplacian_matrix(graph).toarray()
+    eigenvalues, eigenvectors = eigenmode_decomposition(graph, matrix='laplacian', backend='torch')
+    reconstructed_L = reconstruct_from_eigenmodes(eigenvectors, eigenvalues, backend='torch')
+    assert np.allclose(L, reconstructed_L.numpy(), atol=1e-6)
+
+def test_graph_spectral_analysis(additive_landscape):
+    """Tests graph spectral analysis."""
+    results = graph_spectral_analysis(additive_landscape, matrix='laplacian')
+    assert 'eigenvalues' in results
+    assert 'participation_ratios' in results
+    assert 'localization' in results
+    assert 'node_centralities' in results
+
+# New tests for dirichlet_energy.py
+def test_calculate_ruggedness_dirichlet_energy_weighted(additive_landscape):
+    """Tests Dirichlet energy with a weighted Laplacian."""
+    results = calculate_ruggedness_dirichlet_energy(additive_landscape, weighted_laplacian=True)
+    assert 'total_dirichlet_energy' in results
+
+def test_local_dirichlet_energy_contribution(additive_landscape):
+    """Tests local Dirichlet energy contribution."""
+    local_energies = local_dirichlet_energy_contribution(additive_landscape)
+    assert len(local_energies) == len(additive_landscape.sequences)
+    assert sum(local_energies.values()) > 0
+
+def test_find_greedy_accessible_paths_no_path(additive_landscape):
+    """Tests that no path is found when start and end are reversed."""
+    fitness_values = additive_landscape.get_signal()
+    start_idx = np.argmax(fitness_values)
+    end_idx = np.argmin(fitness_values)
+    start_seq = additive_landscape.sequences[start_idx]
+    end_seq = additive_landscape.sequences[end_idx]
+    paths = find_greedy_accessible_paths(additive_landscape, start_seq, end_seq)
+    assert paths['path_count'] == 0
+
+def test_dirichlet_energy_with_bins(additive_landscape):
+    """Tests Dirichlet energy with edge weight bins."""
+    results = calculate_ruggedness_dirichlet_energy(additive_landscape, edge_weight_bins=[(0, 2)])
+    assert 'edge_weight_bins' in results
+    assert len(results['edge_weight_bins']) > 0
+
+def test_eigenmode_decomposition_variants():
+    """Tests different matrices for eigenmode decomposition."""
+    graph = nx.path_graph(5)
+    adj_vals, _ = eigenmode_decomposition(graph, matrix='adjacency')
+    trans_vals, _ = eigenmode_decomposition(graph, matrix='transition')
+    assert adj_vals is not None
+    assert trans_vals is not None
+
+def test_graph_properties_disconnected():
+    """Tests graph properties on a disconnected graph."""
+    graph = nx.Graph()
+    graph.add_nodes_from(range(5))
+    graph.add_edge(0, 1)
+    graph.add_edge(2, 3)
+    properties = graph_properties(graph)
+    assert properties['components']['count'] == 3
+    assert 'path_length_note' in properties
