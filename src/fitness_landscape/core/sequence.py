@@ -4,7 +4,8 @@ from typing import Iterable, List, Sequence as _SeqLike, Union, Literal, Mapping
 import numpy as np
 from cogent3.core.sequence import Sequence as _C3Sequence
 from cogent3.core.moltype import MolType
-from cogent3 import get_moltype
+from cogent3 import get_moltype, load_unaligned_seqs
+from pathlib import Path
 
 # Helper utilities
 _SeqConvertible = Union["BaseNumpySequence", _SeqLike[int], np.ndarray, _C3Sequence]
@@ -48,6 +49,7 @@ class BaseNumpySequence:
     """
     def __init__(self,
                  sequence: _SeqConvertible,
+                 sequence_id: str = None,
                  *,
                  alphabet: Union[Iterable, None] = None,
                  moltype: Union[str, MolType, None] = None) -> None:
@@ -56,7 +58,7 @@ class BaseNumpySequence:
 
         self._np: np.ndarray = _to_numpy(sequence)
         self._c3_seq = sequence if is_c3_seq else None
-
+        self.id = sequence_id if sequence_id is not None else str(sequence)
         
         # If an alphabet is explicitly provided, ALWAYS use it.
         if alphabet is not None:
@@ -469,4 +471,33 @@ def generate_sequences(length: int,
             sequences.append(BaseNumpySequence([s] + sub_sequence.to_array().tolist(), alphabet=alphabet))
     return sequences
 
-# TODO: Functional code to convert BaseNumpySequence class to Binary or multiallelic.
+def read_from_fasta(filepath: Path,
+                    moltype: str = "protein") -> List[BaseNumpySequence]:
+    """
+    Reads sequences from a FASTA file and returns them as a list of
+    BaseNumpySequence objects.
+
+    Parameters
+    ----------
+    filepath : Path
+        The path to the FASTA file.
+    moltype : str, default='protein'
+        The molecular type of the sequences (e.g., 'protein', 'dna',
+        'rna'). This is passed to cogent3's sequence loader.
+
+    Returns
+    -------
+    List[BaseNumpySequence]
+        A list of BaseNumpySequence objects from the FASTA file.
+    """
+    # Use cogent3 to load the sequences from the FASTA file
+    seq_collection = load_unaligned_seqs(filepath, moltype=moltype)
+
+    # Convert the cogent3 sequences to BaseNumpySequence objects
+    numpy_sequences = []
+    for seq in seq_collection.iter_seqs():
+        # The make_sequence function can handle the cogent3 sequence object directly
+        numpy_seq = make_sequence(seq, moltype=moltype)
+        numpy_sequences.append(numpy_seq)
+
+    return numpy_sequences
