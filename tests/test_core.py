@@ -446,3 +446,84 @@ def test_landscape_attach_mismatched_length(basic_landscape):
     new_layer = NumericFitness(name="mismatched", values=[[1.0]])
     with pytest.raises(ValueError):
         basic_landscape.attach(new_layer)
+
+    
+def test_sequence_creation_and_properties():
+    """Covers __init__ branches for moltype and cogent3 sequences."""
+    # Test initialization with a cogent3 sequence object
+    c3_seq = get_moltype("text").make_seq("ABC", name="seq1")
+    seq1 = BaseNumpySequence(c3_seq)
+    assert np.array_equal(seq1.to_array(), ['A', 'B', 'C'])
+    assert seq1.id == "seq1"
+
+    # Test initialization with a moltype argument
+    seq2 = BaseNumpySequence(['A', 'C', 'G'], moltype="dna")
+    assert seq2._c3_seq is not None
+    assert str(seq2._c3_seq) == "ACG"
+    
+    # Test initialization with a non-existent moltype (should still create object)
+    seq3 = BaseNumpySequence(['X', 'Y', 'Z'], moltype="invalid_moltype")
+    assert seq3._c3_seq is None
+
+def test_sequence_distance_errors():
+    """Covers error handling in the distance method."""
+    seq_a = BaseNumpySequence([1, 2])
+    seq_b = BaseNumpySequence([1, 2, 3])
+    # Mismatched lengths
+    with pytest.raises(ValueError, match="Sequences must be the same length"):
+        seq_a.distance(seq_b)
+    # Invalid metric
+    with pytest.raises(ValueError, match="Unsupported metric"):
+        seq_a.distance(seq_a, metric="manhattan")
+
+def test_mutate_defaults_and_errors():
+    """Covers default arguments and error handling in mutate method."""
+    seq = BaseNumpySequence(['A', 'A'], alphabet=['A', 'B'])
+    
+    # Test with no arguments (random mutation)
+    mutated = seq.mutate()
+    assert seq.distance(mutated) == 1
+    
+    # Test with integer position
+    mutated_pos0 = seq.mutate(positions=0)
+    assert mutated_pos0.to_array()[0] == 'B'
+    
+    # Test error on mismatched lengths of positions and values
+    with pytest.raises(ValueError, match="Length of values must equal length of positions"):
+        seq.mutate(positions=[0, 1], values=['B'])
+
+def test_soft_sequence_variants():
+    """Covers gap posterior and sampling logic in SoftSequence."""
+    alphabet = ['A', 'C']
+    aa_posterior = np.array([[0.1, 0.9], [0.8, 0.2]])
+    gap_posterior = np.array([[0.05], [0.1]])
+    
+    # Test with gap posterior
+    soft_seq_gapped = SoftSequence(aa_posterior, alphabet=alphabet, gap_posterior=gap_posterior)
+    assert 'gap' in soft_seq_gapped.alphabet
+    assert soft_seq_gapped.posterior.shape == (2, 3)
+
+    # Test with sampling rule
+    soft_seq_sampled = SoftSequence(aa_posterior, alphabet=alphabet, hard_rule="sample")
+    assert isinstance(soft_seq_sampled.to_array()[0], str)
+    
+    # Test error on invalid hard_rule
+    with pytest.raises(ValueError, match="hard_rule must be"):
+        SoftSequence(aa_posterior, alphabet=alphabet, hard_rule="invalid_rule")
+
+def test_generate_sequences_base_cases():
+    """Covers the base cases for the generate_sequences function."""
+    assert generate_sequences(length=0, alphabet=['A', 'B']) == []
+    assert len(generate_sequences(length=1, alphabet=['A', 'B'])) == 2
+
+def test_read_from_fasta(tmp_path: Path):
+    """Covers the FASTA reading utility function."""
+    fasta_content = ">seq1\nACGT\n>seq2\nGATTACA"
+    fasta_file = tmp_path / "test.fasta"
+    fasta_file.write_text(fasta_content)
+    
+    sequences = read_from_fasta(fasta_file, moltype="dna")
+    assert len(sequences) == 2
+    assert isinstance(sequences[0], BaseNumpySequence)
+    assert sequences[0].id == "seq1"
+    assert np.array_equal(sequences[1].to_array(), list("GATTACA"))
