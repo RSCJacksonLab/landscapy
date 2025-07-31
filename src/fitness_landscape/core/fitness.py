@@ -180,7 +180,7 @@ class CategoricalFitness(BaseFitnessLayer):
         self._values = values
         
         if categories is None:
-            self.categories = list(set(values))  # Unique categories from values
+            self.categories = sorted(list(set(values)))  # Unique categories from values
         else:
             self.categories = categories
 

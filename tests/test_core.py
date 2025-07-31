@@ -7,6 +7,7 @@ from fitness_landscape.core.landscape import FitnessLandscape
 from fitness_landscape.core.fitness import NumericFitness, CategoricalFitness
 import torch
 from torch_geometric.data import Data
+from fitness_landscape.core.fitness import NumericFitness, CategoricalFitness, ProbabilisticCategoricalFitness
 
 @pytest.fixture
 def basic_landscape():
@@ -340,3 +341,31 @@ def test_to_sequence_tensors_sequence_string_export(basic_landscape):
     original_seq_ohe = target_sequence_obj.to_one_hot()
     assert torch.allclose(dataset[0]['sequence_tensor'],
                           torch.tensor(original_seq_ohe, dtype=torch.float32))
+    
+def test_numeric_fitness():
+    """Tests the NumericFitness class."""
+    values = [[0.1, 0.2], [0.3], [0.4, 0.5, 0.6]]
+    fitness_layer = NumericFitness(name="numeric", values=values)
+    assert fitness_layer.dtype == "numeric"
+    assert torch.is_tensor(fitness_layer.get_tensor())
+    assert np.allclose(fitness_layer.to_scalar(), [0.15, 0.3, 0.5])
+    assert fitness_layer.get_value(0) == [0.1, 0.2]
+
+def test_categorical_fitness():
+    """Tests the CategoricalFitness class."""
+    values = ["A", "B", "A"]
+    fitness_layer = CategoricalFitness(name="categorical", values=values)
+    assert fitness_layer.dtype == "categorical"
+    assert torch.is_tensor(fitness_layer.get_tensor())
+    assert np.array_equal(fitness_layer.to_scalar(), [0, 1, 0])
+    assert fitness_layer.get_value(1) == "B"
+
+def test_probabilistic_categorical_fitness():
+    """Tests the ProbabilisticCategoricalFitness class."""
+    probabilities = np.array([[0.1, 0.9], [0.8, 0.2]])
+    categories = ["A", "B"]
+    fitness_layer = ProbabilisticCategoricalFitness(name="prob_categorical", probabilities=probabilities, categories=categories)
+    assert fitness_layer.dtype == "categorical"
+    assert torch.is_tensor(fitness_layer.get_tensor())
+    assert np.array_equal(fitness_layer.to_scalar(), [1, 0])
+    assert fitness_layer.get_value(0) == {"A": 0.1, "B": 0.9}
