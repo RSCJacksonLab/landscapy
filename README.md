@@ -1,89 +1,98 @@
-"
-Landscapy: Fitness Landscape Analysis
-=================================
+# Landscapy: Fitness Landscape Analysis
+Landscapy is a Python package for the construction and analysis of fitness landscapes. This package provides a comprehensive toolkit for researchers in evolutionary biology, bioinformatics, and machine learning to study the relationships between protein sequence and function.
 
-A Python package for analyzing fitness landscapes modeled as network graphs.
+## Key Features
+- Flexible Landscape Construction: Build fitness landscapes from sequence data using various graph representations, including Hamming distance, k-Nearest Neighbors (k-NN), and advanced methods based on Topological Data Analysis (TDA) and diffusion maps. Landscapy supports construction and analysis methods for both sparse and dense fitness landscapes.
 
-This package provides tools for analyzing fitness landscapes using various mathematical
-transformations and analysis methods. It supports modeling landscapes as Hamming graphs,
-KNN graphs, or custom NetworkX graphs, and includes efficient implementations of
-Walsh-Hadamard transformations, graph Fourier transforms, and eigenmode decomposition.
+- Rich Analysis Suite: A comprehensive set of analysis tools to quantify landscape ruggedness, epistasis, and evolutionary dynamics. Methods include:
 
-Features
---------
-* Core data structures for sequences and fitness landscapes
-* Efficient mathematical transformations
-* Comprehensive analysis methods
-* Compatible with torch, numpy compute backends.
+- Epistasis Analysis: Decompose fitness effects using Walsh-Hadamard transforms, regression models, and reference-free methods.
 
-Installation
------------
-```bash
+- Ruggedness Metrics: Quantify landscape ruggedness using Dirichlet energy, local optima counts, and autocorrelation analysis.
+
+- Evolutionary Path Analysis: Simulate and analyze adaptive walks, identify greedy accessible paths, and compute basins of attraction.
+
+- Topological Analysis: Explore the shape of fitness landscapes using persistent homology to uncover higher-order structural features.
+
+- Advanced Modeling: Generate synthetic landscapes using established models like NK models and Rough Mount Fuji (RMF) models.
+
+- Graph Matching and Alignment: Align multiple fitness landscapes into a common latent space using a novel Hierarchical RJMCMC Aligner, enabling comparative landscape analysis and graph alignment in linear time.
+
+- Deep Learning Integration: ntegrate with modern deep learning workflows through: protein Language Model (PLM) embeddings and PyTorch Geometric Support.
+
+## Installation
+You can install Landscapy directly from PyPI:
+
+```Bash
 pip install landscapy
-```
+``` 
 
-Quick Start
-----------
+## Quick Start
+
 ```python
+
 import numpy as np
-from fitness_landscape.core.sequence import BinarySequence
 from fitness_landscape.core.landscape import FitnessLandscape
-from fitness_landscape.analysis.epistasis import calculate_epistasis
+from fitness_landscape.core.sequence import BinarySequence
+from fitness_landscape.analysis.epistasis import calculate_epistasis_walsh
+from fitness_landscape.models import create_nk_binary_landscape
 
-# Create a simple fitness landscape
-sequences = ["000", "001", "010", "011", "100", "101", "110", "111"]
-fitnesses = [0.1, 0.3, 0.2, 0.8, 0.3, 0.6, 0.5, 1.0]
-landscape = FitnessLandscape(dict(zip(sequences, fitnesses)))
+# Generate a simple NK landscape
+landscape = create_nk_binary_landscape(N=4, K=1, seed=42)
 
-# Analyze epistasis
-epistasis = calculate_epistasis(landscape, method='walsh')
-print(epistasis)
+# Analyze epistasis using the Walsh-Hadamard transform
+epistasis_results = calculate_epistasis_walsh(landscape, order=2)
+
+# Print the second-order epistatic coefficients
+print("Second-order epistasis:")
+for term, value in epistasis_results['by_order'][2].items():
+    print(f"  {term}: {value:.4f}")
+
+# Output the total Dirichlet energy as a measure of ruggedness
+from fitness_landscape.analysis.dirichlet_energy import calculate_ruggedness_dirichlet_energy
+energy = calculate_ruggedness_dirichlet_energy(landscape)
+print(f"\nTotal Dirichlet Energy: {energy['total_dirichlet_energy']:.4f}")
 ```
+## Main Components
+### Core (fitness_landscape.core)
+- landscape.py: The central FitnessLandscape class that integrates sequences, fitness data, and a graph representation.
 
-Main Components
---------------
+- sequence.py: Flexible sequence objects, including BinarySequence, MultialleleSequence, and SoftSequence for probabilistic representations.
 
-### Core
-* `sequence.py`: Sequence representations (binary and multiallelic)
-* `landscape.py`: Fitness landscape class
-* `graph.py`: Graph operations (Hamming, KNN, custom NetworkX)
+- fitness.py: A layered system for handling different types of fitness data, including NumericFitness, CategoricalFitness, and ProbabilisticCategoricalFitness.
 
-### Transforms
-* `walsh_hadamard.py`: Walsh-Hadamard transforms (standard and multiallelic)
-* `graph_fourier.py`: Graph Fourier transforms
-* `diffusion_fourier.py`: Markov / Diffusion Fourier transforms
+- graph.py: Functions for constructing landscape graphs (create_hamming_graph, create_knn_graph, create_tda_graph).
 
-### Analysis
-* `epistasis.py`: Epistasis analysis methods
-* `eigenmode.py`: Eigenmode decomposition
-* `random_walk.py`: Ruggedness random walk analysis
-* `adaptive_walk.py`: Evolutionary path analysis
-* `dirichlet_energy.py`: Dirichlet energy ruggedness analysis
-* `graph`: Graph analysis methods
-* `statistics.py`: Statistical analysis methods
+### Models (fitness_landscape.models)
+- nk.py: Generate Kauffman's NK model landscapes.
 
-### Models
-* `nk.py`: NK fitness landscape model
-* `rmf.py`: Rough mount Fuji fitness landscape model
-* `elementary_landscape.py`: Elementary fitness landscape model
+- rmf.py: Create Rough Mount Fuji (RMF) landscapes.
 
+- lementary_landscape.py: Construct landscapes based on graph Laplacian eigenfunctions.
 
-To do
------------
-* Sparsity methods (Brookes et al., 2020)
-* Minimum epistasis interpolation (Zhou et al., 2020)
-* Global epistasis (Otwinowski et al., 2018)
+### Analysis (fitness_landscape.analysis)
+- epistasis.py: Functions for calculating epistasis (calculate_epistasis_walsh, calculate_epistasis_regression).
 
-License
--------
-MIT License
-"""
+- adaptive_walk.py: Tools for analyzing evolutionary trajectories (find_greedy_accessible_paths, adaptive_walk_stochastic).
 
-Authors
--------
+- dirichlet_energy.py: Quantify landscape ruggedness using Dirichlet energy.
+
+- persistent_homology.py: Compute Betti curves and other topological features.
+
+- statistics.py: A suite of statistical tests for fitness distributions and correlations.
+
+- Transforms (fitness_landscape.transforms)
+walsh_hadamard.py: Perform Walsh-Hadamard transforms for epistasis analysis.
+
+- graph_fourier.py: Analyze fitness signals in the frequency domain using Graph Fourier transforms.
+
+## Authors
 Matthew A Spence
-Dana S Matthews
-Mahakaran Sandu 
-Colin J Jackson
-James Nichols
+
 Barnabas Gall
+
+Dana S Matthews
+
+
+## License
+This project is licensed under the MIT License - see the LICENSE file for details.
