@@ -409,3 +409,40 @@ def test_landscape_getitem(basic_landscape):
     seq, fitness = basic_landscape[0]
     assert isinstance(seq, BaseNumpySequence)
     assert isinstance(fitness, float)
+
+def test_sequence_distance_errors():
+    """Tests error handling in sequence distance calculations."""
+    seq1 = BaseNumpySequence([0, 1])
+    seq2 = BaseNumpySequence([0, 1, 2])
+    with pytest.raises(ValueError):
+        seq1.distance(seq2)
+    with pytest.raises(ValueError):
+        seq1.distance(seq2, metric="invalid_metric")
+
+def test_soft_sequence_resample():
+    """Tests the resample method of SoftSequence."""
+    alphabet = ['A', 'C']
+    posterior = np.array([[0.1, 0.9], [0.8, 0.2]])
+    soft_seq = SoftSequence(posterior, alphabet=alphabet)
+    resampled_seq = soft_seq.resample()
+    assert isinstance(resampled_seq, SoftSequence)
+
+def test_landscape_from_sequences_embeddings(clustered_data):
+    """Tests landscape creation with embeddings."""
+    sequences, embeddings = clustered_data
+    landscape = FitnessLandscape.from_sequences(sequences, graph_type='knn', embeddings=embeddings, k=3)
+    assert landscape.graph is not None
+    assert landscape.embeddings is not None
+
+def test_landscape_detach_last_layer(basic_landscape):
+    """Tests detaching the last fitness layer."""
+    basic_landscape.detach('default')
+    assert 'default' not in basic_landscape.fitness_layers
+    with pytest.raises(ValueError):
+        basic_landscape.get_signal()
+
+def test_landscape_attach_mismatched_length(basic_landscape):
+    """Tests attaching a layer with mismatched length."""
+    new_layer = NumericFitness(name="mismatched", values=[[1.0]])
+    with pytest.raises(ValueError):
+        basic_landscape.attach(new_layer)

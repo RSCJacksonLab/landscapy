@@ -333,7 +333,7 @@ class SoftSequence(BaseNumpySequence):
         Generate a new hard proxy by sampling each posterior row.
         """
         return SoftSequence(self.posterior,
-                            self.alphabet,
+                            alphabet=self.alphabet,
                             hard_rule="sample",
                             rng=self._rng)
 

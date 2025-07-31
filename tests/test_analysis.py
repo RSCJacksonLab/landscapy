@@ -802,3 +802,37 @@ def test_local_dirichlet_energy_contribution(additive_landscape):
     local_energies = local_dirichlet_energy_contribution(additive_landscape)
     assert len(local_energies) == len(additive_landscape.sequences)
     assert sum(local_energies.values()) > 0
+
+def test_find_greedy_accessible_paths_no_path(additive_landscape):
+    """Tests that no path is found when start and end are reversed."""
+    fitness_values = additive_landscape.get_signal()
+    start_idx = np.argmax(fitness_values)
+    end_idx = np.argmin(fitness_values)
+    start_seq = additive_landscape.sequences[start_idx]
+    end_seq = additive_landscape.sequences[end_idx]
+    paths = find_greedy_accessible_paths(additive_landscape, start_seq, end_seq)
+    assert paths['path_count'] == 0
+
+def test_dirichlet_energy_with_bins(additive_landscape):
+    """Tests Dirichlet energy with edge weight bins."""
+    results = calculate_ruggedness_dirichlet_energy(additive_landscape, edge_weight_bins=[(0, 2)])
+    assert 'edge_weight_bins' in results
+    assert len(results['edge_weight_bins']) > 0
+
+def test_eigenmode_decomposition_variants():
+    """Tests different matrices for eigenmode decomposition."""
+    graph = nx.path_graph(5)
+    adj_vals, _ = eigenmode_decomposition(graph, matrix='adjacency')
+    trans_vals, _ = eigenmode_decomposition(graph, matrix='transition')
+    assert adj_vals is not None
+    assert trans_vals is not None
+
+def test_graph_properties_disconnected():
+    """Tests graph properties on a disconnected graph."""
+    graph = nx.Graph()
+    graph.add_nodes_from(range(5))
+    graph.add_edge(0, 1)
+    graph.add_edge(2, 3)
+    properties = graph_properties(graph)
+    assert properties['components']['count'] == 3
+    assert 'path_length_note' in properties
