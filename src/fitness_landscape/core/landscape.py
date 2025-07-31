@@ -58,8 +58,6 @@ class FitnessLandscape:
         self._records = {tuple(seq.to_array()): i for i, seq in enumerate(self.sequences)}
         self._active_view_name = next(iter(self.fitness_layers.keys())) if self.fitness_layers else None
 
-
-
     @classmethod
     def from_sequences(cls,
                        sequences: List[BaseNumpySequence],
@@ -533,3 +531,73 @@ class FitnessLandscape:
     
     def __repr__(self):
         return f"{self.__class__.__name__}(n_sequences={len(self.sequences)})"
+    
+
+class DirectedFitnessLandscape(FitnessLandscape):
+    """
+    A fitness landscape represented by a directed graph, typically
+    for phylogenetic or evolutionary trajectory data.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not isinstance(self.graph, nx.DiGraph):
+            raise TypeError("DirectedFitnessLandscape requires a networkx.DiGraph object.")
+        
+    #TODO: rewrite all of these methods specifically for directed graphs.
+    
+    @classmethod
+    def from_sequences(cls,
+                       sequences: List[BaseNumpySequence],
+                       fitness_layers: Dict[str, BaseFitnessLayer] = None,
+                       graph_type: Literal['hamming', 'knn', 'tda', 'diffusion'] = 'hamming', #TODO: fix c-kNN BUG
+                       embeddings: np.ndarray = None,
+                       attach_embeddings: bool = True,
+                       **kwargs) -> 'FitnessLandscape':
+        """
+        Primary factory method to create a FitnessLandscape from a list
+        of sequences.
+
+        This method orchestrates the computation of embeddings (if needed)
+        and the construction of the graph based on the specified type.
+        """
+
+
+    @classmethod
+    def from_graph(cls,
+                   graph: nx.Graph, **kwargs) -> 'FitnessLandscape':
+        """
+        Factory method to create a FitnessLandscape from an existing,
+        annotated networkx graph.
+        """
+        raise NotImplementedError()
+    
+    def to_graph(self,
+                 **kwargs) -> None:
+        """
+        Method to construct a networkx graph from the sequences and
+        fitness layers. Symmetrical with the `from_graph` method.
+        """
+        raise NotImplementedError()
+    
+    def to_graph_tensor(self) -> 'Data':
+        """
+        Exports the entire fitness landscape to a PyTorch Geometric
+        Data object.
+
+        This method converts the landscape's graph structure, node
+        features (from embeddings or sequences), and all associated
+        fitness layers into a format suitable for graph machine
+        learning with PyTorch Geometric.
+
+        Returns
+        -------
+        torch_geometric.data.Data
+            A PyG Data object with the following attributes:
+            - x: Node features (embeddings or one-hot encoded
+            sequences).
+            - edge_index: Graph connectivity in COO format.
+            - edge_attr: Edge weights, if they exist.
+            - Additional attributes corresponding to each fitness
+            layer, named after the layer.
+        """
+        raise NotImplementedError()
