@@ -369,3 +369,43 @@ def test_probabilistic_categorical_fitness():
     assert torch.is_tensor(fitness_layer.get_tensor())
     assert np.array_equal(fitness_layer.to_scalar(), [1, 0])
     assert fitness_layer.get_value(0) == {"A": 0.1, "B": 0.9}
+
+def test_sequence_repr():
+    """Tests the __repr__ method of BaseNumpySequence."""
+    seq = BaseNumpySequence([0, 1, 0, 1])
+    assert repr(seq) == "BaseNumpySequence([0, 1, 0, 1])"
+
+def test_sequence_to_integer():
+    """Tests the to_integer method of BaseNumpySequence."""
+    seq = BaseNumpySequence(['A', 'C', 'G', 'T'], alphabet=['A', 'C', 'G', 'T'])
+    assert np.array_equal(seq.to_integer(), [0, 1, 2, 3])
+
+def test_soft_sequence_entropy():
+    """Tests the entropy method of SoftSequence."""
+    alphabet = ['A', 'C', 'G', 'T']
+    posterior = np.array([
+        [0.8, 0.1, 0.05, 0.05],
+        [0.1, 0.1, 0.7, 0.1],
+        [0.25, 0.25, 0.25, 0.25]
+    ])
+    soft_seq = SoftSequence(posterior, alphabet=alphabet)
+    entropy = soft_seq.entropy()
+    assert entropy.shape == (3,)
+    assert np.all(entropy >= 0)
+
+def test_landscape_repr(basic_landscape):
+    """Tests the __repr__ method of FitnessLandscape."""
+    assert repr(basic_landscape) == "FitnessLandscape(n_sequences=8)"
+
+def test_landscape_iteration(basic_landscape):
+    """Tests iteration over a FitnessLandscape."""
+    count = 0
+    for seq, fitness in basic_landscape:
+        count += 1
+    assert count == len(basic_landscape.sequences)
+
+def test_landscape_getitem(basic_landscape):
+    """Tests __getitem__ for FitnessLandscape."""
+    seq, fitness = basic_landscape[0]
+    assert isinstance(seq, BaseNumpySequence)
+    assert isinstance(fitness, float)
