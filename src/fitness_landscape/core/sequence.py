@@ -48,6 +48,7 @@ class BaseNumpySequence:
     """
     def __init__(self,
                  sequence: _SeqConvertible,
+                 sequence_id: str = None,
                  *,
                  alphabet: Union[Iterable, None] = None,
                  moltype: Union[str, MolType, None] = None) -> None:
@@ -56,7 +57,7 @@ class BaseNumpySequence:
 
         self._np: np.ndarray = _to_numpy(sequence)
         self._c3_seq = sequence if is_c3_seq else None
-
+        self.id = sequence_id if sequence_id is not None else str(sequence)
         
         # If an alphabet is explicitly provided, ALWAYS use it.
         if alphabet is not None:

@@ -43,9 +43,6 @@ def create_hamming_graph(sequences: List[BaseNumpySequence],
         # Add node with sequence attribute
         G.add_node(i, sequence=seq)
         
-        # Add fitness attribute if provided
-        if fitness_values is not None:
-            G.nodes[i]['fitness'] = float(fitness_values[i])
     
     # Add edges between sequences with Hamming distance = 1
     for i in range(len(sequences)):
@@ -109,19 +106,16 @@ def create_cknn_graph(sequences: List[BaseNumpySequence],
         from ..utils import get_distance_matrix
         dist_matrix = get_distance_matrix(sequences, metric='euclidean')
 
-    # --- Step 2: Calculate sigma_k from the distance matrix ---
-    # Sort each row to find the k-th nearest neighbor distance
     sorted_distances = np.sort(dist_matrix, axis=1)
+    
     # The k-th neighbor is at index k, as index 0 is the point itself.
     sigma_k = sorted_distances[:, k]
     sigma_k[sigma_k == 0] = 1e-9  # Avoid division by zero
 
-    # --- Step 3: Calculate continuous k ---
     sigma_product = np.outer(sigma_k, sigma_k)
     exp_term = np.exp(-dist_matrix**2 / sigma_product)
     k_continuous = exp_term.sum(axis=1)
 
-    # --- Step 4: Build Graph ---
     G = nx.Graph()
     for i, seq in enumerate(sequences):
         G.add_node(i, sequence=seq)
