@@ -17,9 +17,28 @@ from fitness_landscape.models.elementary_landscape import *
 from fitness_landscape.models.nk import *
 from fitness_landscape.models.rmf import *
 from math import factorial
+from fitness_landscape.analysis.persistent_homology import (
+    vietoris_rips_complex,
+    delauny_cech_complex,
+    compute_persistent_homology,
+    compute_betti_curves,
+)
+from fitness_landscape.core.fitness import NumericFitness
 
-# Pytest fixtures for landscapes
-# Pytest fixtures for landscapes
+@pytest.fixture
+def homology_landscape():
+    """Provides a basic FitnessLandscape for homology testing."""
+    sequences = generate_sequences(length=4, alphabet=[0, 1])
+    fitness_values = [[val] for val in np.random.rand(16)]
+    fitness_layers = {
+        'default': NumericFitness(name='default', values=fitness_values)
+    }
+    return FitnessLandscape.from_sequences(
+        sequences=sequences,
+        fitness_layers=fitness_layers,
+        graph_type='hamming'
+    )
+
 @pytest.fixture
 def additive_landscape():
     """
@@ -725,3 +744,26 @@ def test_permutation_test(additive_landscape: additive_landscape):
     
     assert results['significant'] == True
     assert results['p_value'] < 0.05
+
+def test_vietoris_rips_complex(homology_landscape):
+    """Tests the Vietoris-Rips complex computation."""
+    simplex_tree = vietoris_rips_complex(homology_landscape, max_dim=2)
+    assert simplex_tree.num_simplices() > 0
+    assert simplex_tree.dimension() == 2
+
+def test_compute_persistent_homology(homology_landscape):
+    """Tests the persistent homology computation."""
+    persistence = compute_persistent_homology(homology_landscape, max_dim=2)
+    assert "persistence_intervals" in persistence
+    assert "betti_numbers" in persistence
+    assert "stats" in persistence
+    assert len(persistence["betti_numbers"]) > 0
+
+def test_compute_betti_curves(homology_landscape):
+    """Tests the Betti curve computation."""
+    persistence = compute_persistent_homology(homology_landscape, max_dim=2)
+    betti_curves, filtration_range = compute_betti_curves(persistence["persistence_intervals"], max_dim=2)
+    assert 0 in betti_curves
+    assert 1 in betti_curves
+    assert 2 in betti_curves
+    assert len(betti_curves[0]) == len(filtration_range)

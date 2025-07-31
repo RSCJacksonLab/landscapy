@@ -64,7 +64,7 @@ class FitnessLandscape:
     def from_sequences(cls,
                        sequences: List[BaseNumpySequence],
                        fitness_layers: Dict[str, BaseFitnessLayer] = None,
-                       graph_type: Literal['hamming', 'knn', 'tda', 'cknn', 'diffusion'] = 'hamming',
+                       graph_type: Literal['hamming', 'knn', 'tda', 'diffusion'] = 'hamming', #TODO: fix c-kNN BUG
                        embeddings: np.ndarray = None,
                        attach_embeddings: bool = True,
                        **kwargs) -> 'FitnessLandscape':
@@ -94,7 +94,7 @@ class FitnessLandscape:
             'hamming': create_hamming_graph,
             'knn': create_knn_graph,
             'tda': create_tda_graph,
-            'cknn': create_cknn_graph,
+            #'cknn': create_cknn_graph, TODO: Fix c-kNN BUG
             'diffusion': create_diffusion_graph
         }
         if graph_type not in graph_constructors:
@@ -293,10 +293,11 @@ class FitnessLandscape:
                                           k=kwargs.get('k', int(np.sqrt(len(self.sequences)))),
                                           metric=kwargs.get('metric', 'hamming'),
                                           weight_by_distance=kwargs.get('weight_by_distance', True))
-        elif self.graph_type == 'cknn':
-            self.graph = create_cknn_graph(self.sequences,
-                                           embeddings=self.embeddings,
-                                           k=kwargs.get('k', 3))
+        # TODO: Fix c-kNN BUG
+        # elif self.graph_type == 'cknn':
+        #     self.graph = create_cknn_graph(self.sequences,
+        #                                    embeddings=self.embeddings,
+        #                                    k=kwargs.get('k', 3))
         
         elif self.graph_type == 'diffusion':
             self.graph = create_diffusion_graph(self.sequences, 
