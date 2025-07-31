@@ -27,7 +27,7 @@ class ESMEmbedder:
     def __init__(self,
                  model_name: str = "facebook/esm2_t6_8M_UR50D",
                  device: Optional[str] = None,
-                 alphabet: List = list('ACDEFGHIKLMNPQRSTVWY-') + ['<cls>', '<eos>', '<pad>', '-', '<mask>'],
+                 alphabet: List = list('ACDEFGHIKLMNPQRSTVWY-') + ['<cls>', '<eos>', '<pad>','<mask>'],
                  batch_size: int = 1) -> None:
         """
         Initialise PLM embedder class by initialising the provided
@@ -230,6 +230,24 @@ class ESMEmbedder:
                 encoding[i, idx] = 1.0
         
         return encoding
+    
+    def get_ohe_seq(self, 
+                    sequence: Union[str, np.ndarray, torch.Tensor]) -> np.ndarray:
+        """
+        Get sequence from OHE representation.
+        """
+        if isinstance(sequence, str):
+            return sequence
+        elif isinstance(sequence, np.ndarray):
+            if sequence.ndim == 1:
+                sequence = sequence[np.newaxis, :]
+            return ''.join([self.alphabet[np.argmax(aa)] for aa in sequence])
+        elif isinstance(sequence, torch.Tensor):
+            if sequence.dim() == 1:
+                sequence = sequence.unsqueeze(0)
+            return [self.alphabet[aa.argmax().item()] for aa in sequence]
+        else:
+            raise ValueError("Input must be a string, numpy array, or torch tensor.")
     
     def embed_relaxed_seqs(self,
                         sequences: Union[np.ndarray, torch.Tensor, List[Union[str, np.ndarray, torch.Tensor]]],
