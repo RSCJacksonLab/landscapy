@@ -15,6 +15,7 @@ from ..utils import _compute_embeddings_from_sequences
 from .fitness import BaseFitnessLayer
 import inspect
 from collections import defaultdict
+from cogent3 import Alignment
 
 
 class FitnessLandscape:
@@ -523,9 +524,19 @@ class DirectedFitnessLandscape(FitnessLandscape):
             if not isinstance(sequences, Alignment):
                 raise ValueError("Phylogenetic graph construction requires a cogent3 `Alignment` sequence input.")
     
-            return create_phylo_digraph(alignment=sequences,
-                                        phylogenetic_tree=kwargs.get('phylogenetic_tree'),
-                                        ancestral_states=kwargs.get('ancestral_states'))
+            digraph= create_phylo_digraph(alignment=sequences,
+                                          phylogenetic_tree=kwargs.get('phylogenetic_tree'),
+                                          ancestral_states=kwargs.get('ancestral_states'))
+            
+        
+        final_embeddings = embeddings if attach_embeddings else None
+        
+        return cls(sequences=sequences,
+                   graph=digraph,
+                   fitness_layers=fitness_layers,
+                   embeddings=final_embeddings,
+                   emb_arr_key=kwargs.get('emb_arr_key', 'emb_arr')
+                   )
 
         #TODO: Add other digraph constructors
 

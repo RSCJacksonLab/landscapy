@@ -9,7 +9,6 @@ from piqtree.model import AaModel
 import math
 from cogent3.util.table import Table
 from .sequence import SoftSequence, BaseNumpySequence
-from .landscape import DirectedFitnessLandscape
 
 PROT = get_moltype("protein")
 PROT_20 = [aa for aa in PROT.alphabet if aa != 'U']
@@ -17,13 +16,10 @@ ALPHABET_21 = PROT_20 + ["gap"]
 
 def create_phylo_digraph(alignment: Union[Path, Alignment],
                          phylogenetic_tree: Union[Path, PhyloNode] = None,
-                         ancestral_states: Table = None) -> DirectedFitnessLandscape:
+                         ancestral_states: Table = None) -> nx.DiGraph:
     """
-    Factory function to create a Directed fitness landscape using
+    Factory function to create a Directed acyclic graph using
     phylogenetic inference and ancestral sequence reconstruction. 
-    Connectivity in the DirectedFitnessLandscape is defined by the
-    phylogenetic branches. The output landscape will have n-2 new
-    sequences not provided in the alignment. 
 
     Parameters
     ----------
@@ -40,8 +36,8 @@ def create_phylo_digraph(alignment: Union[Path, Alignment],
 
     Returns
     -------
-    G : DirectedFitnessLandscape
-        The constructed directed fitness landscape.
+    G : nx.DiDraph
+        The Directed graph output.
     """
     
     class ASRConstructor:
@@ -317,10 +313,9 @@ def create_phylo_digraph(alignment: Union[Path, Alignment],
                 )
             return G
         
-        constructor = ASRConstructor(alignment, phylogenetic_tree, ancestral_states)
-        graph, sequences, fitness_layers = constructor.construct_graph()
-
-        return DirectedFitnessLandscape.from_graph(sequences, graph, fitness_layers)
+    constructor = ASRConstructor(alignment, phylogenetic_tree, ancestral_states)
+    digraph = constructor.construct_dag()
+    return digraph
         
 
     # TODO: Evolutionary velocity connectivity
