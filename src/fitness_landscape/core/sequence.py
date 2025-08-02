@@ -209,6 +209,16 @@ class BaseNumpySequence:
             mapping = {sym: i for i, sym in enumerate(self.alphabet)}
 
         return np.array([mapping[str(s)] for s in self.ndarray], dtype=int)
+
+    def to_str(self) -> str:
+        """
+        Method to convert the seuqnece to a string.
+
+        returns:
+        str
+            The sequence in string format.
+        """
+        return "".join(map(str, self._np))
     
     def remove_gap_arr(self,
                        *,

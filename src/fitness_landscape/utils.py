@@ -4,6 +4,9 @@ from typing import List
 import torch
 from .core.sequence import BaseNumpySequence, SoftSequence
 from .embedding.soft_embedding import ESMEmbedder
+from cogent3 import make_unaligned_seqs
+from cogent3.align.progressive import nw_align
+from cogent3.evolve.models import get_model as get_c3_model
 
 
 def cosine_similarity_matrix(A, B):
@@ -106,3 +109,42 @@ def _compute_embeddings_from_sequences(sequences: List[BaseNumpySequence],
         relaxed_seqs=ohe_arrays)
     
     return embeddings
+
+def calculate_soft_score(p_seq1: np.ndarray,
+                         p_seq2: np.ndarray,
+                         S: np.ndarray) -> float:
+    """
+    Computes the distance between two "soft" sequences. This function
+    calculates the total expected score between two aligned sequences,
+    where each position in the sequence is represented by a probability
+    distribution over the alphabet.
+
+    Parameters
+    ----------
+    p_seq1 : np.ndarray
+        The first soft sequence, an (L, alphabet_size) array of
+        probabilities. Rows must sum to 1.
+
+    p_seq2 : np.ndarray
+        The second soft sequence, an (L, alphabet_size) array of
+        probabilities. Rows must sum to 1.
+
+    q : np.ndarray
+        The replacement matrix, an (alphabet_size, alphabet_size)
+        array of scores.
+
+    Returns
+    -------
+    float
+    The total alignment score.
+    """
+    if p_seq1.shape != p_seq2.shape:
+        raise ValueError("Soft sequence arrays must have the same shape.")
+    if p_seq1.shape[1] != S.shape[0] or S.shape[0] != S.shape[1]:
+        raise ValueError("Alphabet size mismatch between sequences and replacement matrix.")
+
+    p1_times_S = p_seq1 @ S
+    elementwise_prod = p1_times_S * p_seq2
+    total_score = np.sum(elementwise_prod)
+    
+    return total_score
