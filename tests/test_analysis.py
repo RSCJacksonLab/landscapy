@@ -11,7 +11,7 @@ from fitness_landscape.analysis.adaptive_walk import *
 from fitness_landscape.analysis.random_walk import *
 from fitness_landscape.analysis.dirichlet_energy import *
 from fitness_landscape.transforms.graph_fourier import *
-from fitness_landscape.analysis.eigenmode import *
+from fitness_landscape.transforms.eigenmode import *
 from fitness_landscape.analysis.graph import *
 from fitness_landscape.models.elementary_landscape import *
 from fitness_landscape.models.nk import *
@@ -71,7 +71,6 @@ def complete_hamming_graph_n3():
     """
     Provides a complete Hamming graph for N=3.
     """
-    # CORRECTED: create_hamming_graph now takes a list of sequences.
     sequences = generate_sequences(length=3, alphabet=[0, 1])
     return create_hamming_graph(sequences=sequences)
 
