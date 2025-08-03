@@ -352,7 +352,7 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
     
     n_sequences = len(sequences)
     if n_sequences == 0:
-        return nx.Graph()
+        return nx.DiGraph()
 
     # Find kNN in embedding space to identify candidate pairs
     # Should scale in O(N*k)
@@ -376,25 +376,15 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
     
     # Iterate through pairs of sequences to align
     for i, j in pairs_to_align:
-        
-        # Type check for soft / hard sequences on i
-        if isinstance(sequences[i], SoftSequence):
-            arr_i = sequences[i].posterior
-        else:
-            arr_i = sequences[i].to_one_hot()
-        if arr_i.shape[1] != len(PROT_20):
-            raise ValueError(f"Expected shape (length, {len(PROT_20)}), recieved {arr_i.shape}")
+        # Get sequence arrays, handling both SoftSequence and BaseNumpySequence
+        seq_i = sequences[i]
+        arr_i = seq_i.posterior if isinstance(seq_i, SoftSequence) else seq_i.to_one_hot()
 
-        # Type check for soft / hard sequences on j
-        if isinstance(sequences[j], SoftSequence):
-            arr_j = sequences[j].posterior
-        else:
-            arr_j = sequences[i].to_one_hot()
-        if arr_j.shape[1] != len(PROT_20):
-            raise ValueError(f"Expected shape (length, {len(PROT_20)}), recieved {arr_j.shape}")
+        seq_j = sequences[j]
+        arr_j = seq_j.posterior if isinstance(seq_j, SoftSequence) else seq_j.to_one_hot()
 
                 
-        alignment, _ = align_soft_sequences(sequences=list(arr_i, arr_j),
+        alignment, _ = align_soft_sequences(sequences=[arr_i, arr_j],
                                             alphabet=PROT_20)
         
         score = calculate_gapped_soft_score(aligned_seq1 = alignment[0],
