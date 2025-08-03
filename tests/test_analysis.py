@@ -11,7 +11,7 @@ from fitness_landscape.analysis.adaptive_walk import *
 from fitness_landscape.analysis.random_walk import *
 from fitness_landscape.analysis.dirichlet_energy import *
 from fitness_landscape.transforms.graph_fourier import *
-from fitness_landscape.analysis.eigenmode import *
+from fitness_landscape.transforms.eigenmode import *
 from fitness_landscape.analysis.graph import *
 from fitness_landscape.models.elementary_landscape import *
 from fitness_landscape.models.nk import *
