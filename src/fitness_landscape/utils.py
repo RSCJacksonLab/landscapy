@@ -4,7 +4,7 @@ from typing import List
 import torch
 from .core.sequence import BaseNumpySequence, SoftSequence
 from .embedding.soft_embedding import ESMEmbedder
-
+from ._const import ALPHABET_21, PROT_20
 
 def cosine_similarity_matrix(A, B):
     """
@@ -106,3 +106,111 @@ def _compute_embeddings_from_sequences(sequences: List[BaseNumpySequence],
         relaxed_seqs=ohe_arrays)
     
     return embeddings
+
+
+#TODO: def reorder sequence from one alphabet to new alphabet.
+
+def _reorder_matrix(matrix: np.ndarray,
+                    matrix_alphabet: List[str] = PROT_20,
+                    target_alphabet: List[str] = PROT_20) -> np.ndarray:
+    """
+    Helper to reorder a substitution matrix to match a target alphabet.
+
+    Parameters
+    ----------
+    matrix : np.ndarray
+        The original (N, N) substitution matrix.
+    
+    matrix_alphabet : List[str])
+        The alphabet corresponding to the original matrix.
+    
+    target_alphabet : List[str])
+        The desired alphabet order.
+
+    Returns
+    -------
+    np.ndarray
+        The reordered (M, M) matrix, where M is the length of
+        target_alphabet.
+    """
+    # If no reindexing necessary return replacement matrix.
+    if matrix_alphabet == target_alphabet:
+        return matrix
+    
+    # Create a mapping from the original alphabet characters to their indices
+    original_map = {aa: i for i, aa in enumerate(matrix_alphabet)}
+    
+    # Get the size of the target alphabet
+    target_size = len(target_alphabet)
+    
+    # Initialize the new reordered matrix
+    reordered_matrix = np.zeros((target_size, target_size), dtype=matrix.dtype)
+    
+    # Create a list of indices to select and reorder rows/columns from the original matrix
+    try:
+        remap_indices = [original_map[aa] for aa in target_alphabet]
+    except KeyError as e:
+        raise ValueError(
+            f"Character '{e.args[0]}' from target_alphabet is not present in the "
+            "substitution matrix alphabet."
+        )
+
+    # Use advanced numpy indexing to efficiently reorder the matrix
+    reordered_matrix = matrix[np.ix_(remap_indices, remap_indices)]
+            
+    return reordered_matrix
+
+def calculate_gapped_soft_score(aligned_seq1: np.ndarray,
+                                aligned_seq2: np.ndarray,
+                                q: np.ndarray,
+                                gap_penalty: float = -2.0) -> float:
+    """
+    Computes the distance between two "soft" sequences. This function
+    calculates the total expected score between two aligned sequences,
+    where each position in the sequence is represented by a probability
+    distribution over the alphabet.
+
+    Parameters
+    ----------
+    p_seq1 : np.ndarray
+        The first soft sequence, an (L, alphabet_size) array of
+        probabilities. Rows must sum to 1.
+
+    p_seq2 : np.ndarray
+        The second soft sequence, an (L, alphabet_size) array of
+        probabilities. Rows must sum to 1.
+
+    q : np.ndarray
+        The replacement matrix, an (alphabet_size, alphabet_size)
+        array of scores. Note that q must match the sequence alphabet.
+
+    Returns
+    -------
+    total_score : float
+    The total alignment score.
+    """
+
+    if aligned_seq1.shape != aligned_seq2.shape:
+        raise ValueError("Aligned soft sequence arrays must have the same shape.")
+    
+    alphabet_size = q.shape[0]
+    if aligned_seq1.shape[1] != alphabet_size + 1:
+        raise ValueError(
+            f"Sequence array has {aligned_seq1.shape[1]} columns, but expected "
+            f"{alphabet_size + 1} (alphabet + gap)."
+        )
+
+    p1_aa = aligned_seq1[:, :alphabet_size]
+    p2_aa = aligned_seq2[:, :alphabet_size]
+    p1_gap = aligned_seq1[:, alphabet_size]
+    p2_gap = aligned_seq2[:, alphabet_size]
+
+    expected_aa_scores = np.sum((p1_aa @ q) * p2_aa, axis=1)
+    prob_aa_vs_aa = (1 - p1_gap) * (1 - p2_gap)
+    prob_any_gap = p1_gap * (1 - p2_gap) + (1 - p1_gap) * p2_gap
+    
+    positional_scores = (expected_aa_scores * prob_aa_vs_aa) + (gap_penalty * prob_any_gap)
+    
+    total_score = np.sum(positional_scores)
+    
+    return total_score

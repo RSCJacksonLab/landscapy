@@ -2,17 +2,19 @@ from pathlib import Path
 from typing import Union, Dict
 import numpy as np
 import networkx as nx
-from cogent3 import load_aligned_seqs, Alignment, PhyloNode, load_tree, get_app, get_moltype
+from cogent3 import load_aligned_seqs, Alignment, PhyloNode, load_tree, get_app
 import piqtree
 from piqtree import Model
 from piqtree.model import AaModel
 import math
 from cogent3.util.table import Table
 from .sequence import SoftSequence, BaseNumpySequence
+from .._const import ALPHABET_21, PROT_20
+from .._sub_matrices import nq_pfam
+from sklearn.neighbors import NearestNeighbors
+from ..utils import calculate_gapped_soft_score
+from softalign.soft_alignment import align_soft_sequences
 
-PROT = get_moltype("protein")
-PROT_20 = [aa for aa in PROT.alphabet if aa != 'U']
-ALPHABET_21 = PROT_20 + ["gap"]
 
 def create_phylo_digraph(alignment: Union[Path, Alignment],
                          phylogenetic_tree: Union[Path, PhyloNode] = None,
@@ -275,7 +277,10 @@ def create_phylo_digraph(alignment: Union[Path, Alignment],
                 G.add_edge(parent, child)
 
             for tip in self.tip_names:
-                hard_seq = BaseNumpySequence(self.alignment.get_gapped_seq(tip), alphabet=ALPHABET_21)
+                
+                hard_seq = BaseNumpySequence(self.alignment.get_gapped_seq(tip),
+                                              alphabet=ALPHABET_21)
+
                 gapped_mat   = hard_seq.to_one_hot()            # (L, 21), 0/1
                 ungapped_mat = hard_seq.remove_gap_arr()
 
@@ -298,6 +303,7 @@ def create_phylo_digraph(alignment: Union[Path, Alignment],
                 #Use conditional probability logic to combine.
                 gapped_post = SoftSequence.compute_conditional_gap_dist(aa_post_dist=post,
                                                                         gap_post_dist=gap)        
+                
                 soft_seq = SoftSequence(
                     aa_posterior=post,
                     gap_posterior=self.node_likelihoods[anc],
@@ -316,6 +322,100 @@ def create_phylo_digraph(alignment: Union[Path, Alignment],
     constructor = ASRConstructor(alignment, phylogenetic_tree, ancestral_states)
     digraph = constructor.construct_dag()
     return digraph
+
+def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
+                                             embeddings: np.ndarray = None,
+                                             replacement_matrix: np.ndarray = nq_pfam,
+                                             k: int = 50,
+                                             t: int = 5,
+                                             tau: float = 1.0,
+                                             connectivity_threshold: float = 1e-4,
+                                             **kwargs) -> nx.DiGraph:
+    """
+    Constructs a diffusion graph by scoring standard alignments with a
+    phylogenetic likelihood model.
+
+    This refactored version uses a utility function to perform the alignments
+    before scoring them phylogenetically.
+
+    Parameters are the same as the previous version.
+
+    Returns
+    -------
+    nx.Graph or nx.DiGraph
+        The constructed graph.
+    """
+    # Type check alphabet first
+    for seq in sequences:
+        if seq.alphabet != PROT_20:
+            raise ValueError("Sequence alpbahet must be PROT_20 for all entries.")
+    
+    n_sequences = len(sequences)
+    if n_sequences == 0:
+        return nx.DiGraph()
+
+    # Find kNN in embedding space to identify candidate pairs
+    # Should scale in O(N*k)
+    nn = NearestNeighbors(n_neighbors=k, algorithm='ball_tree')
+    nn.fit(embeddings)
+    _, neighbor_indices = nn.kneighbors(embeddings)
+    
+    pairs_to_align = []
+    for i in range(n_sequences):
+        for j_idx in neighbor_indices[i]:
+            if i != j_idx:
+                
+                pair = (i, j_idx)
+                pairs_to_align.append(pair)
+    
+    # Remove duplicate pairs before aligning
+    pairs_to_align = sorted(list(set(pairs_to_align)))
+    
+    # Make kernel matrix
+    kernel_matrix = np.zeros((n_sequences, n_sequences))
+    
+    # Iterate through pairs of sequences to align
+    for i, j in pairs_to_align:
+        # Get sequence arrays, handling both SoftSequence and BaseNumpySequence
+        seq_i = sequences[i]
+        arr_i = seq_i.posterior if isinstance(seq_i, SoftSequence) else seq_i.to_one_hot()
+
+        seq_j = sequences[j]
+        arr_j = seq_j.posterior if isinstance(seq_j, SoftSequence) else seq_j.to_one_hot()
+
+                
+        alignment, _ = align_soft_sequences(sequences=[arr_i, arr_j],
+                                            alphabet=PROT_20)
         
+        score = calculate_gapped_soft_score(aligned_seq1 = alignment[0],
+                                            aligned_seq2 = alignment[1],
+                                            q = replacement_matrix)
+        
+        # Tau controls "sharpness" of kernel distances.
+        kernel_matrix[i, j] = np.exp(score / tau)
+
+    # Proceed with diffusion and graph construction (same as before)
+    np.fill_diagonal(kernel_matrix, 0)
+    
+    row_sums = kernel_matrix.sum(axis=1, keepdims=True)
+    row_sums[row_sums == 0] = 1.0
+    transition_matrix = kernel_matrix / row_sums
+    
+    # Compute diffusion steps
+    diffused_matrix = np.linalg.matrix_power(transition_matrix, t)
+    
+    G = nx.DiGraph()
+    G.add_nodes_from(range(n_sequences))
+    
+    rows, cols = np.where(diffused_matrix > connectivity_threshold)
+    
+    for i, j in zip(rows, cols):
+        if i != j:
+            G.add_edge(i, j, weight=diffused_matrix[i, j])
+        
+    for i, seq in enumerate(sequences):
+        G.nodes[i]['sequence'] = seq
+        
+    return G      
 
     # TODO: Evolutionary velocity connectivity
