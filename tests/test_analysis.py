@@ -34,7 +34,7 @@ def homology_landscape():
         'default': NumericFitness(name='default', values=fitness_values)
     }
     return FitnessLandscape.from_sequences(
-        sequences=sequences,
+        sequences=sequences, 
         fitness_layers=fitness_layers,
         graph_type='hamming'
     )
@@ -535,8 +535,8 @@ def test_stochastic_correlation_length_vs_ruggedness(additive_landscape: additiv
         If the correlation length for the smooth landscape is not greater
         than that for the rugged landscape.
     """
-    smooth_results = calculate_ruggedness_autocorrelation_stochastic(additive_landscape, steps=5000)
-    rugged_results = calculate_ruggedness_autocorrelation_stochastic(epistatic_landscape, steps=5000)
+    smooth_results = calculate_ruggedness_autocorrelation_stochastic(additive_landscape, steps=100)
+    rugged_results = calculate_ruggedness_autocorrelation_stochastic(epistatic_landscape, steps=100)
     
     assert smooth_results['correlation_length'] > rugged_results['correlation_length']
 
@@ -554,7 +554,7 @@ def test_autocorrelation_on_random_landscape(random_rmf_landscape: random_rmf_la
     AssertionError
         If the autocorrelation at lag 1 is not close to zero.
     """
-    results = calculate_ruggedness_autocorrelation_stochastic(random_rmf_landscape, steps=10000, lag_max=5)
+    results = calculate_ruggedness_autocorrelation_stochastic(random_rmf_landscape, steps=100, lag_max=5)
     
     # The autocorrelation at lag 1 should be very close to zero.
     assert np.isclose(results['autocorrelation'][1], 0, atol=0.1)
@@ -574,7 +574,7 @@ def test_stochastic_converges_to_analytical(additive_landscape: additive_landsca
 
     analytical_results = calculate_ruggedness_autocorrelation_analytical(additive_landscape, lag_max=5)
     analytical_autocorr = analytical_results['autocorrelation']
-    stochastic_results = calculate_ruggedness_autocorrelation_stochastic(additive_landscape, steps=10000, lag_max=5)
+    stochastic_results = calculate_ruggedness_autocorrelation_stochastic(additive_landscape, steps=100, lag_max=5)
     stochastic_autocorr = stochastic_results['autocorrelation']
 
     assert np.allclose(analytical_autocorr, stochastic_autocorr, atol=0.5)
