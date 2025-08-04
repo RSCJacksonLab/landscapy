@@ -13,6 +13,14 @@ from .._const import ALPHABET_21, PROT_20
 from .._sub_matrices import nq_pfam
 from sklearn.neighbors import NearestNeighbors
 from ..utils import calculate_gapped_soft_score
+from ..embedding.particle_sampler import (
+    ProtLMEvolution,
+    SequenceGenerator,
+    ParentSelector,
+    TopPSampler,
+    SequenceSpaceAttractor,
+    ESMEmbedder
+)
 from softalign.soft_alignment import align_soft_sequences
 
 
@@ -417,18 +425,86 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
     # Compute diffusion steps
     diffused_matrix = np.linalg.matrix_power(transition_matrix, t)
     
-    G = nx.DiGraph()
-    G.add_nodes_from(range(n_sequences))
+    digraph = nx.DiGraph()
+    digraph.add_nodes_from(range(n_sequences))
     
     rows, cols = np.where(diffused_matrix > connectivity_threshold)
     
     for i, j in zip(rows, cols):
         if i != j:
-            G.add_edge(i, j, weight=diffused_matrix[i, j])
+            digraph.add_edge(i, j, weight=diffused_matrix[i, j])
         
     for i, seq in enumerate(sequences):
-        G.nodes[i]['sequence'] = seq
+        digraph.nodes[i]['sequence'] = seq
         
-    return G
+    return DirectedFitnessLandscape.from_graph(digraph)
+
+
+def create_gibbs_digraph(seed_sequences: List[str],
+                         n_samples: int,
+                         traj_length: int,
+                         batch_size: int,
+                         max_state_size: int,
+                         hmm_file: Path = None,
+                         _emb_array_key: str = 'emb_array',
+                         temperature: float = 1.0,
+                         top_p: float = 0.9) -> 'DirectedFitnessLandscape':
+    """
+    Factory function to create a directed graph using a Gibbs sampling
+    approach based on a protein language model.
+
+    Parameters
+    ----------
+    seed_sequences : List[str]
+        The initial sequences to start the simulation.
+    n_samples : int
+        The number of child sequences to generate from each parent.
+    traj_length : int
+        The number of steps in the evolutionary trajectory.
+    batch_size : int
+        The batch size for the sequence generator.
+    max_state_size : int
+        The maximum number of parent nodes to select at each step.
+    hmm_file : str, optional
+        Path to an HMM file to use for the sequence space attractor.
+    embedding_attribute : str, default='representation'
+        The node attribute key for embeddings.
+    temperature : float, default=1.0
+        The temperature for the Top-p sampler.
+    top_p : float, default=0.9
+        The top-p value for the Top-p sampler.
+
+    Returns
+    -------
+    DirectedFitnessLandscape
+        The constructed directed fitness landscape.
+    """
+    selector = ParentSelector(max_state_size=max_state_size)
+    embedder = ESMEmbedder()
+    sampler = TopPSampler(temperature=temperature, top_p=top_p)
+    generator = SequenceGenerator(embedder=embedder, sampler=sampler, batch_size=batch_size)
+
+    attractor = None
+    if hmm_file:
+        attractor = SequenceSpaceAttractor(embedder=embedder,
+                                           hmm_file=hmm_file,
+                                           embedding_attribute=_emb_array_key)
+
+    evolution_exp = EvolutionParticleSampler(
+        generator=generator,
+        selector=selector,
+        n_samples=n_samples,
+        traj_length=traj_length,
+        attractor=attractor
+    )
+
+    evolution_exp.initialize(seed_sequences=seed_sequences)
+    evolution_exp.run()
+    digraph = evolution_exp.G
+    
+    # Convert the generated graph to a DirectedFitnessLandscape
+    sequences = [node_data['sequence'] for _, node_data in graph.nodes(data=True)]
+
+    return DirectedFitnessLandscape.from_graph(digraph)
 
     # TODO: Evolutionary velocity connectivity
