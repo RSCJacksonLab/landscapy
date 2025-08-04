@@ -285,7 +285,8 @@ class SequenceGenerator:
         self.alphabet = alphabet
 
     def process_sequences(self,
-                          sequences: List[str]) -> List[Dict[str, Any]]:
+                          sequences: List[str],
+                          _emb_arr_key: str = "emb_arr") -> List[Dict[str, Any]]:
         """
         
         """
@@ -295,19 +296,26 @@ class SequenceGenerator:
         padded_probs, pad_mask = pad_sequences(probabilities, self.pad_idx)
         entropies = score_entropy(padded_probs, pad_mask)
 
+        #TODO: probably a cleaner way to do this...
         processed_data = []
+        processed_sequences = []
         for seq, rep, prob, entropy in zip(sequences, representations, probabilities, entropies):
-            sequence_str = self.embedder.get_ohe_seq(seq)
+            
+            #Drop gaps
+            sequence_str = get_ohe_seq(seq).replace("-","")
             if not any(char not in self.alphabet for char in sequence_str):
-                print(sequence_str)
+                # Create a BaseNumpySequence object.
+                sequence_obj = BaseNumpySequence(list(sequence_str), alphabet=self.alphabet.remove("-"))
+                
+                # Collect sequence for validation.
+                processed_sequences.append(sequence_obj)
                 processed_data.append({
-                    'sequence': seq,
-                    'sequences_str' : sequence_str,
-                    'representation': rep,
+                    'sequence': sequence_obj, # Store the object instead of the tensor
+                    f'{_emb_arr_key}': rep,
                     'lm_output': prob,
                     'lm_entropy': entropy.item()
                 })
-        return processed_data
+        return processed_data, processed_sequences
 
     def generate_children(self,
                           parent_probs: List[torch.Tensor],
@@ -321,7 +329,7 @@ class SequenceGenerator:
         children_padded = self.sampler.sample(expanded_probs, self.pad_idx)
         children_unpadded = remove_padding(children_padded, self.pad_idx)
         
-        return self.process_sequences(children_unpadded)
+        return self.process_sequences(children_unpadded)[0]
     
 class SequenceSpaceAttractor:
     """
@@ -384,7 +392,7 @@ class EvolutionParticleSampler:
         """
         
         """
-        processed_seeds = self.generator.process_sequences(seed_sequences)
+        processed_seeds, _ = self.generator.process_sequences(seed_sequences)
         for seed_data in processed_seeds:
             node_id = self.node_counter
             self.G.add_node(node_id, **seed_data)
@@ -431,9 +439,7 @@ class EvolutionParticleSampler:
         
         """
         for i in range(self.traj_length):
-            print(f"--- Running Trajectory Step {i+1} ---")
             if not self._step():
-                print("Stopping: No more parents to select.")
                 break
         print("Evolution finished.")
 
