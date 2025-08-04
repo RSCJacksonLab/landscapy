@@ -7,7 +7,7 @@ from typing import List, Union, Dict, Any, Iterable, Literal,  Protocol, runtime
 from dataclasses import dataclass
 from .sequence import BaseNumpySequence, make_sequence
 from .graph import create_cknn_graph, create_diffusion_graph, create_hamming_graph, create_tda_graph
-from .digraph import create_phylo_digraph
+from .digraph import create_phylo_digraph, create_evol_diffusion_digraph
 from .fitness import NumericFitness, CategoricalFitness
 from abc import ABC, abstractmethod
 from .graph import create_knn_graph, create_hamming_graph
@@ -500,7 +500,7 @@ class DirectedFitnessLandscape(FitnessLandscape):
     def from_sequences(cls,
                        sequences: Union[List[BaseNumpySequence], Alignment],
                        fitness_layers: Dict[str, BaseFitnessLayer] = None,
-                       graph_type: Literal['phylogenetic', 'diffusion'] = 'phylogenetic',
+                       digraph_type: Literal['phylogenetic', 'diffusion_nq'] = 'phylogenetic',
                        embeddings: np.ndarray = None,
                        attach_embeddings: bool = True,
                        **kwargs) -> 'DirectedFitnessLandscape':
@@ -512,61 +512,50 @@ class DirectedFitnessLandscape(FitnessLandscape):
         and the construction of the graph based on the specified type.
         """
 
-        graph_constructors = {
+        embedding_based_digraphs = {'diffusion_nq'}
+
+        # Secure Embeddings.
+        if digraph_type in embedding_based_digraphs:
+            if embeddings is None:
+
+                model_name = kwargs.get('model_name', 'facebook/esm2_t6_8M_UR50D')
+                batch_size = kwargs.get('batch_size', 64)
+                embeddings = _compute_embeddings_from_sequences(
+                    sequences,
+                    model_name=model_name,
+                    batch_size=batch_size
+                )
+
+        #TODO: Add other digraph constructors
+        digraph_constructors = {
             'phylogenetic': create_asr_digraph,
-            'diffusion_nq': None, # TODO: Directional diffusion on asymmetric replacement matrix.
+            'diffusion_nq': create_evol_diffusion_digraph,
             'diffusion_pll': None, # TODO: Directional diffusion on log-likelihood
             'particle_mcmc': None, # TODO: accept PR and move to factory function.
             }
 
+        # Phylogenetic reconstruction requires an alignment.
         if graph_type == 'phylogenetic':
-            # Phylogenetic reconstruction requires an alignment.
+        
             if not isinstance(sequences, Alignment):
                 raise ValueError("Phylogenetic graph construction requires a cogent3 `Alignment` sequence input.")
     
-            digraph= create_phylo_digraph(alignment=sequences,
-                                          phylogenetic_tree=kwargs.get('phylogenetic_tree'),
-                                          ancestral_states=kwargs.get('ancestral_states'))
+        
+        constructor_kwargs = kwargs
+        if embeddings is not None:
+            constructor_kwargs['embeddings'] = embeddings
+
+        digraph = digraph_constructors[digraph_type](sequences, **constructor_kwargs)
             
-        
+
         final_embeddings = embeddings if attach_embeddings else None
-        
+
         return cls(sequences=sequences,
                    graph=digraph,
                    fitness_layers=fitness_layers,
                    embeddings=final_embeddings,
                    emb_arr_key=kwargs.get('emb_arr_key', 'emb_arr')
                    )
-
-        #TODO: Add other digraph constructors
-
-        # elif graph_type == 'diffusion_pll':
-        #     if embeddings is None:
-        #         model_name = kwargs.get('model_name', 'facebook/esm2_t6_8M_UR50D')
-        #         batch_size = kwargs.get('batch_size', 64)
-        #         embeddings = _compute_embeddings_from_sequences(
-        #             sequences,
-        #             model_name=model_name,
-        #             batch_size=batch_size
-        #         )
-        #     # create_diffusion_graph returns a DiGraph
-        #     # TODO: create diffusion function 
-        #     graph = create_diffusion_pll_digraph(sequences,
-        #                                        embeddings=embeddings,
-        #                                        **kwargs)
-        #     final_embeddings = embeddings if attach_embeddings else None
-
-        #     return cls(sequences=sequences,
-        #                graph=graph,
-        #                fitness_layers=fitness_layers,
-        #                embeddings=final_embeddings,
-        #                emb_arr_key=kwargs.get('emb_arr_key', 'emb_arr'))
-
-        # elif graph_type == 'diffusion_nq':
-        #     return create_diffusion_nq_digraph(sequences,
-        #                                        **kwargs)
-        # else:
-        #     raise ValueError(f"Unsupported directed graph type: {graph_type}")
 
     @classmethod
     def from_graph(cls,

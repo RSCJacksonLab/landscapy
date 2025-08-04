@@ -42,7 +42,7 @@ setup(
         "ray>=2.48",
         "gudhi>=3.11",
         "torch_geometric>=2.6",
-        "softalign @ git+https://github.com/RSCJacksonLab/softalign.git@9127e3a"
+        "softalign @ git+https://github.com/RSCJacksonLab/softalign.git@dev"
     ],
     extras_require={
         "dev": [

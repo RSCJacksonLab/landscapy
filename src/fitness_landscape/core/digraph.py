@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Union, Dict
+from typing import Union, Dict, List
 import numpy as np
 import networkx as nx
 from cogent3 import load_aligned_seqs, Alignment, PhyloNode, load_tree, get_app
@@ -16,7 +16,7 @@ from ..utils import calculate_gapped_soft_score
 from softalign.soft_alignment import align_soft_sequences
 
 
-def create_phylo_digraph(alignment: Union[Path, Alignment],
+def create_phylo_digraph(sequences: Union[Path, Alignment],
                          phylogenetic_tree: Union[Path, PhyloNode] = None,
                          ancestral_states: Table = None) -> nx.DiGraph:
     """
@@ -324,7 +324,7 @@ def create_phylo_digraph(alignment: Union[Path, Alignment],
     return digraph
 
 def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
-                                             embeddings: np.ndarray = None,
+                                             embeddings: np.ndarray,
                                              replacement_matrix: np.ndarray = nq_pfam,
                                              k: int = 50,
                                              t: int = 5,
@@ -332,13 +332,25 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
                                              connectivity_threshold: float = 1e-4,
                                              **kwargs) -> nx.DiGraph:
     """
-    Constructs a diffusion graph by scoring standard alignments with a
-    phylogenetic likelihood model.
+    Constructs a diffusion graph by scoring standard alignments with an
+    asymmetric non-equilibrium replacement matrix.
 
-    This refactored version uses a utility function to perform the alignments
-    before scoring them phylogenetically.
-
-    Parameters are the same as the previous version.
+    Parameters
+    ----------
+    sequences : List[BaseNumpySequence]
+        The list of sequence in the landscape. 
+    
+    embeddings : np.ndarray
+        Sequence embeddings indexed by the entry in `sequences`.
+    
+    k : int, default=50
+        The number of neighbours to use for kNN pre-filtering.
+    
+    t : int, default=5
+        The number of diffusion steps taken.
+    
+    tau : float, default=1.0
+        The temperature parameter used to smooth the distance kernel.
 
     Returns
     -------
@@ -416,6 +428,6 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
     for i, seq in enumerate(sequences):
         G.nodes[i]['sequence'] = seq
         
-    return G      
+    return G
 
     # TODO: Evolutionary velocity connectivity
