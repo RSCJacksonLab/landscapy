@@ -3,11 +3,14 @@ import pytest
 import networkx as nx
 from fitness_landscape.core.sequence import *
 from fitness_landscape.core.graph import *
+from fitness_landscape.core.digraph import *
 from fitness_landscape.core.landscape import FitnessLandscape
 from fitness_landscape.core.fitness import NumericFitness, CategoricalFitness
 import torch
 from torch_geometric.data import Data
 from fitness_landscape.core.fitness import NumericFitness, CategoricalFitness, ProbabilisticCategoricalFitness
+from pathlib import Path
+from fitness_landscape._sub_matrices import nq_pfam
 
 @pytest.fixture
 def basic_landscape():
@@ -41,6 +44,34 @@ def clustered_data():
     
     return sequences, embeddings
 
+@pytest.fixture
+def phylo_test_data(tmp_path: Path) -> Path:
+    """Creates a simple FASTA alignment file for testing."""
+    fasta_content = """>seq1
+ACDEFGHIKLMNPQRSTVWY
+>seq2
+ACDEFGHIKLMNPQRSTMAD
+>seq3
+ACDEFGHIKLMNPQRSTVAD
+"""
+    fasta_file = tmp_path / "phylo_test.fasta"
+    fasta_file.write_text(fasta_content)
+    return fasta_file
+
+@pytest.fixture
+def diffusion_test_data():
+    """Provides sequences and embeddings with a clear cluster structure."""
+    sequences = [
+        BaseNumpySequence(['A', 'R', 'N', 'D'], alphabet=PROT_20),
+        BaseNumpySequence(['A', 'Q', 'N', 'E'], alphabet=PROT_20),
+        BaseNumpySequence(['Y', 'Y', 'Y', 'Y'], alphabet=PROT_20)  
+    ]
+    embeddings = np.array([
+        [0.1, 0.1], 
+        [0.2, 0.1], 
+        [5.0, 5.0]  
+    ])
+    return sequences, embeddings
 
 def test_sequence_creation_and_distance():
     """
@@ -527,3 +558,37 @@ def test_read_from_fasta(tmp_path: Path):
     assert isinstance(sequences[0], BaseNumpySequence)
     assert sequences[0].id == "seq1"
     assert np.array_equal(sequences[1].to_array(), list("GATTACA"))
+
+def test_create_phylo_digraph_from_fasta(phylo_test_data: Path):
+    """
+    Tests that create_phylo_digraph correctly builds a directed graph
+    from a FASTA file, inferring the tree and ancestral states.
+    """
+    # Run the constructor
+    digraph = create_phylo_digraph(sequences=phylo_test_data)
+    assert isinstance(digraph, nx.DiGraph), "The output should be a NetworkX DiGraph."
+    assert digraph.number_of_nodes() == 5, "Expected 3 tip nodes and 2 ancestral nodes."
+    assert digraph.number_of_edges() == 4, "Expected 4 edges in the phylogenetic tree."
+    assert isinstance(digraph.nodes['seq1']['sequence'], BaseNumpySequence)
+    internal_node = [n for n in digraph.nodes if n not in ['seq1', 'seq2', 'seq3']][0]
+    assert 'sequence' in digraph.nodes[internal_node]
+
+def test_create_evol_diffusion_digraph(diffusion_test_data):
+    """
+    Tests that the evolutionary diffusion graph constructor correctly
+    builds a directed graph using k-NN filtering and soft alignment scoring.
+    """
+    sequences, embeddings = diffusion_test_data
+
+
+    G = create_evol_diffusion_digraph(
+        sequences=sequences,
+        embeddings=embeddings,
+        replacement_matrix=nq_pfam,
+        k=1, # Each node finds only its single nearest neighbor
+        t=2,
+        tau=0.1 # A low tau to create a sharp kernel
+    )
+
+    assert isinstance(G, nx.DiGraph), "The output should be a NetworkX DiGraph."
+    assert G.number_of_nodes() == 3, "Graph should have 3 nodes."
