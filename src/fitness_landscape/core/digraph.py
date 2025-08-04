@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Union, Dict, List
 import numpy as np
 import networkx as nx
-from cogent3 import load_aligned_seqs, Alignment, PhyloNode, load_tree, get_app
+from cogent3 import load_aligned_seqs, ArrayAlignment, PhyloNode, load_tree, get_app
 import piqtree
 from piqtree import Model
 from piqtree.model import AaModel
@@ -16,7 +16,7 @@ from ..utils import calculate_gapped_soft_score
 from softalign.soft_alignment import align_soft_sequences
 
 
-def create_phylo_digraph(sequences: Union[Path, Alignment],
+def create_phylo_digraph(sequences: Union[Path, ArrayAlignment],
                          phylogenetic_tree: Union[Path, PhyloNode] = None,
                          ancestral_states: Table = None) -> nx.DiGraph:
     """
@@ -57,7 +57,7 @@ def create_phylo_digraph(sequences: Union[Path, Alignment],
                 self.alignment = load_aligned_seqs(alignment,
                                                 format="fasta",
                                                 moltype="protein")
-            elif isinstance(alignment, Alignment):
+            elif isinstance(alignment, ArrayAlignment):
                 self.alignment = alignment
             
             else:

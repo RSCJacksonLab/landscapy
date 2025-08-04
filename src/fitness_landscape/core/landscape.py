@@ -5,18 +5,19 @@ from torch_geometric.data import Data
 from torch_geometric.utils import from_networkx
 from typing import List, Union, Dict, Any, Iterable, Literal,  Protocol, runtime_checkable, Hashable
 from dataclasses import dataclass
-from .sequence import BaseNumpySequence, make_sequence
+from .sequence import BaseNumpySequence, make_sequence, read_from_fasta
 from .graph import create_cknn_graph, create_diffusion_graph, create_hamming_graph, create_tda_graph
 from .digraph import create_phylo_digraph, create_evol_diffusion_digraph
-from .fitness import NumericFitness, CategoricalFitness
+from .fitness import NumericFitness, CategoricalFitness, BaseFitnessLayer
 from abc import ABC, abstractmethod
 from .graph import create_knn_graph, create_hamming_graph
 from ..utils import _compute_embeddings_from_sequences
-from .fitness import BaseFitnessLayer
 import inspect
 from collections import defaultdict
-from cogent3 import Alignment
+from cogent3 import ArrayAlignment, load_aligned_seqs
 from pathlib import Path
+
+from .._const import PROT_20
 
 
 class FitnessLandscape:
@@ -499,7 +500,7 @@ class DirectedFitnessLandscape(FitnessLandscape):
     
     @classmethod
     def from_sequences(cls,
-                       sequences: Union[List[BaseNumpySequence], Alignment],
+                       sequences: Union[List[BaseNumpySequence], ArrayAlignment, Path],
                        fitness_layers: Dict[str, BaseFitnessLayer] = None,
                        digraph_type: Literal['phylogenetic', 'diffusion_nq'] = 'phylogenetic',
                        embeddings: np.ndarray = None,
@@ -515,6 +516,32 @@ class DirectedFitnessLandscape(FitnessLandscape):
 
         embedding_based_digraphs = {'diffusion_nq'}
 
+        # Remove phylogenetic constructor for explicit typing.
+        digraph_constructors = {
+            'diffusion_nq': create_evol_diffusion_digraph,
+            'diffusion_pll': None, # TODO: Directional diffusion on log-likelihood
+            'particle_mcmc': None, # TODO: accept PR and move to factory function.
+            }
+
+        # Phylogenetic reconstruction requires specific types
+        if digraph_type == 'phylogenetic':
+
+            # Keep alignment for phylo and ASR.
+            alignment = load_aligned_seqs(sequences) if isinstance(sequences, Path) else sequences
+            #Load sequences for constructor, drop gaps (if present).
+            sequences = [BaseNumpySequence(str(alignment.seqs[i]).replace("-",""), alphabet=PROT_20) for i in range(len(alignment.seqs))]
+            
+            digraph = create_phylo_digraph(alignment, **kwargs)
+            final_embeddings = embeddings if attach_embeddings else None
+            
+            return cls(sequences=sequences,
+                   graph=digraph,
+                   fitness_layers=fitness_layers,
+                   embeddings=final_embeddings,
+                   emb_arr_key=kwargs.get('emb_arr_key', 'emb_arr')
+                   )
+
+        # Non phylogenetic constructors where sequence typing is easy.
         # Secure Embeddings.
         if digraph_type in embedding_based_digraphs:
             if embeddings is None:
@@ -526,22 +553,8 @@ class DirectedFitnessLandscape(FitnessLandscape):
                     model_name=model_name,
                     batch_size=batch_size
                 )
-
-        #TODO: Add other digraph constructors
-        digraph_constructors = {
-            'phylogenetic': create_phylo_digraph,
-            'diffusion_nq': create_evol_diffusion_digraph,
-            'diffusion_pll': None, # TODO: Directional diffusion on log-likelihood
-            'particle_mcmc': None, # TODO: accept PR and move to factory function.
-            }
-
-        # Phylogenetic reconstruction requires an alignment or Path.
-        if digraph_type == 'phylogenetic':
-            if not isinstance(sequences, Path):
-                if not isinstance(sequences, Alignment):
-                    raise ValueError("Phylogenetic graph construction requires a cogent3 `Alignment` sequence input or Path.")
     
-        
+
         constructor_kwargs = kwargs
         if embeddings is not None:
             constructor_kwargs['embeddings'] = embeddings
