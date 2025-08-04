@@ -231,24 +231,6 @@ class ESMEmbedder:
         
         return encoding
     
-    def get_ohe_seq(self, 
-                    sequence: Union[str, np.ndarray, torch.Tensor]) -> np.ndarray:
-        """
-        Get sequence from OHE representation.
-        """
-        if isinstance(sequence, str):
-            return sequence
-        elif isinstance(sequence, np.ndarray):
-            if sequence.ndim == 1:
-                sequence = sequence[np.newaxis, :]
-            return ''.join([self.alphabet[np.argmax(aa)] for aa in sequence])
-        elif isinstance(sequence, torch.Tensor):
-            if sequence.dim() == 1:
-                sequence = sequence.unsqueeze(0)
-            return [self.alphabet[aa.argmax().item()] for aa in sequence]
-        else:
-            raise ValueError("Input must be a string, numpy array, or torch tensor.")
-    
     def embed_relaxed_seqs(self,
                         sequences: Union[np.ndarray, torch.Tensor, List[Union[str, np.ndarray, torch.Tensor]]],
                         batch_size: Optional[int] = None) -> List[np.ndarray]:
