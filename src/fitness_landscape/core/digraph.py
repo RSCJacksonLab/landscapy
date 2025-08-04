@@ -319,10 +319,11 @@ def create_phylo_digraph(sequences: Union[Path, Alignment],
                 )
             return G
         
-    constructor = ASRConstructor(alignment, phylogenetic_tree, ancestral_states)
+    constructor = ASRConstructor(sequences, phylogenetic_tree, ancestral_states)
     digraph = constructor.construct_dag()
     return digraph
 
+#TODO: Add emergence time masking.
 def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
                                              embeddings: np.ndarray,
                                              replacement_matrix: np.ndarray = nq_pfam,

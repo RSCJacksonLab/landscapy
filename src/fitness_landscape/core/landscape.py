@@ -16,6 +16,7 @@ from .fitness import BaseFitnessLayer
 import inspect
 from collections import defaultdict
 from cogent3 import Alignment
+from pathlib import Path
 
 
 class FitnessLandscape:
@@ -528,17 +529,17 @@ class DirectedFitnessLandscape(FitnessLandscape):
 
         #TODO: Add other digraph constructors
         digraph_constructors = {
-            'phylogenetic': create_asr_digraph,
+            'phylogenetic': create_phylo_digraph,
             'diffusion_nq': create_evol_diffusion_digraph,
             'diffusion_pll': None, # TODO: Directional diffusion on log-likelihood
             'particle_mcmc': None, # TODO: accept PR and move to factory function.
             }
 
-        # Phylogenetic reconstruction requires an alignment.
-        if graph_type == 'phylogenetic':
-        
-            if not isinstance(sequences, Alignment):
-                raise ValueError("Phylogenetic graph construction requires a cogent3 `Alignment` sequence input.")
+        # Phylogenetic reconstruction requires an alignment or Path.
+        if digraph_type == 'phylogenetic':
+            if not isinstance(sequences, Path):
+                if not isinstance(sequences, Alignment):
+                    raise ValueError("Phylogenetic graph construction requires a cogent3 `Alignment` sequence input or Path.")
     
         
         constructor_kwargs = kwargs

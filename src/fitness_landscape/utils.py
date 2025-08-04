@@ -62,6 +62,7 @@ def get_landscape_dist_mat(landscape: 'FitnessLandscape',
 
 def _compute_embeddings_from_sequences(sequences: List[BaseNumpySequence],
                                        model_name: str = 'facebook/esm2_t6_8M_UR50D',
+                                       device: str = None,
                                        batch_size: int = 64) -> np.ndarray:
     """
     Function to compute soft node embeddings from a list of sequnce
@@ -103,7 +104,8 @@ def _compute_embeddings_from_sequences(sequences: List[BaseNumpySequence],
                            batch_size=batch_size)
     
     embeddings = embedder.embed_relaxed_seqs(
-        relaxed_seqs=ohe_arrays)
+        sequences=ohe_arrays
+        )
     
     return embeddings
 
