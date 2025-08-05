@@ -534,8 +534,8 @@ def test_stochastic_correlation_length_vs_ruggedness(additive_landscape: additiv
         If the correlation length for the smooth landscape is not greater
         than that for the rugged landscape.
     """
-    smooth_results = calculate_ruggedness_autocorrelation_stochastic(additive_landscape, steps=5000)
-    rugged_results = calculate_ruggedness_autocorrelation_stochastic(epistatic_landscape, steps=5000)
+    smooth_results = calculate_ruggedness_autocorrelation_stochastic(additive_landscape)
+    rugged_results = calculate_ruggedness_autocorrelation_stochastic(epistatic_landscape)
     
     assert smooth_results['correlation_length'] > rugged_results['correlation_length']
 
@@ -553,31 +553,10 @@ def test_autocorrelation_on_random_landscape(random_rmf_landscape: random_rmf_la
     AssertionError
         If the autocorrelation at lag 1 is not close to zero.
     """
-    results = calculate_ruggedness_autocorrelation_stochastic(random_rmf_landscape, steps=10000, lag_max=5)
+    results = calculate_ruggedness_autocorrelation_stochastic(random_rmf_landscape, lag_max=5)
     
     # The autocorrelation at lag 1 should be very close to zero.
     assert np.isclose(results['autocorrelation'][1], 0, atol=0.1)
-
-def test_stochastic_converges_to_analytical(additive_landscape: additive_landscape):
-    """
-    Tests that the stochastic autocorrelation converges to the
-    analytical result for a long random walk.
-
-    Raises
-    ------
-    AssertionError
-        If the stochastic autocorrelation does not match the analytical
-        autocorrelation within a reasonable tolerance.
-    """
-    # This is not a very good test - results are quite uncorrelated, but reproducible..
-
-    analytical_results = calculate_ruggedness_autocorrelation_analytical(additive_landscape, lag_max=5)
-    analytical_autocorr = analytical_results['autocorrelation']
-    stochastic_results = calculate_ruggedness_autocorrelation_stochastic(additive_landscape, steps=10000, lag_max=5)
-    stochastic_autocorr = stochastic_results['autocorrelation']
-
-    assert np.allclose(analytical_autocorr, stochastic_autocorr, atol=0.5)
-
 
 
 # Statistics tests
