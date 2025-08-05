@@ -6,7 +6,7 @@ from torch_geometric.utils import from_networkx
 from typing import List, Union, Dict, Any, Iterable, Literal,  Protocol, runtime_checkable, Hashable
 from dataclasses import dataclass
 from .sequence import BaseNumpySequence, make_sequence
-from .graph import create_cknn_graph, create_diffusion_graph, create_hamming_graph, create_tda_graph
+from .graph import create_diffusion_emb_graph, create_hamming_graph, create_tda_graph
 from .fitness import NumericFitness, CategoricalFitness
 from abc import ABC, abstractmethod
 from .graph import create_knn_graph, create_hamming_graph
@@ -75,7 +75,7 @@ class FitnessLandscape:
         This method orchestrates the computation of embeddings (if needed)
         and the construction of the graph based on the specified type.
         """
-        embedding_based_graphs = {'knn', 'tda', 'cknn', 'diffusion'}
+        embedding_based_graphs = {'knn', 'tda', 'diffusion'}
 
         # Secure Embeddings.
         if graph_type in embedding_based_graphs:
@@ -94,8 +94,7 @@ class FitnessLandscape:
             'hamming': create_hamming_graph,
             'knn': create_knn_graph,
             'tda': create_tda_graph,
-            #'cknn': create_cknn_graph, TODO: Fix c-kNN BUG
-            'diffusion': create_diffusion_graph
+            'diffusion': create_diffusion_emb_graph
         }
         if graph_type not in graph_constructors:
             raise ValueError(f"Unsupported graph type for construction: {graph_type}")
@@ -300,7 +299,7 @@ class FitnessLandscape:
         #                                    k=kwargs.get('k', 3))
         
         elif self.graph_type == 'diffusion':
-            self.graph = create_diffusion_graph(self.sequences, 
+            self.graph = create_diffusion_emb_graph(self.sequences, 
                                                 embeddings=self.embeddings,
                                                 t=kwargs.get('t', 5),
                                                 connectivity_threshold=kwargs.get('connectivity_threshold', 0.0001))
