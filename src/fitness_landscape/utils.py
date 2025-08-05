@@ -1,6 +1,6 @@
 import numpy as np
 import networkx as nx
-from typing import List
+from typing import List, Union
 import torch
 from .core.sequence import BaseNumpySequence, SoftSequence
 from .embedding.soft_embedding import ESMEmbedder
@@ -217,29 +217,28 @@ def calculate_gapped_soft_score(aligned_seq1: np.ndarray,
     
     return total_score
 
-    def get_ohe_seq(self, 
-                    sequence: Union[str, np.ndarray, torch.Tensor],
-                    alphabet: List = PROT_20 + ["-"]) -> np.ndarray:
-        """
-        Get sequence from OHE representation. 
+def get_ohe_seq(sequence: Union[str, np.ndarray, torch.Tensor],
+                alphabet: List = PROT_20 + ["-"]) -> np.ndarray:
+    """
+    Get sequence from OHE representation. 
 
-        Parameters
-        ----------
-        sequence : str, np.ndarray or torch.Tensor
-            The sequence to convert. 
-        
-        alphabet : List, default=`PROT_20`
-            The alphabet. Default is the alphabetical.
-        """
-        if isinstance(sequence, str):
-            return sequence
-        elif isinstance(sequence, np.ndarray):
-            if sequence.ndim == 1:
-                sequence = sequence[np.newaxis, :]
-            return ''.join([alphabet[np.argmax(aa)] for aa in sequence])
-        elif isinstance(sequence, torch.Tensor):
-            if sequence.dim() == 1:
-                sequence = sequence.unsqueeze(0)
-            return "".join([alphabet[aa.argmax().item()] for aa in sequence])
-        else:
-            raise ValueError("Input must be a string, numpy array, or torch tensor.")
+    Parameters
+    ----------
+    sequence : str, np.ndarray or torch.Tensor
+        The sequence to convert. 
+    
+    alphabet : List, default=`PROT_20`
+        The alphabet. Default is the alphabetical.
+    """
+    if isinstance(sequence, str):
+        return sequence
+    elif isinstance(sequence, np.ndarray):
+        if sequence.ndim == 1:
+            sequence = sequence[np.newaxis, :]
+        return ''.join([alphabet[np.argmax(aa)] for aa in sequence])
+    elif isinstance(sequence, torch.Tensor):
+        if sequence.dim() == 1:
+            sequence = sequence.unsqueeze(0)
+        return "".join([alphabet[aa.argmax().item()] for aa in sequence])
+    else:
+        raise ValueError("Input must be a string, numpy array, or torch tensor.")

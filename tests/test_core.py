@@ -11,6 +11,22 @@ from torch_geometric.data import Data
 from fitness_landscape.core.fitness import NumericFitness, CategoricalFitness, ProbabilisticCategoricalFitness
 from pathlib import Path
 from fitness_landscape._sub_matrices import nq_pfam
+from fitness_landscape.embedding.particle_sampler import SequenceGenerator, TopPSampler
+
+@pytest.fixture
+def mock_embedder(mocker):
+    """Mocks the ESMEmbedder to avoid loading a real model."""
+    embedder = mocker.MagicMock()
+    embedder.alphabet = list('ACDEFGHIKLMNPQRSTVWY-') + ['<cls>', '<eos>', '<pad>', '<mask>']
+    embedder.embed_relaxed_seqs.return_value = np.random.rand(10, 320)
+    embedder.lm_output_probabilities.return_value = [np.random.rand(5, 25) for _ in range(10)]
+    return embedder
+
+@pytest.fixture
+def sequence_generator(mock_embedder):
+    """Provides a SequenceGenerator with a mocked embedder."""
+    sampler = TopPSampler()
+    return SequenceGenerator(embedder=mock_embedder, sampler=sampler, batch_size=10)
 
 @pytest.fixture
 def basic_landscape():
@@ -592,3 +608,46 @@ def test_create_evol_diffusion_digraph(diffusion_test_data):
 
     assert isinstance(G, nx.DiGraph), "The output should be a NetworkX DiGraph."
     assert G.number_of_nodes() == 3, "Graph should have 3 nodes."
+
+def test_parent_selector():
+    """Tests that the ParentSelector selects the correct number of candidates."""
+    selector = ParentSelector(max_state_size=5)
+    candidates = list(range(10))
+    weights = np.random.rand(10).tolist()
+    selected = selector.select(list(zip(candidates, weights)))
+    assert len(selected) == 5
+
+def test_sampler_initialization(sequence_generator):
+    """Tests that the EvolutionParticleSampler initializes correctly."""
+    selector = ParentSelector(max_state_size=2)
+    sampler = EvolutionParticleSampler(
+        generator=sequence_generator,
+        selector=selector,
+        n_samples=2,
+        traj_length=5
+    )
+    sampler.initialize(seed_sequences=["ACDEF"])
+    
+    assert isinstance(sampler.G, nx.DiGraph)
+    assert sampler.G.number_of_nodes() == 1
+    node_data = list(sampler.G.nodes(data=True))[0][1]
+    assert isinstance(node_data['sequence'], BaseNumpySequence)
+    assert node_data['sequence'].to_str() == "ACDEF"
+
+def test_sampler_step(sequence_generator):
+    """Tests a single step of the sampler to ensure it adds nodes and edges."""
+    selector = ParentSelector(max_state_size=1)
+    sampler = EvolutionParticleSampler(
+        generator=sequence_generator,
+        selector=selector,
+        n_samples=10,
+        traj_length=10
+    )
+    sampler.initialize(seed_sequences=["ACGT"])
+    
+    initial_nodes = sampler.G.number_of_nodes()
+    sampler._step()
+
+    # More tests on function would be good
+    newly_added_nodes = sampler.G.number_of_nodes() - initial_nodes
+    assert isinstance(sampler.G, nx.DiGraph)

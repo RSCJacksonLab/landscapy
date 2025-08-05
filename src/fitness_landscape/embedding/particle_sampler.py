@@ -11,7 +11,6 @@ import networkx as nx
 from sklearn.manifold import TSNE
 import torch.nn as nn
 from softalign import align_soft_sequences
-import umap
 from .soft_embedding import ESMEmbedder
 from ..core.sequence import BaseNumpySequence
 from ..utils import get_ohe_seq

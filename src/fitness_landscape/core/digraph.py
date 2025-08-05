@@ -441,7 +441,7 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
 
 def create_particle_filter_digraph(sequences: List[BaseNumpySequence],
                                    n_samples: int,
-                                   h: int,
+                                   traj_length: int,
                                    batch_size: int,
                                    max_state_size: int,
                                    _emb_array_key: str = 'emb_array',

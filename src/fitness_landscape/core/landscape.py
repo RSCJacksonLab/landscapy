@@ -3,7 +3,7 @@ import networkx as nx
 import torch
 from torch_geometric.data import Data
 from torch_geometric.utils import from_networkx
-from typing import List, Union, Dict, Any, Iterable, Literal,  Protocol, runtime_checkable, Hashable
+from typing import List, Union, Dict, Any, Iterable, Literal,  Protocol, runtime_checkable, Hashable, Union
 from dataclasses import dataclass
 from .sequence import BaseNumpySequence, make_sequence, read_from_fasta
 from .graph import create_cknn_graph, create_diffusion_graph, create_hamming_graph, create_tda_graph
@@ -495,8 +495,6 @@ class DirectedFitnessLandscape(FitnessLandscape):
         super().__init__(*args, **kwargs)
         if not isinstance(self.graph, nx.DiGraph):
             raise TypeError("DirectedFitnessLandscape requires a networkx.DiGraph object.")
-        
-    #TODO: rewrite all of these methods specifically for directed graphs.
     
     @classmethod
     def from_sequences(cls,
