@@ -7,7 +7,7 @@ from typing import List, Union, Dict, Any, Iterable, Literal,  Protocol, runtime
 from dataclasses import dataclass
 from .sequence import BaseNumpySequence, make_sequence
 from .graph import create_diffusion_emb_graph, create_hamming_graph, create_tda_graph
-from .fitness import NumericFitness, CategoricalFitness
+from .fitness import NumericFitness, CategoricalFitness, BaseFitnessLayer
 from abc import ABC, abstractmethod
 from .graph import create_knn_graph, create_hamming_graph
 from ..utils import _compute_embeddings_from_sequences
