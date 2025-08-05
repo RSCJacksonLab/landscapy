@@ -3,7 +3,7 @@ import numpy as np
 from ..core.landscape import FitnessLandscape
 from ..core.sequence import BaseNumpySequence, generate_sequences
 from ..core.graph import create_knn_graph, create_hamming_graph
-from ..analysis.eigenmode import eigenmode_decomposition
+from ..transforms.eigenmode import eigenmode_decomposition
 from ..core.fitness import NumericFitness # Import NumericFitness
 
 def create_elementary_landscape(j: int,

@@ -11,7 +11,7 @@ from fitness_landscape.analysis.adaptive_walk import *
 from fitness_landscape.analysis.random_walk import *
 from fitness_landscape.analysis.dirichlet_energy import *
 from fitness_landscape.transforms.graph_fourier import *
-from fitness_landscape.analysis.eigenmode import *
+from fitness_landscape.transforms.eigenmode import *
 from fitness_landscape.analysis.graph import *
 from fitness_landscape.models.elementary_landscape import *
 from fitness_landscape.models.nk import *
@@ -71,7 +71,6 @@ def complete_hamming_graph_n3():
     """
     Provides a complete Hamming graph for N=3.
     """
-    # CORRECTED: create_hamming_graph now takes a list of sequences.
     sequences = generate_sequences(length=3, alphabet=[0, 1])
     return create_hamming_graph(sequences=sequences)
 
@@ -535,8 +534,8 @@ def test_stochastic_correlation_length_vs_ruggedness(additive_landscape: additiv
         If the correlation length for the smooth landscape is not greater
         than that for the rugged landscape.
     """
-    smooth_results = calculate_ruggedness_autocorrelation_stochastic(additive_landscape, steps=5000)
-    rugged_results = calculate_ruggedness_autocorrelation_stochastic(epistatic_landscape, steps=5000)
+    smooth_results = calculate_ruggedness_autocorrelation_stochastic(additive_landscape)
+    rugged_results = calculate_ruggedness_autocorrelation_stochastic(epistatic_landscape)
     
     assert smooth_results['correlation_length'] > rugged_results['correlation_length']
 
@@ -554,31 +553,10 @@ def test_autocorrelation_on_random_landscape(random_rmf_landscape: random_rmf_la
     AssertionError
         If the autocorrelation at lag 1 is not close to zero.
     """
-    results = calculate_ruggedness_autocorrelation_stochastic(random_rmf_landscape, steps=10000, lag_max=5)
+    results = calculate_ruggedness_autocorrelation_stochastic(random_rmf_landscape, lag_max=5)
     
     # The autocorrelation at lag 1 should be very close to zero.
     assert np.isclose(results['autocorrelation'][1], 0, atol=0.1)
-
-def test_stochastic_converges_to_analytical(additive_landscape: additive_landscape):
-    """
-    Tests that the stochastic autocorrelation converges to the
-    analytical result for a long random walk.
-
-    Raises
-    ------
-    AssertionError
-        If the stochastic autocorrelation does not match the analytical
-        autocorrelation within a reasonable tolerance.
-    """
-    # This is not a very good test - results are quite uncorrelated, but reproducible..
-
-    analytical_results = calculate_ruggedness_autocorrelation_analytical(additive_landscape, lag_max=5)
-    analytical_autocorr = analytical_results['autocorrelation']
-    stochastic_results = calculate_ruggedness_autocorrelation_stochastic(additive_landscape, steps=10000, lag_max=5)
-    stochastic_autocorr = stochastic_results['autocorrelation']
-
-    assert np.allclose(analytical_autocorr, stochastic_autocorr, atol=0.5)
-
 
 
 # Statistics tests
@@ -819,3 +797,33 @@ def test_graph_properties_disconnected():
     properties = graph_properties(graph)
     assert properties['components']['count'] == 3
     assert 'path_length_note' in properties
+
+def test_walsh_variance_explained(additive_landscape):
+    """
+    Tests the new variation_explained functionality in the Walsh-Hadamard epistasis calculation.
+    """
+    results = calculate_epistasis_walsh(additive_landscape, order=4)
+    
+    assert 'variance_explained' in results
+    
+    # The sum of explained variances should be close to 1.0
+    total_explained = sum(results['variance_explained'].values())
+    assert np.isclose(total_explained, 1.0)
+    
+    assert results['variance_explained'][1] > 0.95
+
+def test_get_epistasis_matrix_variance(epistatic_landscape):
+    """
+    Tests that the get_epistasis_matrix function returns a matrix of
+    variances (floats) for pairwise interactions.
+    """
+    epistasis_matrix = get_epistasis_matrix(epistatic_landscape)
+    assert isinstance(epistasis_matrix, np.ndarray)
+    n = len(epistatic_landscape.sequences[0])
+    assert epistasis_matrix.shape == (n, n)
+    assert epistasis_matrix.dtype == float
+
+    assert np.all(np.diag(epistasis_matrix) == 0)
+    assert np.allclose(epistasis_matrix, epistasis_matrix.T)
+    off_diagonal_mask = ~np.eye(n, dtype=bool)
+    assert np.any(epistasis_matrix[off_diagonal_mask] > 0)

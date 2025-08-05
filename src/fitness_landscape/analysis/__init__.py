@@ -11,11 +11,6 @@ from .dirichlet_energy import (
     calculate_ruggedness_dirichlet_energy,
     local_dirichlet_energy_contribution)
 
-from .eigenmode import (
-    eigenmode_decomposition,
-    reconstruct_from_eigenmodes,
-    graph_spectral_analysis
-)
 
 from .epistasis import (
     calculate_epistasis_walsh,
@@ -26,7 +21,8 @@ from .epistasis import (
 
 from .graph import (
     graph_properties,
-    calculate_ruggedness_local_optima,   
+    calculate_ruggedness_local_optima,
+    graph_spectral_analysis
 )
 
 from .random_walk import (
@@ -56,8 +52,6 @@ __all__ = [
     'neutral_network_analysis',
     'calculate_ruggedness_dirichlet_energy',
     'calculate_local_dirichlet_energy',
-    'eigenmode_decomposition',
-    'reconstruct_from_eigenmodes',
     'graph_spectral_analysis',
     'calculate_epistasis_walsh',
     'calculate_epistasis_regression',

@@ -1,7 +1,8 @@
 import numpy as np
 import networkx as nx
 from ..core.landscape import FitnessLandscape
-from typing import Union, Dict
+from ..transforms.eigenmode import eigenmode_decomposition, _eigenmode_analysis_numpy, _eigenmode_analysis_torch
+from typing import Union, Dict, Literal
 
 def graph_properties(graph: Union[FitnessLandscape, nx.Graph]) -> Dict:
     """
@@ -136,3 +137,42 @@ def calculate_ruggedness_local_optima(landscape: FitnessLandscape,
         'min_fitness': min_fitness,
         'method': 'local_optima'
     }
+
+
+def graph_spectral_analysis(graph: Union[nx.Graph, FitnessLandscape],
+                            k: int = None,
+                            matrix: Literal['adjacency', 'laplacian'] = 'laplacian',
+                            backend: Literal['numpy', 'torch'] = 'numpy') -> Dict:
+    """
+    Analyze the eigenmodes of a graph.
+    
+    Parameters
+    ----------
+    graph : networkx.Graph or FitnessLandscape
+        Graph to analyze.
+    k : int or None, optional
+        Number of eigenmodes to analyze.
+    matrix : str, default = `laplacian`
+        The matrix to decompose.
+    backend : str, default = `numpy`
+        Computational backend ('numpy', 'torch').
+        
+    Returns
+    -------
+    dict
+        Eigenspectral analysis results. 
+    """
+    # Compute eigenmode decomposition
+    eigenvalues, eigenvectors = eigenmode_decomposition(graph, matrix=matrix, k=k, backend=backend)
+    
+    # Handle FitnessLandscape input
+    if isinstance(graph, FitnessLandscape):
+        graph = graph.graph
+    
+    # Compute analysis metrics based on backend
+    if backend == 'numpy':
+        return _eigenmode_analysis_numpy(eigenvalues, eigenvectors)
+    elif backend == 'torch':
+        return _eigenmode_analysis_torch(eigenvalues, eigenvectors)
+    else:
+        raise ValueError(f"Unsupported backend: {backend}")

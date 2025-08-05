@@ -4,7 +4,7 @@ import torch
 import networkx as nx
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
 from ..core.landscape import FitnessLandscape
-from ..analysis.eigenmode import eigenmode_decomposition
+from .eigenmode import eigenmode_decomposition
 
 
 def graph_fourier_transform(graph: Union[nx.Graph, FitnessLandscape],
