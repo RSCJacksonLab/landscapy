@@ -13,6 +13,8 @@ import torch.nn as nn
 from softalign import align_soft_sequences
 import umap
 from .soft_embedding import ESMEmbedder
+from ..core.sequence import BaseNumpySequence
+from ..utils import get_ohe_seq
 from .._const import PROT_20
 
 def pad_sequences(sequences: List[torch.Tensor],
@@ -285,8 +287,8 @@ class SequenceGenerator:
         self.alphabet = alphabet
 
     def process_sequences(self,
-                          sequences: List[str],
-                          _emb_arr_key: str = "emb_arr") -> List[Dict[str, Any]]:
+                          sequences: List[torch.Tensor],
+                          _emb_arr_key: str = "emb_arr") -> Tuple[List[Dict[str, Any]], List[BaseNumpySequence]]:
         """
         
         """
@@ -296,22 +298,28 @@ class SequenceGenerator:
         padded_probs, pad_mask = pad_sequences(probabilities, self.pad_idx)
         entropies = score_entropy(padded_probs, pad_mask)
 
-        #TODO: probably a cleaner way to do this...
         processed_data = []
         processed_sequences = []
-        for seq, rep, prob, entropy in zip(sequences, representations, probabilities, entropies):
+        
+        # Define the correct ungapped alphabet *before* the loop
+        ungapped_alphabet = [char for char in self.alphabet if char != '-']
+
+        for seq_tensor, rep, prob, entropy in zip(sequences, representations, probabilities, entropies):
             
-            #Drop gaps
-            sequence_str = get_ohe_seq(seq).replace("-","")
-            if not any(char not in self.alphabet for char in sequence_str):
-                # Create a BaseNumpySequence object.
-                sequence_obj = BaseNumpySequence(list(sequence_str), alphabet=self.alphabet.remove("-"))
+            # Drop gaps for alphabet to work. 
+            # TODO: There is probably a nicer way to handle this...
+            sequence_str = get_ohe_seq(seq_tensor, alphabet=self.embedder.alphabet).replace("-","")
+
+            if not any(char not in ungapped_alphabet for char in sequence_str):
                 
-                # Collect sequence for validation.
+                # Create a BaseNumpySequence object with the correct alphabet
+                sequence_obj = BaseNumpySequence(list(sequence_str),
+                                                 alphabet=ungapped_alphabet)
+                
                 processed_sequences.append(sequence_obj)
                 processed_data.append({
-                    'sequence': sequence_obj, # Store the object instead of the tensor
-                    f'{_emb_arr_key}': rep,
+                    'sequence': sequence_obj,
+                    _emb_arr_key: rep,
                     'lm_output': prob,
                     'lm_entropy': entropy.item()
                 })
