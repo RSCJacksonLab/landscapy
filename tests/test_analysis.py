@@ -811,3 +811,19 @@ def test_walsh_variance_explained(additive_landscape):
     assert np.isclose(total_explained, 1.0)
     
     assert results['variance_explained'][1] > 0.95
+
+def test_get_epistasis_matrix_variance(epistatic_landscape):
+    """
+    Tests that the get_epistasis_matrix function returns a matrix of
+    variances (floats) for pairwise interactions.
+    """
+    epistasis_matrix = get_epistasis_matrix(epistatic_landscape)
+    assert isinstance(epistasis_matrix, np.ndarray)
+    n = len(epistatic_landscape.sequences[0])
+    assert epistasis_matrix.shape == (n, n)
+    assert epistasis_matrix.dtype == float
+
+    assert np.all(np.diag(epistasis_matrix) == 0)
+    assert np.allclose(epistasis_matrix, epistasis_matrix.T)
+    off_diagonal_mask = ~np.eye(n, dtype=bool)
+    assert np.any(epistasis_matrix[off_diagonal_mask] > 0)

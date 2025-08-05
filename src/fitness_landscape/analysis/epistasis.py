@@ -90,6 +90,37 @@ def calculate_epistasis_walsh(landscape: FitnessLandscape,
         return result
     
 
+def get_epistasis_matrix(landscape: FitnessLandscape) -> np.ndarray:
+    """
+    Computes an nxn matrix for pairwise variance from the WHT.
+
+    Parameters
+    ----------
+    landscape : FitnessLandscape
+        The fitness landscape to analyze.
+
+    Returns
+    -------
+    epistasis_matrix : np.ndarray
+        An nxn matrix where values represent the variance (squared
+        Walsh coefficient) that each pair of mutations contributes to
+        the total fitness signal.
+    """
+    n = len(landscape.sequences[0])
+    epistasis_matrix = np.zeros((n, n), dtype=float)
+
+    # Calculate second-order epistasis using the Walsh-Hadamard transform
+    results = calculate_epistasis_walsh(landscape, order=2)
+    
+    if 2 in results['by_order']:
+        for term, value in results['by_order'][2].items():
+            i_str, j_str = term.split(',')
+            i, j = int(i_str), int(j_str)
+            epistasis_matrix[i, j] = value**2
+            epistasis_matrix[j, i] = value**2
+
+    return epistasis_matrix
+
 def calculate_epistasis_regression(landscape: FitnessLandscape,
                                     order: int,
                                     regularization: Literal['l1', 'l2', 'elastic_net'] = None,
