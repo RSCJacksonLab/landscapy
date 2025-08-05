@@ -339,41 +339,6 @@ class SequenceGenerator:
         
         return self.process_sequences(children_unpadded)[0]
     
-class SequenceSpaceAttractor:
-    """
-    
-    """
-    def __init__(self,
-                 embedder: ESMEmbedder,
-                 hmm_file: Path = None,
-                 embedding_attribute: str = 'emb_array'):
-        self.embedder = embedder
-        self.embedding_attribute = embedding_attribute
-        self.hmm_pssm = parse_to_pssm_tensor(hmm_file)
-        self.attractor = torch.tensor(self.embedder.embed_relaxed_seqs(self.hmm_pssm).squeeze())
-        self.embedder = None
-
-    def compare(self,
-                G: nx.DiGraph,
-                initial: bool = False) -> float:
-        """
-        
-        """
-        nodes_with_repr = [n for n, d in G.nodes(data=True) if 'attractor_sim' not in d]
-        representations = np.array([G.nodes[n][self.embedding_attribute] for n in nodes_with_repr])
-        similarities = torch.cosine_similarity(
-            torch.tensor(representations, dtype=torch.float32),
-            self.attractor.unsqueeze(0).expand(len(nodes_with_repr), -1)
-        )
-        if initial:
-            self.seed_mean = similarities.mean().item()
-            self.seed_std = similarities.std().item()
-
-        for node, sim in zip(nodes_with_repr, similarities):
-            G.nodes[node]['attractor_sim'] = sim.item()
-        return G
-
-    
 class EvolutionParticleSampler:
     """
     
@@ -382,8 +347,7 @@ class EvolutionParticleSampler:
                  generator: SequenceGenerator,
                  selector: ParentSelector,
                  n_samples: int,
-                 traj_length: int,
-                 attractor = None):
+                 traj_length: int):
         
         self.generator = generator
         self.selector = selector
@@ -392,8 +356,6 @@ class EvolutionParticleSampler:
         self.current_state_nodes = []
         self.G = nx.DiGraph()
         self.node_counter = 0
-        if attractor is not None:
-            self.attractor = attractor
 
     def initialize(self,
                    seed_sequences: List[str]):
@@ -406,17 +368,12 @@ class EvolutionParticleSampler:
             self.G.add_node(node_id, **seed_data)
             self.node_counter += 1
             self.current_state_nodes.append(node_id)
-        if hasattr(self, 'attractor'):
-            self.G = self.attractor.compare(self.G, initial=True)
 
     def _step(self) -> bool:
         """
         
         """
-        if hasattr(self, 'attractor'):
-            candidates = [(node, self.G.nodes[node]['lm_entropy']) for node in self.G.nodes if self.G.nodes[node]['attractor_sim'] < self.attractor.seed_mean * 2]
-        else:
-            candidates = [(node, self.G.nodes[node]['lm_entropy']) for node in self.G.nodes]
+        candidates = [(node, self.G.nodes[node]['lm_entropy']) for node in self.G.nodes]
         
         parent_nodes = self.selector.select(candidates)
         if not parent_nodes:
@@ -436,9 +393,6 @@ class EvolutionParticleSampler:
             parent_entropy = self.G.nodes[parent_id]['lm_entropy']
             child_entropy = child_data['lm_entropy']
             self.G.add_edge(parent_id, child_id, delta_entropy=(parent_entropy - child_entropy))
-
-        if hasattr(self, 'attractor'):
-            self.G = self.attractor.compare(self.G)
         
         return True
 
@@ -450,62 +404,3 @@ class EvolutionParticleSampler:
             if not self._step():
                 break
         print("Evolution finished.")
-
-#TODO: refactor to vis module.
-def _plot_graph(G: nx.DiGraph,
-               attractor: SequenceSpaceAttractor = None,
-
-               output_file: Path = None):
-
-    """
-    
-    """
-    nodes_with_repr = [n for n, d in G.nodes(data=True) if 'representation' in d]
-    if len(nodes_with_repr) < 2:
-        print("Not enough nodes with representations to plot.")
-        return
-
-    representations = np.array([G.nodes[n]['representation'] for n in nodes_with_repr])
-    all_reps = list(representations)
-
-    combined_reps = np.array(all_reps)
-    reducer = umap.UMAP(n_components=2, random_state=42, n_neighbors=15, min_dist=0.1)
-    reduced_combined = reducer.fit_transform(combined_reps)
-    
-    reduced_real = reduced_combined[:len(representations)]
-    pos = {node: reduced_real[i] for i, node in enumerate(nodes_with_repr)}
-
-    plt.style.use('seaborn-v0_8-whitegrid')
-    plt.figure(figsize=(16, 14))
-    ax = plt.gca()
-
-
-    valid_edges = [edge for edge in G.edges() if edge[0] in pos and edge[1] in pos]
-    nx.draw_networkx_edges(G, pos, edgelist=valid_edges, width=1.2, alpha=1.0, 
-                           edge_color=[G.edges[edge].get('delta_entropy', 0) for edge in valid_edges],
-                           edge_cmap=plt.cm.viridis, edge_vmin=-1, edge_vmax=1, arrows= True)
-    
-    threshold = 2 * attractor.seed_mean if attractor else float('inf')
-    inliers = {n: d for n, d in G.nodes(data=True) if n in pos and d.get('attractor_sim', 0) < threshold}
-    outliers = {n: d for n, d in G.nodes(data=True) if n in pos and d.get('attractor_sim', 0) >= threshold}
-    
-    if inliers:
-        inlier_nodes, inlier_pos = list(inliers.keys()), {k: pos[k] for k in inliers}
-        node_colors = [d['lm_entropy'] for d in inliers.values()]
-        nodes_plot = nx.draw_networkx_nodes(G, inlier_pos, nodelist=inlier_nodes, node_size=50, node_color=node_colors, cmap=plt.cm.viridis, alpha=0.9)
-        plt.colorbar(nodes_plot, ax=ax, shrink=0.8, label='Node LM Entropy (Lower is better)')
-
-    if outliers:
-        outlier_nodes, outlier_pos = list(outliers.keys()), {k: pos[k] for k in outliers}
-        nx.draw_networkx_nodes(G, outlier_pos, nodelist=outlier_nodes, node_size=90, node_color='red', alpha=0.8)
-
-    plt.title("UMAP Visualization of Evolutionary Trajectory", fontsize=18)
-    plt.xlabel("UMAP Component 1", fontsize=12)
-    plt.ylabel("UMAP Component 2", fontsize=12)
-    ax.legend()
-    ax.grid(True, linestyle='--', alpha=0.6)
-
-    if output_file:
-        plt.savefig(output_file, bbox_inches='tight', dpi=300)
-    else:
-        plt.show()
