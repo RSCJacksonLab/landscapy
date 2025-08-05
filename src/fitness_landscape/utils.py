@@ -240,6 +240,6 @@ def calculate_gapped_soft_score(aligned_seq1: np.ndarray,
         elif isinstance(sequence, torch.Tensor):
             if sequence.dim() == 1:
                 sequence = sequence.unsqueeze(0)
-            return [alphabet[aa.argmax().item()] for aa in sequence]
+            return "".join([alphabet[aa.argmax().item()] for aa in sequence])
         else:
             raise ValueError("Input must be a string, numpy array, or torch tensor.")

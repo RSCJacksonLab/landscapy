@@ -14,11 +14,10 @@ from .._sub_matrices import nq_pfam
 from sklearn.neighbors import NearestNeighbors
 from ..utils import calculate_gapped_soft_score
 from ..embedding.particle_sampler import (
-    ProtLMEvolution,
+    EvolutionParticleSampler,
     SequenceGenerator,
     ParentSelector,
     TopPSampler,
-    SequenceSpaceAttractor,
     ESMEmbedder
 )
 from softalign.soft_alignment import align_soft_sequences
@@ -437,25 +436,25 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
     for i, seq in enumerate(sequences):
         digraph.nodes[i]['sequence'] = seq
         
-    return DirectedFitnessLandscape.from_graph(digraph)
+    return digraph
 
 
-def create_gibbs_digraph(seed_sequences: List[str],
+def create_gibbs_digraph(sequences: List[BaseNumpySequence],
                          n_samples: int,
                          traj_length: int,
                          batch_size: int,
                          max_state_size: int,
-                         hmm_file: Path = None,
                          _emb_array_key: str = 'emb_array',
                          temperature: float = 1.0,
-                         top_p: float = 0.9) -> 'DirectedFitnessLandscape':
+                         top_p: float = 0.9,
+                         **kwargs) -> 'DirectedFitnessLandscape':
     """
     Factory function to create a directed graph using a Gibbs sampling
     approach based on a protein language model.
 
     Parameters
     ----------
-    seed_sequences : List[str]
+    seed_sequences : List[BaseNumpySequence]
         The initial sequences to start the simulation.
     n_samples : int
         The number of child sequences to generate from each parent.
@@ -480,31 +479,19 @@ def create_gibbs_digraph(seed_sequences: List[str],
         The constructed directed fitness landscape.
     """
     selector = ParentSelector(max_state_size=max_state_size)
-    embedder = ESMEmbedder()
+    embedder = ESMEmbedder(model_name=kwargs.get('model_name', "facebook/esm2_t6_8M_UR50D"))
     sampler = TopPSampler(temperature=temperature, top_p=top_p)
-    generator = SequenceGenerator(embedder=embedder, sampler=sampler, batch_size=batch_size)
+    generator = SequenceGenerator(embedder=embedder,sampler=sampler, batch_size=batch_size)
 
-    attractor = None
-    if hmm_file:
-        attractor = SequenceSpaceAttractor(embedder=embedder,
-                                           hmm_file=hmm_file,
-                                           embedding_attribute=_emb_array_key)
+    evolution_exp = EvolutionParticleSampler(generator=generator,
+                                             selector=selector,
+                                             n_samples=n_samples,
+                                             traj_length=traj_length)
 
-    evolution_exp = EvolutionParticleSampler(
-        generator=generator,
-        selector=selector,
-        n_samples=n_samples,
-        traj_length=traj_length,
-        attractor=attractor
-    )
-
-    evolution_exp.initialize(seed_sequences=seed_sequences)
+    evolution_exp.initialize(seed_sequences=sequences)
     evolution_exp.run()
     digraph = evolution_exp.G
     
-    # Convert the generated graph to a DirectedFitnessLandscape
-    sequences = [node_data['sequence'] for _, node_data in graph.nodes(data=True)]
-
-    return DirectedFitnessLandscape.from_graph(digraph)
+    return digraph
 
     # TODO: Evolutionary velocity connectivity
