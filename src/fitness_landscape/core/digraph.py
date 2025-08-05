@@ -447,7 +447,7 @@ def create_gibbs_digraph(sequences: List[BaseNumpySequence],
                          _emb_array_key: str = 'emb_array',
                          temperature: float = 1.0,
                          top_p: float = 0.9,
-                         **kwargs) -> 'DirectedFitnessLandscape':
+                         **kwargs) -> nx.DiGraph:
     """
     Factory function to create a directed graph using a Gibbs sampling
     approach based on a protein language model.
