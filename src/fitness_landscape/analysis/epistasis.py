@@ -33,7 +33,7 @@ def calculate_epistasis_walsh(landscape: FitnessLandscape,
     resutls : dict
         Dictionary of results on the transformation.
     """
-    # Check if sequences are binary
+# Check if sequences are binary
     is_binary = True
     for seq in landscape.sequences:
         if not set(seq.sequence).issubset({0, 1}):
@@ -63,6 +63,27 @@ def calculate_epistasis_walsh(landscape: FitnessLandscape,
             
             result['by_order'][order_key][term] = value
         
+        # Calculate the proportion of variance explained by each order
+        squared_coeffs_by_order = {}
+        total_variance = 0
+        for term, value in coeffs.items():
+            if term != 'intercept':
+                squared_value = value**2
+                total_variance += squared_value
+                order_key = len(term.split(','))
+                squared_coeffs_by_order.setdefault(order_key, 0)
+                squared_coeffs_by_order[order_key] += squared_value
+        
+        if total_variance > 0:
+            variation_explained = {
+                order: s_sq / total_variance 
+                for order, s_sq in squared_coeffs_by_order.items()
+            }
+        else:
+            variation_explained = {order: 0.0 for order in squared_coeffs_by_order}
+
+        result['variance_explained'] = variation_explained
+
         # Calculate summary statistics
         result['statistics'] = _calculate_epistasis_statistics(coeffs)
         
