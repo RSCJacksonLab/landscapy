@@ -439,15 +439,15 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
     return digraph
 
 
-def create_gibbs_digraph(sequences: List[BaseNumpySequence],
-                         n_samples: int,
-                         traj_length: int,
-                         batch_size: int,
-                         max_state_size: int,
-                         _emb_array_key: str = 'emb_array',
-                         temperature: float = 1.0,
-                         top_p: float = 0.9,
-                         **kwargs) -> nx.DiGraph:
+def create_particle_filter_digraph(sequences: List[BaseNumpySequence],
+                                   n_samples: int,
+                                   h: int,
+                                   batch_size: int,
+                                   max_state_size: int,
+                                   _emb_array_key: str = 'emb_array',
+                                   temperature: float = 1.0,
+                                   top_p: float = 0.9,
+                                   **kwargs) -> nx.DiGraph:
     """
     Factory function to create a directed graph using a Gibbs sampling
     approach based on a protein language model.
@@ -488,7 +488,8 @@ def create_gibbs_digraph(sequences: List[BaseNumpySequence],
                                              n_samples=n_samples,
                                              traj_length=traj_length)
 
-    evolution_exp.initialize(seed_sequences=sequences)
+    # Convert BaseNumpySequence to strings for sampling.
+    evolution_exp.initialize(seed_sequences=[seq.to_str() for seq in sequences])
     evolution_exp.run()
     digraph = evolution_exp.G
     

@@ -7,7 +7,7 @@ from typing import List, Union, Dict, Any, Iterable, Literal,  Protocol, runtime
 from dataclasses import dataclass
 from .sequence import BaseNumpySequence, make_sequence, read_from_fasta
 from .graph import create_cknn_graph, create_diffusion_graph, create_hamming_graph, create_tda_graph
-from .digraph import create_phylo_digraph, create_evol_diffusion_digraph
+from .digraph import create_phylo_digraph, create_evol_diffusion_digraph, create_particle_filter_digraph
 from .fitness import NumericFitness, CategoricalFitness, BaseFitnessLayer
 from abc import ABC, abstractmethod
 from .graph import create_knn_graph, create_hamming_graph
@@ -520,7 +520,7 @@ class DirectedFitnessLandscape(FitnessLandscape):
         digraph_constructors = {
             'diffusion_nq': create_evol_diffusion_digraph,
             'diffusion_pll': None, # TODO: Directional diffusion on log-likelihood
-            'particle_mcmc': None, # TODO: accept PR and move to factory function.
+            'particle_filter': create_particle_filter_digraph,
             }
 
         # Phylogenetic reconstruction requires specific types
@@ -529,6 +529,7 @@ class DirectedFitnessLandscape(FitnessLandscape):
             # Keep alignment for phylo and ASR.
             alignment = load_aligned_seqs(sequences) if isinstance(sequences, Path) else sequences
             #Load sequences for constructor, drop gaps (if present).
+            # DANGER: the alphabets mistmatches are likely here.
             sequences = [BaseNumpySequence(str(alignment.seqs[i]).replace("-",""), alphabet=PROT_20) for i in range(len(alignment.seqs))]
             
             digraph = create_phylo_digraph(alignment, **kwargs)
@@ -561,7 +562,7 @@ class DirectedFitnessLandscape(FitnessLandscape):
 
         digraph = digraph_constructors[digraph_type](sequences, **constructor_kwargs)
             
-
+        # Update final embeddings to attach to the graph.
         final_embeddings = embeddings if attach_embeddings else None
 
         return cls(sequences=sequences,
