@@ -26,6 +26,7 @@ setup(
     packages=find_packages(where="src"),
     python_requires=">=3.12",
     install_requires=[
+        "softalign @ git+https://github.com/RSCJacksonLab/softalign.git@9127e3a",
         "numpy>=1.19.0",
         "scipy>=1.5.0",
         "networkx>=2.5",
@@ -41,9 +42,7 @@ setup(
         "faiss-cpu>=1.11",
         "ray>=2.48",
         "gudhi>=3.11",
-        "torch_geometric>=2.6",
-        "softalign @ git+https://github.com/RSCJacksonLab/softalign.git@dev"
-    ],
+        "torch_geometric>=2.6"],
     extras_require={
         "dev": [
             "pytest>=6.0",

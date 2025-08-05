@@ -62,78 +62,6 @@ def create_hamming_graph(sequences: List[BaseNumpySequence],
                     G.add_edge(i, j, weight=1.0, distance=dist)
     return G
 
-
-# BUG: This code fails testing - unsure why
-def create_cknn_graph(sequences: List[BaseNumpySequence],
-                      embeddings: np.ndarray = None,
-                      k: int = 3,
-                      **kwargs) -> nx.Graph:
-    """
-    Creates a graph using the Continuous k-Nearest Neighbors (ck-NN)
-    algorithm, which is parameter-free and density adaptive.
-
-    Parameters
-    ----------
-    sequences : List[BaseNumpySequence]
-        Sequences to form the nodes of the graph.
-
-    embeddings : np.ndarray, default=`None`
-        A numpy array of shape (n_sequences, n_dimensions) containing
-        the high-dimensional embeddings for each sequence. If `None`,
-        Hamming distance matrix is computed and used.
-
-    k : int, default=3
-        The number of neighbors to use for the initial local density
-        estimation. This is not a sensitive parameter, and small
-        values (3-5) typically work well.
-
-    **kwargs : dict, optional
-        Additional keyword arguments for API consistency.
-
-    Returns
-    -------
-    networkx.Graph
-        A graph where nodes are sequence indices and edges represent
-        adaptive, density-aware proximity.
-    """
-
-    return NotImplementedError()
-
-    # n_sequences = len(sequences)
-    # if n_sequences < k + 1:
-    #     raise ValueError(f"Number of sequences ({n_sequences}) must be > k ({k}).")
-
-    # if embeddings is not None:
-    #     dist_matrix = euclidean_distances(embeddings)
-    # else:
-    #     # Fallback to OHE euclidean distance if no embeddings are provided
-    #     from ..utils import get_distance_matrix
-    #     dist_matrix = get_distance_matrix(sequences, metric='euclidean')
-
-    # sorted_distances = np.sort(dist_matrix, axis=1)
-    
-    # # The k-th neighbor is at index k, as index 0 is the point itself.
-    # sigma_k = sorted_distances[:, k]
-    # sigma_k[sigma_k == 0] = 1e-9  # Avoid division by zero
-
-    # sigma_product = np.outer(sigma_k, sigma_k)
-    # exp_term = np.exp(-dist_matrix**2 / sigma_product)
-    # k_continuous = exp_term.sum(axis=1)
-
-    # G = nx.Graph()
-    # for i, seq in enumerate(sequences):
-    #     G.add_node(i, sequence=seq)
-
-    # k_product_matrix = np.outer(k_continuous, k_continuous)
-    # rows, cols = np.where(np.triu(k_product_matrix >= n_sequences, k=1))
-    
-    # for i, j in zip(rows, cols):
-    #     weight = dist_matrix[i, j]
-    #     G.add_edge(i, j, weight=weight, distance=weight)
-
-    # return G
-
-
 def create_knn_graph(sequences: List[BaseNumpySequence],
                      k: int,
                      metric: Literal['hamming'] = 'hamming', 
@@ -315,7 +243,7 @@ def _reweight_graph_by_simplices(G: nx.Graph,
     return G_weighted
 
 
-def create_diffusion_graph(sequences: List[BaseNumpySequence],
+def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
                            embeddings: np.ndarray,
                            t: int = 5,
                            k: int = 5,

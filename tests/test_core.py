@@ -287,7 +287,7 @@ def test_create_diffusion_graph_structure(clustered_data):
     structure by having higher intra-cluster density than inter-cluster density.
     """
     sequences, embeddings = clustered_data
-    graph = create_diffusion_graph(sequences=sequences, embeddings=embeddings, t=5, connectivity_threshold=1e-4)
+    graph = create_diffusion_emb_graph(sequences=sequences, embeddings=embeddings, t=5, connectivity_threshold=1e-4)
 
     assert isinstance(graph, nx.Graph)
     assert graph.number_of_nodes() == len(sequences)

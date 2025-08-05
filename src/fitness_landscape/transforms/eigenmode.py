@@ -91,6 +91,10 @@ def _eigenmode_decomposition_numpy(eig_mat, k=None) -> Tuple:
         mat_dense = np.asarray(eig_mat)
         
     eigenvalues, eigenvectors = np.linalg.eigh(mat_dense)
+
+    sorted_indices = np.argsort(eigenvalues)
+    eigenvalues = eigenvalues[sorted_indices]
+    eigenvectors = eigenvectors[:, sorted_indices]
     
     if k is not None:
         eigenvectors = eigenvectors[:, :k]
@@ -256,44 +260,6 @@ def _reconstruct_from_eigenmodes_torch(eigenvectors: Union[np.ndarray, torch.Ten
         reconstruction = reconstruction.numpy()
 
     return reconstruction
-
-def graph_spectral_analysis(graph: Union[nx.Graph, FitnessLandscape],
-                            k: int = None,
-                            matrix: Literal['adjacency', 'laplacian'] = 'laplacian',
-                            backend: Literal['numpy', 'torch'] = 'numpy') -> Dict:
-    """
-    Analyze the eigenmodes of a graph.
-    
-    Parameters
-    ----------
-    graph : networkx.Graph or FitnessLandscape
-        Graph to analyze.
-    k : int or None, optional
-        Number of eigenmodes to analyze.
-    matrix : str, default = `laplacian`
-        The matrix to decompose.
-    backend : str, default = `numpy`
-        Computational backend ('numpy', 'torch').
-        
-    Returns
-    -------
-    dict
-        Eigenspectral analysis results. 
-    """
-    # Compute eigenmode decomposition
-    eigenvalues, eigenvectors = eigenmode_decomposition(graph, matrix=matrix, k=k, backend=backend)
-    
-    # Handle FitnessLandscape input
-    if isinstance(graph, FitnessLandscape):
-        graph = graph.graph
-    
-    # Compute analysis metrics based on backend
-    if backend == 'numpy':
-        return _eigenmode_analysis_numpy(eigenvalues, eigenvectors)
-    elif backend == 'torch':
-        return _eigenmode_analysis_torch(eigenvalues, eigenvectors)
-    else:
-        raise ValueError(f"Unsupported backend: {backend}")
 
 
 def _eigenmode_analysis_numpy(eigenvalues: np.ndarray,
