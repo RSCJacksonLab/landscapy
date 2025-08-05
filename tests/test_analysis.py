@@ -797,3 +797,33 @@ def test_graph_properties_disconnected():
     properties = graph_properties(graph)
     assert properties['components']['count'] == 3
     assert 'path_length_note' in properties
+
+def test_walsh_variance_explained(additive_landscape):
+    """
+    Tests the new variation_explained functionality in the Walsh-Hadamard epistasis calculation.
+    """
+    results = calculate_epistasis_walsh(additive_landscape, order=4)
+    
+    assert 'variance_explained' in results
+    
+    # The sum of explained variances should be close to 1.0
+    total_explained = sum(results['variance_explained'].values())
+    assert np.isclose(total_explained, 1.0)
+    
+    assert results['variance_explained'][1] > 0.95
+
+def test_get_epistasis_matrix_variance(epistatic_landscape):
+    """
+    Tests that the get_epistasis_matrix function returns a matrix of
+    variances (floats) for pairwise interactions.
+    """
+    epistasis_matrix = get_epistasis_matrix(epistatic_landscape)
+    assert isinstance(epistasis_matrix, np.ndarray)
+    n = len(epistatic_landscape.sequences[0])
+    assert epistasis_matrix.shape == (n, n)
+    assert epistasis_matrix.dtype == float
+
+    assert np.all(np.diag(epistasis_matrix) == 0)
+    assert np.allclose(epistasis_matrix, epistasis_matrix.T)
+    off_diagonal_mask = ~np.eye(n, dtype=bool)
+    assert np.any(epistasis_matrix[off_diagonal_mask] > 0)
