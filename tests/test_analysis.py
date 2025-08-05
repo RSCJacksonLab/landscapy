@@ -797,3 +797,17 @@ def test_graph_properties_disconnected():
     properties = graph_properties(graph)
     assert properties['components']['count'] == 3
     assert 'path_length_note' in properties
+
+def test_walsh_variance_explained(additive_landscape):
+    """
+    Tests the new variation_explained functionality in the Walsh-Hadamard epistasis calculation.
+    """
+    results = calculate_epistasis_walsh(additive_landscape, order=4)
+    
+    assert 'variance_explained' in results
+    
+    # The sum of explained variances should be close to 1.0
+    total_explained = sum(results['variance_explained'].values())
+    assert np.isclose(total_explained, 1.0)
+    
+    assert results['variance_explained'][1] > 0.95
