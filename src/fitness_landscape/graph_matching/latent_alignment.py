@@ -170,12 +170,14 @@ class RJMCMCAligner:
         The edge attribute dictionary  weight key.
     emb_key : str, default=`emb_arr`
         The node attribute dictionary embedding array key.
+    directed : bool, default=`False`
+        Boolean for whether the graph is directed.
     seed : int
         The random state.
     """
     
     def __init__(self,
-                 graphs: List[nx.Graph],
+                 graphs: List[Union[nx.Graph, nx.DiGraph]],
                  *,
                  alpha: float = 0.5,
                  bernoulli_beta: Optional[BernoulliBeta] = None,
@@ -189,14 +191,17 @@ class RJMCMCAligner:
                  cosine_anchor_threshold: float = 0.95,
                  weight_key: str = 'weight',
                  emb_key: str = 'emb_arr',
+                 directed: bool = False,
                  seed: Union[int, None] = None) -> None:
         
+        # Store class attributes.
         self.rng = np.random.default_rng(seed)
         self.alpha = float(alpha)
         self.graphs = graphs
         self.K = len(graphs)
         self.burn_in, self.samples, self.thin, self.birth_death_prob = burn_in, samples, thin, birth_death_prob
         self.birth_gamma = birth_prior_gamma
+        self.directed = directed
 
         self._in_growth_phase = False
         self.trace_E, self.trace_NL, self.trace_edges = [], [], []
@@ -480,9 +485,13 @@ class RJMCMCAligner:
         P_keep = a_post / (a_post + b_post)
 
         # vectorized Bernoulli draws
-        U = self.rng.random((NL, NL))    
-        m = np.triu(U < P_keep, 1)
-        L = m.astype(int) + m.T.astype(int)
+        # Include logic for upper triangle (undirected) or not (directed) samples.
+        U = self.rng.random((NL, NL))
+        if self.directed:
+            L = (U < P_keep).astype(int)
+        else:
+            m = np.triu(U < P_keep, 1)
+            L = m.astype(int) + m.T.astype(int)
 
         np.fill_diagonal(L, 0)
         return L
@@ -912,14 +921,15 @@ class RJMCMCAligner:
                     self._stored_pi[k].append(self.perm[k].copy())
 
     def latent_blueprint_graph(self,
-                               posterior_prob_cutoff: float = 0.2) -> nx.Graph:
+                               posterior_prob_cutoff: float = 0.2) -> Union[nx.Graph, nx.DiGraph]:
         """
-        Method to return the latent blueprint graph by correctly averaging
-        the posterior samples, even when the number of latent nodes changes.
+        Method to return the latent blueprint graph by correctly
+        averaging the posterior samples, even when the number of latent
+        nodes changes.
 
         Returns
         -------
-        nx.Graph
+        nx.Graph or nx.DiGraph
             The mean of the latent posterior.
         """
         if not self._stored_L:
@@ -931,7 +941,7 @@ class RJMCMCAligner:
                 max_nl = l_matrix.shape[0]
 
         if max_nl == 0:
-            return nx.Graph()
+            return nx.Graph() if not self.directed else nx.DiGraph()
 
         tally_matrix = np.zeros((max_nl, max_nl))
         num_samples = len(self._stored_L)
@@ -942,7 +952,10 @@ class RJMCMCAligner:
         Lavg = tally_matrix / num_samples
 
         Lbin = (Lavg >= posterior_prob_cutoff).astype(int)
-        return nx.from_numpy_array(Lbin, create_using=nx.Graph)
+        if not self.directed:
+            return nx.from_numpy_array(Lbin, create_using=nx.Graph)
+        else: 
+            return nx.from_numpy_array(Lbin, create_using=nx.DiGraph)
 
     def posterior_match_probabilities(self) -> Dict:
         """
@@ -1025,7 +1038,7 @@ class RJMCMCAligner:
 
 
 #TODO: update to FAISS to scale > 1e4
-def auto_anchors_by_cosine( graphs: List[nx.Graph],
+def auto_anchors_by_cosine( graphs: List[Union[nx.Graph], nx.DiGraph],
                            *,
                            emb_key: str = "emb_arr",
                            cos_threshold: float = 0.90,
@@ -1036,7 +1049,7 @@ def auto_anchors_by_cosine( graphs: List[nx.Graph],
 
     Parameters
     ----------
-    graphs : List
+    graphs : List[nx.Graph, nx.DiGraph]
         The list of graphs.
     
     emb_key : str, default=`emb_arr`
