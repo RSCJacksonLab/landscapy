@@ -41,8 +41,13 @@ def run_local_alignment_task(cluster_subgraphs: List[Union[nx.Graph, nx.DiGraph]
     trace_edges : List
         The local aligner number of edges of sampling steps. 
     """
+    
+    # Default to a single CPU process if not found in params.
+    num_chains = aligner_params.pop("num_chains", 1)
+    
     local_aligner = RJMCMCAligner(graphs=cluster_subgraphs, **aligner_params)
-    local_aligner.sample()
+    
+    local_aligner.sample(num_chains=num_chains)
     
     blueprint = local_aligner.latent_blueprint_graph()
     node_mapping = local_aligner.get_node_to_latent_mapping()
@@ -106,7 +111,8 @@ class HierarchicalRJMCMCAligner:
         self.meta_nl_trace = []
         self.meta_edges_trace = []
 
-    def run_alignment(self) -> Tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray]]:
+    def run_alignment(self,
+                      num_chains_per_task: int=1) -> Tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray]]:
         """
         Executes the full, two-level hierarchical alignment process.
 
@@ -118,10 +124,10 @@ class HierarchicalRJMCMCAligner:
             - A mapping of original graph nodes to latent space nodes.
         """
         # Local Alignments
-        local_results = self._run_local_alignments()
+        local_results = self._run_local_alignments(num_chains_per_task=num_chains_per_task)
 
         # Global Meta-Alignment
-        meta_blueprint, meta_mappings = self._run_global_meta_alignment(local_results)
+        meta_blueprint, meta_mappings = self._run_global_meta_alignment(local_results, num_chains_per_task=num_chains_per_task)
 
         # Stitch results into the final format
         final_graph, final_mappings = self._stitch_results(local_results, meta_blueprint, meta_mappings)
@@ -191,7 +197,8 @@ class HierarchicalRJMCMCAligner:
         
         return final_clusters
 
-    def _run_local_alignments(self) -> List[Dict]:
+    def _run_local_alignments(self,
+                              num_chains_per_task: int=1) -> List[Dict]:
         """
         Method to run local RJMCMC alignments for each cluster of
         nodes.
@@ -223,10 +230,15 @@ class HierarchicalRJMCMCAligner:
                 subgraphs[k].add_edges_from(original_subgraph.edges())
             
             params = self.aligner_params.copy()
+            # Random seed.
             params['seed'] = np.random.randint(1e6)
             params['directed'] = self.directed
+            params['num_chains'] = num_chains_per_task
             
-            futures.append(run_local_alignment_task.remote(subgraphs, params))
+            num_cpus_needed = 1 + num_chains_per_task
+            futures.append(
+                run_local_alignment_task.options(num_cpus=num_cpus_needed).remote(subgraphs, params)
+            )
         
         # Collect result
         ray_results = ray.get(futures)
@@ -243,7 +255,8 @@ class HierarchicalRJMCMCAligner:
         return clusters
 
     def _run_global_meta_alignment(self,
-                                   local_results: List[Dict]) -> Tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray]]:
+                                   local_results: List[Dict],
+                                   num_chains_per_task: int = 1) -> Tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray]]:
         """
         Method to run the global meta-alignment across clusters of
         nodes.
@@ -304,7 +317,7 @@ class HierarchicalRJMCMCAligner:
             return meta_blueprint, meta_mappings
         
         meta_aligner = RJMCMCAligner(graphs=meta_graphs, **self.aligner_params)
-        meta_aligner.sample()
+        meta_aligner.sample(num_chains=num_chains_per_task)
 
         self.meta_energy_trace.extend(meta_aligner.trace_E)
         self.meta_nl_trace.extend(meta_aligner.trace_NL)
