@@ -11,22 +11,22 @@ import faiss
 
 
 @ray.remote
-def run_local_alignment_task(cluster_subgraphs: List[nx.Graph],
-                             aligner_params: Dict) -> Tuple[nx.Graph, Dict[int, np.ndarray], Dict[int, list]]:
+def run_local_alignment_task(cluster_subgraphs: List[Union[nx.Graph, nx.DiGraph]],
+                             aligner_params: Dict) -> Tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray], Dict[int, list]]:
     """
     Executes the local RJMCMC alignment for a cluster of subgraphs.
     This is a Ray remote task to parallelize the local alignments.
 
     Parameters
     ----------
-    cluster_subgraphs : List[nx.Graph]
+    cluster_subgraphs : List[nx.Graph, nx.DiGraph]
         A list of subgraphs representing a cluster of nodes.
     aligner_params : Dict
         Parameters for the RJMCMCAligner.
     
     Returns
     -------
-    Tuple[nx.Graph, Dict[int, np.ndarray], Dict[int, list]]
+    Tuple[nx.Graph or nx.DiGraph, Dict[int, np.ndarray], Dict[int, list]]
         A tuple containing:
         - The blueprint graph for the local alignment.
         - A mapping of node indices to latent space indices.
@@ -52,7 +52,7 @@ class HierarchicalRJMCMCAligner:
 
     Attributes
     ----------
-    graphs : List[nx.Graph]
+    graphs : List[nx.Graph, nx.DiGraph]
         A list of graphs to be aligned.
     aligner_params : dict
         Parameters for the RJMCMCAligner.
@@ -66,11 +66,12 @@ class HierarchicalRJMCMCAligner:
     """
 
     def __init__(self,
-                 graphs: List[nx.Graph],
+                 graphs: List[Union[nx.Graph, nx.DiGraph]],
                  aligner_params: dict,
                  local_cluster_threshold: float = 0.85,
                  global_bridge_threshold: float = 0.5,
                  emb_key: str = 'emb_arr') -> None:
+        
         
         self.original_graphs = graphs
         self.aligner_params = aligner_params
@@ -78,17 +79,21 @@ class HierarchicalRJMCMCAligner:
         self.global_thresh = global_bridge_threshold
         self.emb_key = emb_key
         self.K = len(graphs)
+        self.directed = any(isinstance(g, nx.DiGraph) for g in graphs)
+        # Update aligner parameters with directed flag.
+        if 'directed' not in self.aligner_params:
+            self.aligner_params['directed'] = self.directed
 
         if not ray.is_initialized():
             ray.init()
 
-    def run_alignment(self) -> Tuple[nx.Graph, Dict[int, np.ndarray]]:
+    def run_alignment(self) -> Tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray]]:
         """
         Executes the full, two-level hierarchical alignment process.
 
         Returns
         -------
-        Tuple[nx.Graph, Dict[int, np.ndarray]]
+        Tuple[nx.Graph or nx.DiGraph, Dict[int, np.ndarray]]
             A tuple containing:
             - The final aligned graph.
             - A mapping of original graph nodes to latent space nodes.
@@ -185,7 +190,11 @@ class HierarchicalRJMCMCAligner:
         
         futures = []
         for cluster_info in clusters:
-            subgraphs = [nx.Graph() for _ in range(self.K)]
+            
+            # Gracefully handle directed and undirected graphs.
+            graph_constructor = nx.DiGraph if self.directed else nx.Graph
+            subgraphs = [graph_constructor() for _ in range(self.K)]
+            
             for k, node_id in cluster_info["node_backrefs"]:
                 node_data = self.original_graphs[k].nodes[node_id]
                 subgraphs[k].add_node(node_id, **node_data)
@@ -196,6 +205,7 @@ class HierarchicalRJMCMCAligner:
             
             params = self.aligner_params.copy()
             params['seed'] = np.random.randint(1e6)
+            params['directed'] = self.directed
             
             futures.append(run_local_alignment_task.remote(subgraphs, params))
         
@@ -209,25 +219,27 @@ class HierarchicalRJMCMCAligner:
         return clusters
 
     def _run_global_meta_alignment(self,
-                                   local_results: List[Dict]) -> Tuple[nx.Graph, Dict[int, np.ndarray]]:
+                                   local_results: List[Dict]) -> Tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray]]:
         """
         Method to run the global meta-alignment across clusters of
         nodes.
 
         Returns
         -------
-        Tuple[nx.Graph, Dict[int, np.ndarray]]
+        Tuple[nx.Graph or nx.DiGraph, Dict[int, np.ndarray]]
             A tuple containing:
             - The meta blueprint graph for the global alignment.
             - A mapping of original graph nodes to latent space nodes.
         """
+        # Gracefully handle directed and undirected graphs.
+        graph_constructor = nx.DiGraph if self.directed else nx.Graph
 
         if not local_results:
             
             # Return empty but correctly typed results
-            return nx.Graph(), {k: np.array([]) for k in range(self.K)}
+            return graph_constructor(), {k: np.array([]) for k in range(self.K)}
 
-        meta_graphs = [nx.Graph() for _ in range(self.K)]
+        meta_graphs = [graph_constructor() for _ in range(self.K)]
         
         for i, result in enumerate(local_results):
             cluster_embeddings = [self.original_graphs[k].nodes[node_id][self.emb_key] for k, node_id in result["node_backrefs"]]
@@ -257,7 +269,7 @@ class HierarchicalRJMCMCAligner:
         if total_meta_edges == 0:
 
             # Create an empty blueprint graph but ensure it contains all the cluster nodes.
-            meta_blueprint = nx.Graph()
+            meta_blueprint = graph_constructor()
             all_meta_nodes = set()
             for g in meta_graphs:
                 all_meta_nodes.update(g.nodes())
@@ -274,8 +286,8 @@ class HierarchicalRJMCMCAligner:
 
     def _stitch_results(self,
                         local_results: List[Dict],
-                        meta_blueprint: nx.Graph,
-                        meta_mappings: Dict[int, np.ndarray]) -> Tuple[nx.Graph, Dict[int, np.ndarray]]:
+                        meta_blueprint: Union[nx.Graph, nx.DiGraph],
+                        meta_mappings: Dict[int, np.ndarray]) -> Tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray]]:
         """
         Method to stitch the local results and meta blueprint into a
         final graph and mappings.
@@ -285,7 +297,7 @@ class HierarchicalRJMCMCAligner:
         local_results : List[Dict]
             A list of dictionaries containing the local alignment
             results.
-        meta_blueprint : nx.Graph
+        meta_blueprint : nx.Graph or nx.DiGraph
             The meta blueprint graph from the global alignment.
         meta_mappings : Dict[int, np.ndarray]
             A mapping of original graph nodes to latent space nodes
@@ -293,12 +305,13 @@ class HierarchicalRJMCMCAligner:
         
         Returns
         -------
-        Tuple[nx.Graph, Dict[int, np.ndarray]]
+        Tuple[nx.Graph or nx.DiGraph, Dict[int, np.ndarray]]
             A tuple containing:
             - The final aligned graph.
             - A mapping of original graph nodes to latent space nodes.
         """
-        final_graph = nx.Graph()
+        # Handle directed and undirected cases.
+        final_graph = nx.DiGraph() if self.directed else nx.Graph()
         local_to_global_nodemap = {}
 
         for i, result in enumerate(local_results):
@@ -316,8 +329,6 @@ class HierarchicalRJMCMCAligner:
             
             # Compose the uniquely-named blueprint into the final graph
             final_graph = nx.compose(final_graph, relabeled_bp)
-
-
 
         for i, j in meta_blueprint.edges():
             nodes_i = local_results[i]["node_backrefs"]
@@ -387,4 +398,5 @@ class HierarchicalRJMCMCAligner:
 
                 final_mappings[graph_idx][master_rows[valid_mask], master_cols[valid_mask]] = probs[valid_mask]
                 
+        final_graph = nx.relabel_nodes(final_graph, global_name_to_final_idx, copy=True)
         return final_graph, final_mappings

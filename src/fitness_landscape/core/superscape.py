@@ -1,10 +1,11 @@
 from pydantic import BaseModel, Field, field_validator, ValidationError, ConfigDict
 from typing import Union, List, Literal, Iterable, Dict, Any
 import numpy as np
-from ..core.landscape import FitnessLandscape
+from ..core.landscape import FitnessLandscape, DirectedFitnessLandscape
 from ..core.sequence import BaseNumpySequence, SoftSequence
 from ..core.fitness import NumericFitness, CategoricalFitness, ProbabilisticCategoricalFitness
 from ..graph_matching.latent_alignment import RJMCMCAligner
+from ..graph_matching.hierarchical_alignment import HierarchicalRJMCMCAligner
 import networkx as nx
 from softalign.soft_alignment import align_soft_sequences
 
@@ -29,7 +30,7 @@ class FitnessSuperscape:
 
     Attributes
     ----------
-    landscapes : List[Union[FitnessLandscape, _GraphLike]]
+    landscapes : List[Union[FitnessLandscape, DirectedFitnessLandscape]]
         A list of fitness landscapes or graph-like objects to be aligned.
     posterior_prob_cutoff : float
         The cutoff for posterior probabilities when constructing the
@@ -38,7 +39,7 @@ class FitnessSuperscape:
 
     def __init__(self,
                  
-                 landscapes: List[Union[FitnessLandscape, nx.Graph]],
+                 landscapes: List[Union[FitnessLandscape, DirectedFitnessLandscape]],
                  posterior_prob_cutoff: float = 0.1,
                  **sampler_kwargs) -> None:
         
@@ -50,31 +51,40 @@ class FitnessSuperscape:
         # Validate and set the common alphabet across all landscapes.
         self.alphabet = self._validate_and_set_alphabet(self.landscapes)
 
-        # Run RJMCMC sampling
-        self.graph_aligner = RJMCMCAligner(self._landscape_graphs,
-                                            **sampler_kwargs)
-        self.graph_aligner.sample()
+        # Run RJMCMC sampling using the hierachical aligner (scales in linear time).
+        # and not the RJMCMC aligner (scales in O(N^2K^2) time).
+        hierarchical_aligner = HierarchicalRJMCMCAligner(
+            graphs=self._landscape_graphs,
+            aligner_params=sampler_kwargs
+        )
+        # The results are now stored directly, not the aligner object
+        self.latent_graph, self._latent_mappings = hierarchical_aligner.run_alignment()
         
-        # Mappings for nodes to latent embeddings.
-        self._posterior_mapping = self.graph_aligner.posterior_match_probabilities()
-        self._latent_mappings = self.graph_aligner.get_node_to_latent_mapping()
-        self._posterior_prob_cutoff = posterior_prob_cutoff
-
         self.back_reference = [
             (k, node_id)
             for k, landscape in enumerate(self.landscapes)
             for node_id in landscape.graph.nodes()
         ]
         
-
     def construct_latent_landscape(self) :
         """
         Construct the latent graph from the posterior mapping.
         """
-        self.latent_graph = self.graph_aligner.latent_blueprint_graph(posterior_prob_cutoff=self._posterior_prob_cutoff)
-
-        # Aggregate data into flat data structures.
-        all_prob_maps = np.vstack(list(self._latent_mappings.values()))
+        # Can be directed or undirected - handle gracefully on return.
+        num_total_nodes = sum(len(g.nodes()) for g in self._landscape_graphs)
+        num_latent_nodes = self.latent_graph.number_of_nodes()
+        
+        all_prob_maps = np.zeros((num_total_nodes, num_latent_nodes))
+        
+        current_row = 0
+        # Ensure process mappings in the correct graph order (0, 1, 2, ...)
+        for k in sorted(self._latent_mappings.keys()):
+            mapping_matrix = self._latent_mappings[k]
+            num_nodes_in_graph = mapping_matrix.shape[0]
+            # Handle cases where a graph might have no nodes mapping to the latent space
+            if num_nodes_in_graph > 0:
+                all_prob_maps[current_row : current_row + num_nodes_in_graph, :] = mapping_matrix
+            current_row += num_nodes_in_graph
 
         # Collect all ungapped arrays from the nodes
         all_ungapped_arrs = [
@@ -197,22 +207,33 @@ class FitnessSuperscape:
             if i in self.latent_graph.nodes:
                 self.latent_graph.nodes[i]['sequence'] = seq
         
-        self.latent_landscape = FitnessLandscape(
-            sequences=latent_sequences,
-            fitness_layers=latent_fitness_layers,
-            graph=self.latent_graph
-        )
+        # Gracefully direct to correct landscape constructor.
+        
+        if isinstance(self.latent_graph, nx.Graph):
+            self.latent_landscape = FitnessLandscape(
+                sequences=latent_sequences,
+                fitness_layers=latent_fitness_layers,
+                graph=self.latent_graph)
+        
+        elif isinstance(self.latent_graph, nx.DiGraph):
+            self.latent_landscape = DirectedFitnessLandscape(
+                sequences=latent_sequences,
+                fitness_layers=latent_fitness_layers,
+                graph=self.latent_graph)
+        
+        else:
+            raise ValueError(f"Expected latent graph to be nx.Graph or nx.DiGraph, found {type(self.latent_graph)}")
 
 
     @staticmethod
-    def _validate_embeddings(graphs: list[nx.Graph]) -> None:
+    def _validate_embeddings(graphs: list[Union[nx.Graph, nx.DiGraph]]) -> None:
         """
         Helper method to validate nodes have valid emb_arr attribute.
 
         Parameters
         ----------
         graphs : List
-            List of nx.Graph objects to be aligned.
+            List of nx.Graph or nx.DiGraph objects to be aligned.
         """
         for G in graphs:
             for node, data in G.nodes(data=True):
@@ -222,14 +243,14 @@ class FitnessSuperscape:
                     raise ValueError(f"{node!r}: {e}") from None
     
     @staticmethod
-    def _validate_and_set_alphabet(landscapes: List[FitnessLandscape]) -> list:
+    def _validate_and_set_alphabet(landscapes: List[Union[FitnessLandscape, DirectedFitnessLandscape]]) -> list:
         """
         Validates that all sequences across all landscapes share a
         common alphabet and returns it.
 
         Parameters
         ----------
-        landscapes : List[FitnessLandscape]
+        landscapes : List[FitnessLandscape, DirectedFitnessLandscape]
             The list of fitness landscapes to validate.
 
         Returns
@@ -272,7 +293,7 @@ class FitnessSuperscape:
                 
     @staticmethod
     def _extract_graphs(landscapes: Iterable[Union[FitnessLandscape,
-                                                   nx.Graph]]) -> list[nx.Graph]:
+                                                   DirectedFitnessLandscape]]) -> list[Union[nx.Graph, nx.DiGraph]]:
         """
         Helper method to extract directed graphs from directed fitness
         landscapes.
@@ -280,28 +301,17 @@ class FitnessSuperscape:
         Parameters
         ----------
         landscapes : Iterable
-            The list of DirectedFitnessLandscapes, or
-            nx.Graph objects.
+            The list of FitenessLandscape or DirectedFitnessLandscapes.
 
         Returns
         -------
         out : list
-            The list of nx.Graph objects indexed matched to the
-            landscapes.
+            The list of nx.Graph or nx.DiGraph objects indexed matched
+            to the landscapes.
         """
-        out = []
-        for obj in landscapes:
-            if isinstance(obj, FitnessLandscape):
-                G = obj.graph
-            elif isinstance(obj, nx.Graph):
-                G = nx.Graph(obj)  # copy/upgrade
-            else:
-                raise TypeError(f"Unsupported landscape/graph type: {type(obj)}")
-            if not isinstance(G, nx.Graph):
-                G = nx.Graph(G)
-            out.append(G)
-        return out
-    
+        return [obj.graph for obj in landscapes]
+
+
     # Delegate tensor methods to latent graph FitnessLandscape class.
     def to_graph_tensor(self) -> 'Data':
         """
