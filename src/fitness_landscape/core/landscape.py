@@ -6,11 +6,11 @@ from torch_geometric.utils import from_networkx
 from typing import List, Union, Dict, Any, Iterable, Literal,  Protocol, runtime_checkable, Hashable, Union
 from dataclasses import dataclass
 from .sequence import BaseNumpySequence, make_sequence
-from .graph import create_diffusion_emb_graph, create_hamming_graph, create_tda_graph
+from .graph import create_diffusion_emb_graph, create_hamming_graph, create_tda_graph, create_knn_graph
+from .digraph import create_phylo_digraph, create_evol_diffusion_digraph, create_particle_filter_digraph
 from .fitness import NumericFitness, CategoricalFitness, BaseFitnessLayer
 from abc import ABC, abstractmethod
-from .graph import create_knn_graph, create_hamming_graph
-from ..utils import _compute_embeddings_from_sequences
+from ..utils import _compute_embeddings_from_sequences, alignment_to_base_numpy_sequences
 import inspect
 from collections import defaultdict
 from cogent3 import ArrayAlignment, load_aligned_seqs
@@ -525,8 +525,7 @@ class DirectedFitnessLandscape(FitnessLandscape):
             # Keep alignment for phylo and ASR.
             alignment = load_aligned_seqs(sequences) if isinstance(sequences, Path) else sequences
             #Load sequences for constructor, drop gaps (if present).
-            # DANGER: the alphabets mistmatches are likely here.
-            sequences = [BaseNumpySequence(str(alignment.seqs[i]).replace("-",""), alphabet=PROT_20) for i in range(len(alignment.seqs))]
+            sequences = alignment_to_base_numpy_sequences(alignment)
             
             digraph = create_phylo_digraph(alignment, **kwargs)
             final_embeddings = embeddings if attach_embeddings else None

@@ -5,6 +5,7 @@ import torch
 from .core.sequence import BaseNumpySequence, SoftSequence
 from .embedding.soft_embedding import ESMEmbedder
 from ._const import ALPHABET_21, PROT_20
+from cogent3.core.alignment import ArrayAlignment
 
 def cosine_similarity_matrix(A, B):
     """
@@ -242,3 +243,36 @@ def get_ohe_seq(sequence: Union[str, np.ndarray, torch.Tensor],
         return "".join([alphabet[aa.argmax().item()] for aa in sequence])
     else:
         raise ValueError("Input must be a string, numpy array, or torch tensor.")
+
+def alignment_to_base_numpy_sequences(alignment: ArrayAlignment,
+                                      alphabet: List[str] = PROT_20) -> List[BaseNumpySequence]:
+    """
+    Converts a cogent3 ArrayAlignment object to a list of
+    `BaseNumpySequence` objects.
+
+    Parameters
+    ----------
+    alignment : ArrayAlignment
+        The cogent3 alingmnet object
+    
+    alphabet : List[str], default=`PROT_20`
+        The alphabet to use for BaseNumpySequence construction.
+
+    Returns
+    -------
+    sequences : List[BaseNumpySequence]
+        A list of BaseNumpySequence objects with gaps removed.
+        
+    """
+    sequences = []
+    for seq in alignment.iter_seqs():
+
+        ungapped_seq_str = str(seq).replace('-', '')
+
+        base_numpy_seq = BaseNumpySequence(
+            list(ungapped_seq_str),
+            alphabet=PROT_20,
+            sequence_id=seq.name
+        )
+        sequences.append(base_numpy_seq)
+    return sequences
