@@ -398,4 +398,5 @@ class HierarchicalRJMCMCAligner:
 
                 final_mappings[graph_idx][master_rows[valid_mask], master_cols[valid_mask]] = probs[valid_mask]
                 
+        final_graph = nx.relabel_nodes(final_graph, global_name_to_final_idx, copy=True)
         return final_graph, final_mappings
