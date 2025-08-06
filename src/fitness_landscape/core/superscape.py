@@ -60,6 +60,16 @@ class FitnessSuperscape:
         # The results are now stored directly, not the aligner object
         self.latent_graph, self._latent_mappings = hierarchical_aligner.run_alignment()
         
+        # Collect local traces 
+        self.local_trace_E = hierarchical_aligner.local_energy_traces
+        self.local_trace_NL = hierarchical_aligner.local_nl_traces
+        self.local_trace_edges = hierarchical_aligner.local_edges_traces
+        
+        # Collect meta traces 
+        self.meta_trace_E = hierarchical_aligner.meta_energy_trace
+        self.meta_trace_NL = hierarchical_aligner.meta_nl_trace
+        self.meta_trace_edges = hierarchical_aligner.meta_edges_trace
+        
         self.back_reference = [
             (k, node_id)
             for k, landscape in enumerate(self.landscapes)
@@ -240,6 +250,7 @@ class FitnessSuperscape:
                 try:
                     EmbNodeModel(**data) # will raise if missing/invalid
                 except ValidationError as e:
+
                     raise ValueError(f"{node!r}: {e}") from None
     
     @staticmethod

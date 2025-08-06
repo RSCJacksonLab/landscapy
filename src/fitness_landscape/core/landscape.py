@@ -186,7 +186,9 @@ class FitnessLandscape:
         """
         if self.graph is None or self.embeddings is None:
             return
-        attrs = {i: {self._emb_arr_key: self.embeddings[i]} for i in self.graph.nodes()}
+        
+        node_to_idx = {node: i for i, node in enumerate(self.graph.nodes())}
+        attrs = {node: {self._emb_arr_key: self.embeddings[idx]} for node, idx in node_to_idx.items()}
         nx.set_node_attributes(self.graph, attrs)
 
     # Validation method.
@@ -501,6 +503,7 @@ class DirectedFitnessLandscape(FitnessLandscape):
                        digraph_type: Literal['phylogenetic', 'diffusion_nq'] = 'phylogenetic',
                        embeddings: np.ndarray = None,
                        attach_embeddings: bool = True,
+                       _compute_phylo_embeddings: bool = True,
                        **kwargs) -> 'DirectedFitnessLandscape':
         """
         Primary factory method to create a FitnessLandscape from a list
@@ -524,10 +527,29 @@ class DirectedFitnessLandscape(FitnessLandscape):
 
             # Keep alignment for phylo and ASR.
             alignment = load_aligned_seqs(sequences) if isinstance(sequences, Path) else sequences
-            #Load sequences for constructor, drop gaps (if present).
-            sequences = alignment_to_base_numpy_sequences(alignment)
+
+            embedding_kwargs = {}
+            if 'model_name' in kwargs:
+                embeddings_kwargs['model_name'] = kwargs.pop('model_name')
+            if 'batch_size' in kwargs:
+                embeddings_kwargs['batch_size'] = kwargs.pop('batch_size')
+            if 'device' in kwargs:
+                embeddings_kwargs['device'] = kwargs.pop('device')
             
+            # Reconstruct phylogeny and ancestral states.
             digraph = create_phylo_digraph(alignment, **kwargs)
+            
+            # Collect sequences from the constructed graph (NOT the alignment).
+            sequences = [node[1]['sequence'] for node in digraph.nodes(data=True)]
+
+            # Logic to ensure embeddings are correctly secured for extant and ancestral sequences.
+            if embeddings is not None:
+                if embeddings.shape[0] != len(sequences):
+                    raise ValueError(f"Embeddings expected embeddings shape {len(sequences)} in dim 0, found {embeddings.shape[0]}. Forgot ancestral sequences in precomputed embeddings?")
+            
+            elif _compute_phylo_embeddings:
+                embeddings = _compute_embeddings_from_sequences(sequences, **embedding_kwargs)
+        
             final_embeddings = embeddings if attach_embeddings else None
             
             return cls(sequences=sequences,

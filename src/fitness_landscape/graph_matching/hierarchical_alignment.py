@@ -31,6 +31,15 @@ def run_local_alignment_task(cluster_subgraphs: List[Union[nx.Graph, nx.DiGraph]
         - The blueprint graph for the local alignment.
         - A mapping of node indices to latent space indices.
         - The order of nodes as seen by the aligner.
+    
+    trace_E : List
+        The local aligner energy trace over sampling steps. 
+    
+    trace_NL : List
+        The local alginer number of latent nodes over sampling steps. 
+    
+    trace_edges : List
+        The local aligner number of edges of sampling steps. 
     """
     local_aligner = RJMCMCAligner(graphs=cluster_subgraphs, **aligner_params)
     local_aligner.sample()
@@ -41,7 +50,7 @@ def run_local_alignment_task(cluster_subgraphs: List[Union[nx.Graph, nx.DiGraph]
     # Capture the order of nodes as the aligner sees them
     node_order = {i: list(g.nodes()) for i, g in enumerate(cluster_subgraphs)}
     
-    return blueprint, node_mapping, node_order
+    return blueprint, node_mapping, node_order, local_aligner.trace_E, local_aligner.trace_NL, local_aligner.trace_edges
 
 
 class HierarchicalRJMCMCAligner:
@@ -86,6 +95,16 @@ class HierarchicalRJMCMCAligner:
 
         if not ray.is_initialized():
             ray.init()
+
+        # Initialise local trace storing.
+        self.local_energy_traces = {}
+        self.local_nl_traces = {}
+        self.local_edges_traces = {}
+
+        # Initialise meta trace storing
+        self.meta_energy_trace = []
+        self.meta_nl_trace = []
+        self.meta_edges_trace = []
 
     def run_alignment(self) -> Tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray]]:
         """
@@ -209,12 +228,17 @@ class HierarchicalRJMCMCAligner:
             
             futures.append(run_local_alignment_task.remote(subgraphs, params))
         
+        # Collect result
         ray_results = ray.get(futures)
-        
-        for i, (blueprint, node_mapping, node_order) in enumerate(ray_results):
+        for i, (blueprint, node_mapping, node_order, trace_E, trace_NL, trace_edges) in enumerate(ray_results):
             clusters[i]['blueprint'] = blueprint
             clusters[i]['node_mapping'] = node_mapping
             clusters[i]['node_order'] = node_order
+            
+            # Store traces.
+            self.local_energy_traces[i] = trace_E
+            self.local_nl_traces[i] = trace_NL
+            self.local_edges_traces[i] = trace_edges
         
         return clusters
 
@@ -281,6 +305,10 @@ class HierarchicalRJMCMCAligner:
         
         meta_aligner = RJMCMCAligner(graphs=meta_graphs, **self.aligner_params)
         meta_aligner.sample()
+
+        self.meta_energy_trace.extend(meta_aligner.trace_E)
+        self.meta_nl_trace.extend(meta_aligner.trace_NL)
+        self.meta_edges_trace.extend(meta_aligner.trace_edges)
 
         return meta_aligner.latent_blueprint_graph(), meta_aligner.get_node_to_latent_mapping()
 
