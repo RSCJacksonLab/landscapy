@@ -118,12 +118,15 @@ def test_rjmcmc_sample_run(two_simple_graphs):
     """
     try:
         aligner = RJMCMCAligner(two_simple_graphs, burn_in=10, samples=5, thin=2, auto_anchor=False, seed=42)
-        aligner.sample()
+        # Explicitly call with a set number of chains for the test
+        aligner.sample(num_chains=2)
     except Exception as e:
         pytest.fail(f"RJMCMCAligner.sample() raised an exception: {e}")
-        
-    assert len(aligner._stored_L) == 5
-    assert len(aligner._stored_pi[0]) == 5
+    
+    # Assert the correct total number of samples (num_chains * samples).
+    expected_samples = 2 * 5
+    assert len(aligner._stored_L) == expected_samples
+    assert len(aligner._stored_pi[0]) == expected_samples
     
     latent_graph = aligner.latent_blueprint_graph()
     assert isinstance(latent_graph, nx.Graph)

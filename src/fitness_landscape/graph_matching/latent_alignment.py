@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import ray
 from scipy.sparse import csr_matrix
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union, Dict
@@ -134,6 +134,19 @@ class NormalGamma:
         + gammaln(self.alpha0 + 0.5 * n)
         - gammaln(self.alpha0)
     )
+
+
+@ray.remote(num_cpus=1)
+def _run_single_chain_task(aligner_instance,
+                               chain_seed: int):
+    """
+    Private MCMC chain sampling method.
+    """
+    # Create a new, independent random number generator for this chain
+    aligner_instance.rng = np.random.default_rng(chain_seed)
+
+    return aligner_instance._run_mcmc_loop()
+
 
 class RJMCMCAligner:
     """
@@ -779,23 +792,30 @@ class RJMCMCAligner:
         return self.graphs[k].nodes[self.V[k][i]].get("anchor", False)
 
     #  Sampler
-    def sample(self) -> None:
+    def _run_mcmc_loop(self):
         """
-        Main method to sample the MCMC.
+        Parallel sampling loop.
+        """
+        # Create writable copies for the parallel worker.
+        self.perm = [p.copy() for p in self.perm]
+        self.C_k = [c.copy() for c in self.C_k]
+        self.C_global = self.C_global.copy()
+        
+        # Initialize traces for this specific chain
+        chain_trace_E, chain_trace_NL, chain_trace_edges = [], [], []
+        stored_L, stored_pi = [], [[] for _ in range(self.K)]
 
-        """
-        # Initial blueprint and energy calculation
-        # Init latent graph from majority consensus not Gibbs sampling.
         self.L = self._gibbs_sample_blueprint()
         cur_E = self._energy()
         
         total_steps = self.burn_in + self.samples * self.thin
         
         for step in range(total_steps):
-
-            # Bookkeeping on number of latent edges.
-            self.trace_edges.append(self.L.sum() // 2) 
-
+        
+            # Bookkeeping on number of latent states.
+            chain_trace_edges.append(self.L.sum() // 2)
+            chain_trace_E.append(cur_E)
+            chain_trace_NL.append(self.NL)
 
             # if step > self.burn_in: 
             if step < self.burn_in:
@@ -803,9 +823,6 @@ class RJMCMCAligner:
             else:
                 self._in_growth_phase = False
             
-            # Update trace
-            self.trace_E.append(cur_E)
-            self.trace_NL.append(self.NL)
 
             move_type = self.rng.random()
             accepted = False
@@ -880,7 +897,7 @@ class RJMCMCAligner:
                     # recompute only graph k's counts
                     new_Ck = self._compute_Ck(new_pk, self.W[k])
                     # update the global sum
-                    self.C_global += (new_Ck - prev_Ck)
+                    self.C_global = self.C_global + (new_Ck - prev_Ck)
 
                     # tentatively install the new permutation amd counts
                     self.perm[k] = new_pk
@@ -910,15 +927,55 @@ class RJMCMCAligner:
                         # revert swap and counts on rejection
                         self.perm[k]   = prev_pk
                         self.C_k[k]    = prev_Ck
-                        self.C_global -= (new_Ck - prev_Ck)
+                        self.C_global = self.C_global - (new_Ck - prev_Ck)
                         self.L = self._gibbs_sample_blueprint()
 
 
             # Store the state after burn-in and thinning
             if step >= self.burn_in and (step - self.burn_in) % self.thin == 0:
-                self._stored_L.append(self.L.copy())
+                stored_L.append(self.L.copy())
                 for k in range(self.K):
-                    self._stored_pi[k].append(self.perm[k].copy())
+                    stored_pi[k].append(self.perm[k].copy())
+        
+        return stored_L, stored_pi, chain_trace_E, chain_trace_NL, chain_trace_edges
+
+    def sample(self,
+               num_chains: int = 4) -> None:
+        """
+        Main method to sample the MCMC by running multiple independent
+        chains in parallel.
+        """
+        # Use a seed sequence for reproducible parallel runs
+        seed_sequence = np.random.SeedSequence(self.rng.integers(2**32))
+        chain_seeds = seed_sequence.spawn(num_chains)
+
+        futures = [
+            _run_single_chain_task.remote(self, seed) for seed in chain_seeds
+        ]
+        
+        parallel_results = ray.get(futures)
+
+        # Clear and aggregate the results from all chains
+        self._stored_L.clear()
+        for k in range(self.K):
+            self._stored_pi[k].clear()
+        
+        self.trace_E = []
+        self.trace_NL = []
+        self.trace_edges = []
+
+        for chain_result in parallel_results:
+            stored_L, stored_pi, trace_E, trace_NL, trace_edges = chain_result
+            
+            # Pool the posterior samples
+            self._stored_L.extend(stored_L)
+            for k in range(self.K):
+                self._stored_pi[k].extend(stored_pi[k])
+            
+            # Store traces as a list of lists (one list per chain)
+            self.trace_E.append(trace_E)
+            self.trace_NL.append(trace_NL)
+            self.trace_edges.append(trace_edges)
 
     def latent_blueprint_graph(self,
                                posterior_prob_cutoff: float = 0.2) -> Union[nx.Graph, nx.DiGraph]:
