@@ -203,48 +203,6 @@ class TopPSampler(Sampler):
         return nn.functional.one_hot(
             sampled_indices.squeeze(-1), num_classes=probabilities.shape[-1]
         ).float()
-        
-class TrajectoryGraph:
-    """
-    
-    """
-    def __init__(self):
-        self.G = nx.DiGraph()
-        self.node_counter = 0
-
-    def add_node(self,
-                 **attrs: Any) -> int:
-        """
-        
-        """
-        node_id = self.node_counter
-        self.G.add_node(node_id, **attrs)
-        self.node_counter += 1
-        return node_id
-
-    def add_edge(self,
-                 parent_id: int,
-                 child_id: int,
-                 **attrs: Any):
-        """
-        
-        """
-        self.G.add_edge(parent_id, child_id, **attrs)
-
-    def get_node_data(self,
-                      node_id: int) -> Dict[str, Any]:
-        """
-        
-        """
-        return self.G.nodes[node_id]
-
-    def get_tips_with_attribute(self,
-                                attr_name: str) -> List[Tuple[int, float]]:
-        """
-        
-        """
-        all_tips = [n for n, d in self.G.out_degree() if d >= 0]
-        return [(tip, self.G.nodes[tip][attr_name]) for tip in all_tips]
 
 class ParentSelector:
     """
