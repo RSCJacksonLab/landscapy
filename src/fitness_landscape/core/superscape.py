@@ -3,11 +3,15 @@ from typing import Union, List, Literal, Iterable, Dict, Any
 import numpy as np
 from ..core.landscape import FitnessLandscape, DirectedFitnessLandscape
 from ..core.sequence import BaseNumpySequence, SoftSequence
-from ..core.fitness import NumericFitness, CategoricalFitness, ProbabilisticCategoricalFitness
+from ..core.fitness import NumericFitness, CategoricalFitness, ProbabilisticCategoricalFitness, BaseFitnessLayer
 from ..graph_matching.latent_alignment import RJMCMCAligner
 from ..graph_matching.hierarchical_alignment import HierarchicalRJMCMCAligner
 import networkx as nx
 from softalign.soft_alignment import align_soft_sequences
+import ray
+from pathlib import Path
+from cogent3 import ArrayAlignment
+from ..utils import alignment_to_base_numpy_sequences
 
 
 class EmbNodeModel(BaseModel):
@@ -21,6 +25,24 @@ class EmbNodeModel(BaseModel):
         if v.ndim != 1:
             raise ValueError("emb_arr must be a 1-D array")
         return v
+
+# Parallel landscape constructor private function.
+@ray.remote
+def _create_landscape_task(
+    constructor_class: Union[FitnessLandscape, DirectedFitnessLandscape],
+    sequences: Union[Path, ArrayAlignment, List[BaseNumpySequence]],
+    fitness_layers: Dict[str, BaseFitnessLayer] = None,
+    **kwargs: Any
+) -> Union[FitnessLandscape, DirectedFitnessLandscape]:
+    """
+    A generalized Ray remote task that calls the `from_sequences` method
+    of a specified landscape class.
+    """
+    return constructor_class.from_sequences(
+        sequences=sequences,
+        fitness_layers=fitness_layers,
+        **kwargs
+    )
 
 class FitnessSuperscape:
     """
@@ -274,33 +296,26 @@ class FitnessSuperscape:
         ValueError
             If alphabets are inconsistent or no sequences are found.
         """
-        # Avoids building a potentially large list in memory.
-        all_alphabets_gen = (
-            (i, j, seq.alphabet)
-            for i, landscape in enumerate(landscapes)
+        
+        combined_alphabet_set = set()
+
+        # Create a generator for all sequences
+        all_sequences_gen = (
+            seq
+            for landscape in landscapes
             if isinstance(landscape, FitnessLandscape) and landscape.sequences
-            for j, seq in enumerate(landscape.sequences)
+            for seq in landscape.sequences
         )
 
-        try:
-            # Get the first alphabet to use as the reference.
-            _, _, reference_alphabet = next(all_alphabets_gen)
-            reference_alphabet_set = set(reference_alphabet)
-        except StopIteration:
-            # If no sequences are found, raise an error.
+        found_sequences = False
+        for seq in all_sequences_gen:
+            found_sequences = True
+            combined_alphabet_set.update(seq.alphabet)
+
+        if not found_sequences:
             raise ValueError("Could not determine alphabet: no sequences found in any of the provided landscapes.")
 
-        # Check all remaining alphabets in the generator against the reference.
-        for i, j, current_alphabet in all_alphabets_gen:
-            if set(current_alphabet) != reference_alphabet_set:
-                raise ValueError(
-                    f"Inconsistent alphabets found. "
-                    f"Alphabet in landscape {i}, sequence {j} "
-                    f"({set(current_alphabet)}) does not match the "
-                    f"reference alphabet ({reference_alphabet_set})."
-                )
-        
-        return sorted(list(reference_alphabet_set))
+        return sorted(list(combined_alphabet_set))
                 
     @staticmethod
     def _extract_graphs(landscapes: Iterable[Union[FitnessLandscape,
@@ -401,6 +416,77 @@ class FitnessSuperscape:
         """Loads a FitnessSuperscape object from a file."""
         with open(filepath, 'rb') as f:
             return pickle.load(f)
+
+    @classmethod
+    def from_parallel_construction(cls,
+                                   constructor_type: Literal['undirected', 'directed'],
+                                   construction_jobs: List[Dict[str, Any]],
+                                   posterior_prob_cutoff: float = 0.1,
+                                   **sampler_kwargs: Any) -> "FitnessSuperscape":
+        """
+        A flexible factory method to create a FitnessSuperscape by
+        constructing multiple landscapes of the same base type (either
+        undirected or directed) in parallel using Ray.
+
+        This method supports heterogeneous construction parameters,
+        allowing construction of landscapes from different data sources
+        and with different graph constructors within the same parallel
+        run.
+
+        Parameters
+        ----------
+        constructor_type : Literal['undirected', 'directed']
+            Specifies the base type of landscapes to create for this
+            entire run.
+        construction_jobs : List[Dict[str, Any]]
+            A list of dictionaries, each defining a single landscape to
+            construct.
+            
+            Each dictionary must contain:
+            - 'sequences': The input data (e.g., a Path, Alignment, 
+            or List[BaseNumpySequence]).
+            - 'graph_type' (for undirected) or 'digraph_type' (for
+            directed).
+            - Other keys are passed as kwargs to the constructor.
+        posterior_prob_cutoff : float, default=0.1
+            The cutoff for posterior probabilities in the latent
+            landscape.
+        **sampler_kwargs : Any
+            Keyword arguments for the RJMCMCAligner sampler.
+
+        Returns
+        -------
+        FitnessSuperscape
+            An instance containing the parallel-constructed landscapes.
+        """
+        if not ray.is_initialized():
+            ray.init()
+
+        landscape_class = (
+            FitnessLandscape if constructor_type == 'undirected'
+            else DirectedFitnessLandscape
+        )
+
+        futures = []
+        for job in construction_jobs:
+            if 'sequences' not in job:
+                raise ValueError("Each job must have a `sequences` key.")
+            elif 'graph_type' not in job and 'digraph_type' not in job:
+                raise ValueError("Each job must have either `graph_type` or `digraph_type` key.")
+
+            # Same base class to instantiate across all parallel runs.
+            job['constructor_class'] = landscape_class
+            futures.append(_create_landscape_task.remote(**job))
+
+        # Retrieve the results
+        landscapes = ray.get(futures)
+
+        # Initialize the FitnessSuperscape with the final list of landscapes
+        return cls(
+            landscapes=landscapes,
+            posterior_prob_cutoff=posterior_prob_cutoff,
+            **sampler_kwargs
+        )
 
     # TODO: shard with FAISS and retrieve subgraph with cosine match to
     # the query vector. Current method scales O(N^2) over exhaustive
