@@ -3,11 +3,14 @@ from typing import Union, List, Literal, Iterable, Dict, Any
 import numpy as np
 from ..core.landscape import FitnessLandscape, DirectedFitnessLandscape
 from ..core.sequence import BaseNumpySequence, SoftSequence
-from ..core.fitness import NumericFitness, CategoricalFitness, ProbabilisticCategoricalFitness
+from ..core.fitness import NumericFitness, CategoricalFitness, ProbabilisticCategoricalFitness, BaseFitnessLayer
 from ..graph_matching.latent_alignment import RJMCMCAligner
 from ..graph_matching.hierarchical_alignment import HierarchicalRJMCMCAligner
 import networkx as nx
 from softalign.soft_alignment import align_soft_sequences
+import ray
+from pathlib import Path
+from cogent3 import ArrayAlignment
 
 
 class EmbNodeModel(BaseModel):
@@ -21,6 +24,24 @@ class EmbNodeModel(BaseModel):
         if v.ndim != 1:
             raise ValueError("emb_arr must be a 1-D array")
         return v
+
+# Parallel landscape constructor private function.
+@ray.remote
+def _create_landscape_task(
+    constructor_class: Union[FitnessLandscape, DirectedFitnessLandscape],
+    sequences: Union[Path, ArrayAlignment, List[BaseNumpySequence]],
+    fitness_layers: Dict[str, BaseFitnessLayer] = None,
+    **kwargs: Any
+) -> Union[FitnessLandscape, DirectedFitnessLandscape]:
+    """
+    A generalized Ray remote task that calls the `from_sequences` method
+    of a specified landscape class.
+    """
+    return constructor_class.from_sequences(
+        sequences=sequences,
+        fitness_layers=fitness_layers,
+        **kwargs
+    )
 
 class FitnessSuperscape:
     """
@@ -401,6 +422,77 @@ class FitnessSuperscape:
         """Loads a FitnessSuperscape object from a file."""
         with open(filepath, 'rb') as f:
             return pickle.load(f)
+
+    @classmethod
+    def from_parallel_construction(cls,
+                                   constructor_type: Literal['undirected', 'directed'],
+                                   construction_jobs: List[Dict[str, Any]],
+                                   posterior_prob_cutoff: float = 0.1,
+                                   **sampler_kwargs: Any) -> "FitnessSuperscape":
+        """
+        A flexible factory method to create a FitnessSuperscape by
+        constructing multiple landscapes of the same base type (either
+        undirected or directed) in parallel using Ray.
+
+        This method supports heterogeneous construction parameters,
+        allowing construction of landscapes from different data sources
+        and with different graph constructors within the same parallel
+        run.
+
+        Parameters
+        ----------
+        constructor_type : Literal['undirected', 'directed']
+            Specifies the base type of landscapes to create for this
+            entire run.
+        construction_jobs : List[Dict[str, Any]]
+            A list of dictionaries, each defining a single landscape to
+            construct.
+            
+            Each dictionary must contain:
+            - 'sequences': The input data (e.g., a Path, Alignment, 
+            or List[BaseNumpySequence]).
+            - 'graph_type' (for undirected) or 'digraph_type' (for
+            directed).
+            - Other keys are passed as kwargs to the constructor.
+        posterior_prob_cutoff : float, default=0.1
+            The cutoff for posterior probabilities in the latent
+            landscape.
+        **sampler_kwargs : Any
+            Keyword arguments for the RJMCMCAligner sampler.
+
+        Returns
+        -------
+        FitnessSuperscape
+            An instance containing the parallel-constructed landscapes.
+        """
+        if not ray.is_initialized():
+            ray.init()
+
+        landscape_class = (
+            FitnessLandscape if constructor_type == 'undirected'
+            else DirectedFitnessLandscape
+        )
+
+        futures = []
+        for job in construction_jobs:
+            if 'sequences' not in job:
+                raise ValueError("Each job must have a 'sequences' key.")
+            elif 'graph_type' not in job:
+                raise ValueError("Each job must have a 'graph_type' key.")
+
+            # Same base class to instantiate across all parallel runs.
+            job['constructor_class'] = landscape_class
+            futures.append(create_landscape_task.remote(**job))
+
+        # Retrieve the results
+        landscapes = ray.get(futures)
+
+        # Initialize the FitnessSuperscape with the final list of landscapes
+        return cls(
+            landscapes=landscapes,
+            posterior_prob_cutoff=posterior_prob_cutoff,
+            **sampler_kwargs
+        )
 
     # TODO: shard with FAISS and retrieve subgraph with cosine match to
     # the query vector. Current method scales O(N^2) over exhaustive
