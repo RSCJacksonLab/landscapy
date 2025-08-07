@@ -11,6 +11,7 @@ from softalign.soft_alignment import align_soft_sequences
 import ray
 from pathlib import Path
 from cogent3 import ArrayAlignment
+from ..utils import alignment_to_base_numpy_sequences
 
 
 class EmbNodeModel(BaseModel):
@@ -295,33 +296,26 @@ class FitnessSuperscape:
         ValueError
             If alphabets are inconsistent or no sequences are found.
         """
-        # Avoids building a potentially large list in memory.
-        all_alphabets_gen = (
-            (i, j, seq.alphabet)
-            for i, landscape in enumerate(landscapes)
+        
+        combined_alphabet_set = set()
+
+        # Create a generator for all sequences
+        all_sequences_gen = (
+            seq
+            for landscape in landscapes
             if isinstance(landscape, FitnessLandscape) and landscape.sequences
-            for j, seq in enumerate(landscape.sequences)
+            for seq in landscape.sequences
         )
 
-        try:
-            # Get the first alphabet to use as the reference.
-            _, _, reference_alphabet = next(all_alphabets_gen)
-            reference_alphabet_set = set(reference_alphabet)
-        except StopIteration:
-            # If no sequences are found, raise an error.
+        found_sequences = False
+        for seq in all_sequences_gen:
+            found_sequences = True
+            combined_alphabet_set.update(seq.alphabet)
+
+        if not found_sequences:
             raise ValueError("Could not determine alphabet: no sequences found in any of the provided landscapes.")
 
-        # Check all remaining alphabets in the generator against the reference.
-        for i, j, current_alphabet in all_alphabets_gen:
-            if set(current_alphabet) != reference_alphabet_set:
-                raise ValueError(
-                    f"Inconsistent alphabets found. "
-                    f"Alphabet in landscape {i}, sequence {j} "
-                    f"({set(current_alphabet)}) does not match the "
-                    f"reference alphabet ({reference_alphabet_set})."
-                )
-        
-        return sorted(list(reference_alphabet_set))
+        return sorted(list(combined_alphabet_set))
                 
     @staticmethod
     def _extract_graphs(landscapes: Iterable[Union[FitnessLandscape,
@@ -476,13 +470,13 @@ class FitnessSuperscape:
         futures = []
         for job in construction_jobs:
             if 'sequences' not in job:
-                raise ValueError("Each job must have a 'sequences' key.")
-            elif 'graph_type' not in job:
-                raise ValueError("Each job must have a 'graph_type' key.")
+                raise ValueError("Each job must have a `sequences` key.")
+            elif 'graph_type' not in job and 'digraph_type' not in job:
+                raise ValueError("Each job must have either `graph_type` or `digraph_type` key.")
 
             # Same base class to instantiate across all parallel runs.
             job['constructor_class'] = landscape_class
-            futures.append(create_landscape_task.remote(**job))
+            futures.append(_create_landscape_task.remote(**job))
 
         # Retrieve the results
         landscapes = ray.get(futures)

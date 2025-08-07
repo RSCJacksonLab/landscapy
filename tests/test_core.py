@@ -4,14 +4,17 @@ import networkx as nx
 from fitness_landscape.core.sequence import *
 from fitness_landscape.core.graph import *
 from fitness_landscape.core.digraph import *
-from fitness_landscape.core.landscape import FitnessLandscape
+from fitness_landscape.core.landscape import FitnessLandscape, DirectedFitnessLandscape
 from fitness_landscape.core.fitness import NumericFitness, CategoricalFitness
+from fitness_landscape.core.superscape import FitnessSuperscape
 import torch
 from torch_geometric.data import Data
 from fitness_landscape.core.fitness import NumericFitness, CategoricalFitness, ProbabilisticCategoricalFitness
 from pathlib import Path
 from fitness_landscape._sub_matrices import nq_pfam
 from fitness_landscape.embedding.particle_sampler import SequenceGenerator, TopPSampler
+from unittest.mock import patch
+from fitness_landscape.utils import alignment_to_base_numpy_sequences
 
 @pytest.fixture
 def mock_embedder(mocker):
@@ -651,3 +654,54 @@ def test_sampler_step(sequence_generator):
     # More tests on function would be good
     newly_added_nodes = sampler.G.number_of_nodes() - initial_nodes
     assert isinstance(sampler.G, nx.DiGraph)
+
+@patch('fitness_landscape.core.superscape.HierarchicalRJMCMCAligner')
+@patch('fitness_landscape.utils.ESMEmbedder') # Patch the entire ESMEmbedder class
+def test_superscape_from_parallel_construction(
+    MockESMEmbedder, # The mock for the class
+    MockHierarchicalRJMCMCAligner,
+    phylo_test_data: Path
+):
+    """
+    Tests the generalized `from_parallel_construction` factory method to ensure
+    it can build heterogeneous landscapes in parallel.
+    """
+    mock_embedder_instance = MockESMEmbedder.return_value
+    mock_embedder_instance.embed_relaxed_seqs.side_effect = [
+        np.random.rand(5, 10),
+        np.random.rand(3, 10)
+    ]
+    mock_aligner_instance = MockHierarchicalRJMCMCAligner.return_value
+    mock_aligner_instance.run_alignment.return_value = (nx.DiGraph(), {}) 
+    alignment = load_aligned_seqs(phylo_test_data, moltype="protein")
+    sequence_list = alignment_to_base_numpy_sequences(alignment)
+    construction_jobs = [
+        {
+            "sequences": phylo_test_data,
+            "digraph_type": 'phylogenetic',
+            "_compute_phylo_embeddings": True
+        },
+        {
+            "sequences": sequence_list,
+            "digraph_type": 'diffusion_nq',
+            "k": 2,
+            "t": 2
+        }
+    ]
+
+    superscape = FitnessSuperscape.from_parallel_construction(
+        constructor_type='directed',
+        construction_jobs=construction_jobs,
+        sampler_kwargs={"burn_in": 1, "samples": 1}
+    )
+
+    assert isinstance(superscape, FitnessSuperscape)
+    assert len(superscape.landscapes) == 2, "Should create two landscapes from the two jobs."
+    phylo_landscape = superscape.landscapes[0]
+    assert isinstance(phylo_landscape, DirectedFitnessLandscape)
+    assert phylo_landscape.graph.number_of_nodes() == 5, "Phylogenetic graph should have tips and ancestors."
+    diffusion_landscape = superscape.landscapes[1]
+    assert isinstance(diffusion_landscape, DirectedFitnessLandscape)
+    assert diffusion_landscape.graph.number_of_nodes() == 3, "Diffusion graph should only have tip nodes."    
+    MockHierarchicalRJMCMCAligner.assert_called_once()
+    
