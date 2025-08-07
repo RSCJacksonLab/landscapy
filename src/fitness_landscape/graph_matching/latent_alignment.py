@@ -280,9 +280,19 @@ class RJMCMCAligner:
             self.perm.append(pk)
 
         num_anchored_slots = len(anchor_label_to_slot)
-        max_nodes = max(self.n) if self.n else 0
-        self.NL = max(num_anchored_slots, max_nodes)
-        
+
+        # Calculate the maximum number of UNANCHORED nodes in any single graph
+        max_unanchored_nodes = 0
+        for k, (G, vs) in enumerate(zip(graphs, self.V)):
+
+            # Count how many nodes in this graph are anchored
+            num_anchors_in_graph = sum(1 for v in vs if G.nodes[v].get("anchor", False))
+            num_unanchored = len(vs) - num_anchors_in_graph
+            if num_unanchored > max_unanchored_nodes:
+                max_unanchored_nodes = num_unanchored
+
+        self.NL = num_anchored_slots + max_unanchored_nodes
+                
         # This logic ensures each graph's nodes are assigned to the first
         # available slots without conflict.
         globally_used_slots = set(anchor_label_to_slot.values())

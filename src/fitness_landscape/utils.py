@@ -5,7 +5,7 @@ import torch
 from .core.sequence import BaseNumpySequence, SoftSequence
 from .embedding.soft_embedding import ESMEmbedder
 from ._const import ALPHABET_21, PROT_20
-cogent3 import ArrayAlignment, make_aligned_seqs, ArrayAlignment 
+from cogent3 import ArrayAlignment, make_aligned_seqs, ArrayAlignment 
 
 def cosine_similarity_matrix(A, B):
     """
