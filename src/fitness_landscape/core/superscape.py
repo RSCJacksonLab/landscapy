@@ -1,12 +1,18 @@
 from pydantic import BaseModel, Field, field_validator, ValidationError, ConfigDict
 from typing import Union, List, Literal, Iterable, Dict, Any
 import numpy as np
-from ..core.landscape import FitnessLandscape
+from ..core.landscape import FitnessLandscape, DirectedFitnessLandscape
 from ..core.sequence import BaseNumpySequence, SoftSequence
-from ..core.fitness import NumericFitness, CategoricalFitness, ProbabilisticCategoricalFitness
+from ..core.fitness import NumericFitness, CategoricalFitness, ProbabilisticCategoricalFitness, BaseFitnessLayer
 from ..graph_matching.latent_alignment import RJMCMCAligner
+from ..graph_matching.hierarchical_alignment import HierarchicalRJMCMCAligner
 import networkx as nx
 from softalign.soft_alignment import align_soft_sequences
+import ray
+from pathlib import Path
+from cogent3 import ArrayAlignment
+from ..utils import alignment_to_base_numpy_sequences
+import torch
 
 
 class EmbNodeModel(BaseModel):
@@ -21,6 +27,24 @@ class EmbNodeModel(BaseModel):
             raise ValueError("emb_arr must be a 1-D array")
         return v
 
+# Parallel landscape constructor private function.
+@ray.remote(num_gpus=1 if torch.cuda.is_available() else 0)
+def _create_landscape_task(
+    constructor_class: Union[FitnessLandscape, DirectedFitnessLandscape],
+    sequences: Union[Path, ArrayAlignment, List[BaseNumpySequence]],
+    fitness_layers: Dict[str, BaseFitnessLayer] = None,
+    **kwargs: Any
+) -> Union[FitnessLandscape, DirectedFitnessLandscape]:
+    """
+    A generalized Ray remote task that calls the `from_sequences` method
+    of a specified landscape class.
+    """
+    return constructor_class.from_sequences(
+        sequences=sequences,
+        fitness_layers=fitness_layers,
+        **kwargs
+    )
+
 class FitnessSuperscape:
     """
     FitnessSuperscape is a class that manages multiple fitness
@@ -29,7 +53,7 @@ class FitnessSuperscape:
 
     Attributes
     ----------
-    landscapes : List[Union[FitnessLandscape, _GraphLike]]
+    landscapes : List[Union[FitnessLandscape, DirectedFitnessLandscape]]
         A list of fitness landscapes or graph-like objects to be aligned.
     posterior_prob_cutoff : float
         The cutoff for posterior probabilities when constructing the
@@ -38,7 +62,7 @@ class FitnessSuperscape:
 
     def __init__(self,
                  
-                 landscapes: List[Union[FitnessLandscape, nx.Graph]],
+                 landscapes: List[Union[FitnessLandscape, DirectedFitnessLandscape]],
                  posterior_prob_cutoff: float = 0.1,
                  **sampler_kwargs) -> None:
         
@@ -50,31 +74,50 @@ class FitnessSuperscape:
         # Validate and set the common alphabet across all landscapes.
         self.alphabet = self._validate_and_set_alphabet(self.landscapes)
 
-        # Run RJMCMC sampling
-        self.graph_aligner = RJMCMCAligner(self._landscape_graphs,
-                                            **sampler_kwargs)
-        self.graph_aligner.sample()
+        # Run RJMCMC sampling using the hierachical aligner (scales in linear time).
+        # and not the RJMCMC aligner (scales in O(N^2K^2) time).
+        hierarchical_aligner = HierarchicalRJMCMCAligner(
+            graphs=self._landscape_graphs,
+            aligner_params=sampler_kwargs
+        )
+        # The results are now stored directly, not the aligner object
+        self.latent_graph, self._latent_mappings = hierarchical_aligner.run_alignment()
         
-        # Mappings for nodes to latent embeddings.
-        self._posterior_mapping = self.graph_aligner.posterior_match_probabilities()
-        self._latent_mappings = self.graph_aligner.get_node_to_latent_mapping()
-        self._posterior_prob_cutoff = posterior_prob_cutoff
-
+        # Collect local traces 
+        self.local_trace_E = hierarchical_aligner.local_energy_traces
+        self.local_trace_NL = hierarchical_aligner.local_nl_traces
+        self.local_trace_edges = hierarchical_aligner.local_edges_traces
+        
+        # Collect meta traces 
+        self.meta_trace_E = hierarchical_aligner.meta_energy_trace
+        self.meta_trace_NL = hierarchical_aligner.meta_nl_trace
+        self.meta_trace_edges = hierarchical_aligner.meta_edges_trace
+        
         self.back_reference = [
             (k, node_id)
             for k, landscape in enumerate(self.landscapes)
             for node_id in landscape.graph.nodes()
         ]
         
-
     def construct_latent_landscape(self) :
         """
         Construct the latent graph from the posterior mapping.
         """
-        self.latent_graph = self.graph_aligner.latent_blueprint_graph(posterior_prob_cutoff=self._posterior_prob_cutoff)
-
-        # Aggregate data into flat data structures.
-        all_prob_maps = np.vstack(list(self._latent_mappings.values()))
+        # Can be directed or undirected - handle gracefully on return.
+        num_total_nodes = sum(len(g.nodes()) for g in self._landscape_graphs)
+        num_latent_nodes = self.latent_graph.number_of_nodes()
+        
+        all_prob_maps = np.zeros((num_total_nodes, num_latent_nodes))
+        
+        current_row = 0
+        # Ensure process mappings in the correct graph order (0, 1, 2, ...)
+        for k in sorted(self._latent_mappings.keys()):
+            mapping_matrix = self._latent_mappings[k]
+            num_nodes_in_graph = mapping_matrix.shape[0]
+            # Handle cases where a graph might have no nodes mapping to the latent space
+            if num_nodes_in_graph > 0:
+                all_prob_maps[current_row : current_row + num_nodes_in_graph, :] = mapping_matrix
+            current_row += num_nodes_in_graph
 
         # Collect all ungapped arrays from the nodes
         all_ungapped_arrs = [
@@ -197,39 +240,51 @@ class FitnessSuperscape:
             if i in self.latent_graph.nodes:
                 self.latent_graph.nodes[i]['sequence'] = seq
         
-        self.latent_landscape = FitnessLandscape(
-            sequences=latent_sequences,
-            fitness_layers=latent_fitness_layers,
-            graph=self.latent_graph
-        )
+        # Gracefully direct to correct landscape constructor.
+        
+        if isinstance(self.latent_graph, nx.Graph):
+            self.latent_landscape = FitnessLandscape(
+                sequences=latent_sequences,
+                fitness_layers=latent_fitness_layers,
+                graph=self.latent_graph)
+        
+        elif isinstance(self.latent_graph, nx.DiGraph):
+            self.latent_landscape = DirectedFitnessLandscape(
+                sequences=latent_sequences,
+                fitness_layers=latent_fitness_layers,
+                graph=self.latent_graph)
+        
+        else:
+            raise ValueError(f"Expected latent graph to be nx.Graph or nx.DiGraph, found {type(self.latent_graph)}")
 
 
     @staticmethod
-    def _validate_embeddings(graphs: list[nx.Graph]) -> None:
+    def _validate_embeddings(graphs: list[Union[nx.Graph, nx.DiGraph]]) -> None:
         """
         Helper method to validate nodes have valid emb_arr attribute.
 
         Parameters
         ----------
         graphs : List
-            List of nx.Graph objects to be aligned.
+            List of nx.Graph or nx.DiGraph objects to be aligned.
         """
         for G in graphs:
             for node, data in G.nodes(data=True):
                 try:
                     EmbNodeModel(**data) # will raise if missing/invalid
                 except ValidationError as e:
+
                     raise ValueError(f"{node!r}: {e}") from None
     
     @staticmethod
-    def _validate_and_set_alphabet(landscapes: List[FitnessLandscape]) -> list:
+    def _validate_and_set_alphabet(landscapes: List[Union[FitnessLandscape, DirectedFitnessLandscape]]) -> list:
         """
         Validates that all sequences across all landscapes share a
         common alphabet and returns it.
 
         Parameters
         ----------
-        landscapes : List[FitnessLandscape]
+        landscapes : List[FitnessLandscape, DirectedFitnessLandscape]
             The list of fitness landscapes to validate.
 
         Returns
@@ -242,37 +297,30 @@ class FitnessSuperscape:
         ValueError
             If alphabets are inconsistent or no sequences are found.
         """
-        # Avoids building a potentially large list in memory.
-        all_alphabets_gen = (
-            (i, j, seq.alphabet)
-            for i, landscape in enumerate(landscapes)
+        
+        combined_alphabet_set = set()
+
+        # Create a generator for all sequences
+        all_sequences_gen = (
+            seq
+            for landscape in landscapes
             if isinstance(landscape, FitnessLandscape) and landscape.sequences
-            for j, seq in enumerate(landscape.sequences)
+            for seq in landscape.sequences
         )
 
-        try:
-            # Get the first alphabet to use as the reference.
-            _, _, reference_alphabet = next(all_alphabets_gen)
-            reference_alphabet_set = set(reference_alphabet)
-        except StopIteration:
-            # If no sequences are found, raise an error.
+        found_sequences = False
+        for seq in all_sequences_gen:
+            found_sequences = True
+            combined_alphabet_set.update(seq.alphabet)
+
+        if not found_sequences:
             raise ValueError("Could not determine alphabet: no sequences found in any of the provided landscapes.")
 
-        # Check all remaining alphabets in the generator against the reference.
-        for i, j, current_alphabet in all_alphabets_gen:
-            if set(current_alphabet) != reference_alphabet_set:
-                raise ValueError(
-                    f"Inconsistent alphabets found. "
-                    f"Alphabet in landscape {i}, sequence {j} "
-                    f"({set(current_alphabet)}) does not match the "
-                    f"reference alphabet ({reference_alphabet_set})."
-                )
-        
-        return sorted(list(reference_alphabet_set))
+        return sorted(list(combined_alphabet_set))
                 
     @staticmethod
     def _extract_graphs(landscapes: Iterable[Union[FitnessLandscape,
-                                                   nx.Graph]]) -> list[nx.Graph]:
+                                                   DirectedFitnessLandscape]]) -> list[Union[nx.Graph, nx.DiGraph]]:
         """
         Helper method to extract directed graphs from directed fitness
         landscapes.
@@ -280,28 +328,17 @@ class FitnessSuperscape:
         Parameters
         ----------
         landscapes : Iterable
-            The list of DirectedFitnessLandscapes, or
-            nx.Graph objects.
+            The list of FitenessLandscape or DirectedFitnessLandscapes.
 
         Returns
         -------
         out : list
-            The list of nx.Graph objects indexed matched to the
-            landscapes.
+            The list of nx.Graph or nx.DiGraph objects indexed matched
+            to the landscapes.
         """
-        out = []
-        for obj in landscapes:
-            if isinstance(obj, FitnessLandscape):
-                G = obj.graph
-            elif isinstance(obj, nx.Graph):
-                G = nx.Graph(obj)  # copy/upgrade
-            else:
-                raise TypeError(f"Unsupported landscape/graph type: {type(obj)}")
-            if not isinstance(G, nx.Graph):
-                G = nx.Graph(G)
-            out.append(G)
-        return out
-    
+        return [obj.graph for obj in landscapes]
+
+
     # Delegate tensor methods to latent graph FitnessLandscape class.
     def to_graph_tensor(self) -> 'Data':
         """
@@ -380,6 +417,77 @@ class FitnessSuperscape:
         """Loads a FitnessSuperscape object from a file."""
         with open(filepath, 'rb') as f:
             return pickle.load(f)
+
+    @classmethod
+    def from_parallel_construction(cls,
+                                   constructor_type: Literal['undirected', 'directed'],
+                                   construction_jobs: List[Dict[str, Any]],
+                                   posterior_prob_cutoff: float = 0.1,
+                                   **sampler_kwargs: Any) -> "FitnessSuperscape":
+        """
+        A flexible factory method to create a FitnessSuperscape by
+        constructing multiple landscapes of the same base type (either
+        undirected or directed) in parallel using Ray.
+
+        This method supports heterogeneous construction parameters,
+        allowing construction of landscapes from different data sources
+        and with different graph constructors within the same parallel
+        run.
+
+        Parameters
+        ----------
+        constructor_type : Literal['undirected', 'directed']
+            Specifies the base type of landscapes to create for this
+            entire run.
+        construction_jobs : List[Dict[str, Any]]
+            A list of dictionaries, each defining a single landscape to
+            construct.
+            
+            Each dictionary must contain:
+            - 'sequences': The input data (e.g., a Path, Alignment, 
+            or List[BaseNumpySequence]).
+            - 'graph_type' (for undirected) or 'digraph_type' (for
+            directed).
+            - Other keys are passed as kwargs to the constructor.
+        posterior_prob_cutoff : float, default=0.1
+            The cutoff for posterior probabilities in the latent
+            landscape.
+        **sampler_kwargs : Any
+            Keyword arguments for the RJMCMCAligner sampler.
+
+        Returns
+        -------
+        FitnessSuperscape
+            An instance containing the parallel-constructed landscapes.
+        """
+        if not ray.is_initialized():
+            ray.init()
+
+        landscape_class = (
+            FitnessLandscape if constructor_type == 'undirected'
+            else DirectedFitnessLandscape
+        )
+
+        futures = []
+        for job in construction_jobs:
+            if 'sequences' not in job:
+                raise ValueError("Each job must have a `sequences` key.")
+            elif 'graph_type' not in job and 'digraph_type' not in job:
+                raise ValueError("Each job must have either `graph_type` or `digraph_type` key.")
+
+            # Same base class to instantiate across all parallel runs.
+            job['constructor_class'] = landscape_class
+            futures.append(_create_landscape_task.remote(**job))
+
+        # Retrieve the results
+        landscapes = ray.get(futures)
+
+        # Initialize the FitnessSuperscape with the final list of landscapes
+        return cls(
+            landscapes=landscapes,
+            posterior_prob_cutoff=posterior_prob_cutoff,
+            **sampler_kwargs
+        )
 
     # TODO: shard with FAISS and retrieve subgraph with cosine match to
     # the query vector. Current method scales O(N^2) over exhaustive

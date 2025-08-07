@@ -27,7 +27,7 @@ class ESMEmbedder:
     def __init__(self,
                  model_name: str = "facebook/esm2_t6_8M_UR50D",
                  device: Optional[str] = None,
-                 alphabet: List = list('ACDEFGHIKLMNPQRSTVWY-') + ['<cls>', '<eos>', '<pad>', '-', '<mask>'],
+                 alphabet: List = list('ACDEFGHIKLMNPQRSTVWY-') + ['<cls>', '<eos>', '<pad>','<mask>'],
                  batch_size: int = 1) -> None:
         """
         Initialise PLM embedder class by initialising the provided
@@ -109,7 +109,6 @@ class ESMEmbedder:
     def forward_pass(self,
                      relaxed_seqs: torch.Tensor,
                      attention_mask: torch.Tensor = None,
-                     return_probabilities: bool = False
                      ) -> torch.Tensor:
         """
         Forward pass with relaxed amino acids at each position.
@@ -144,10 +143,8 @@ class ESMEmbedder:
             attention_mask=None if attention_mask is None else attention_mask,
             return_dict=True
         )
-        if return_probabilities:
-            return out.logits.softmax(dim=-1)
 
-        return out.hidden_states[-1]
+        return out
     
     def batch_iterator(self,
                    sequences: Union[np.ndarray, torch.Tensor, List[Union[str, np.ndarray, torch.Tensor]]],
@@ -262,14 +259,55 @@ class ESMEmbedder:
         for seq_batch, mask_batch, original_lengths, batch_indices in tqdm(iterator, desc="Embedding"):
             with torch.no_grad():
                 hidden_states = self.forward_pass(seq_batch, mask_batch)
+                hidden_states = hidden_states.hidden_states[-1]
 
             for j, original_idx in enumerate(batch_indices):
                 length = original_lengths[j]
-                embedding = hidden_states[j, 1:length + 1].cpu().numpy()
+                embedding = hidden_states[j, 1:length + 1].cpu()
                 embedding = embedding.mean(axis=0)
-                features[original_idx] = embedding.astype(np.float32)
+                features[original_idx] = embedding
         
         return np.array(features)
+    
+    def lm_output_probabilities(self,
+                        sequences: Union[np.ndarray, torch.Tensor, List[Union[str, np.ndarray, torch.Tensor]]],
+                        batch_size: Optional[int] = None) -> List[np.ndarray]:
+        """
+        Embeds sequences of strings, numpy arrays, or torch tensors.
+        Handles sorting for efficiency and reorders the output to match the input order.
+
+        Parameters
+        ----------
+        sequences : Union[np.ndarray, torch.Tensor, List[Union[str, np.ndarray, torch.Tensor]]]
+            A single sequence or a list of sequences to embed.
+
+        batch_size : int, optional
+            The batch size for processing. Defaults to the one set in the constructor.
+
+        Returns
+        -------
+        List[np.ndarray]
+            Extracted probabilities list of arrays, each of shape [sequence_length, alphabet_size].
+        """
+        sequences_as_list = sequences if isinstance(sequences, list) else [sequences]
+        output_probabilities = [None] * len(sequences_as_list)
+
+        iterator = list(self.batch_iterator(sequences, batch_size))
+
+        for seq_batch, mask_batch, original_lengths, batch_indices in tqdm(iterator, desc="Embedding"):
+            with torch.no_grad():
+                out = self.forward_pass(seq_batch, mask_batch)
+                probabilities = out.logits.softmax(dim=-1)
+
+            for j, original_idx in enumerate(batch_indices):
+                length = original_lengths[j]
+                probability = probabilities[j, 1:length + 1].cpu().numpy()
+                # extract only vocab positions
+                probability = probability[:, [self.vocab_dict[aa] for aa in self.alphabet]]
+                # ensure the output is float32
+                output_probabilities[original_idx] = probability.astype(np.float32)
+        
+        return output_probabilities
     
     def embed_sequences(self,
                         sequences: List[str],

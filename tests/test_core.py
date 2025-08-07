@@ -3,11 +3,33 @@ import pytest
 import networkx as nx
 from fitness_landscape.core.sequence import *
 from fitness_landscape.core.graph import *
-from fitness_landscape.core.landscape import FitnessLandscape
+from fitness_landscape.core.digraph import *
+from fitness_landscape.core.landscape import FitnessLandscape, DirectedFitnessLandscape
 from fitness_landscape.core.fitness import NumericFitness, CategoricalFitness
+from fitness_landscape.core.superscape import FitnessSuperscape
 import torch
 from torch_geometric.data import Data
 from fitness_landscape.core.fitness import NumericFitness, CategoricalFitness, ProbabilisticCategoricalFitness
+from pathlib import Path
+from fitness_landscape._sub_matrices import nq_pfam
+from fitness_landscape.embedding.particle_sampler import SequenceGenerator, TopPSampler
+from unittest.mock import patch
+from fitness_landscape.utils import alignment_to_base_numpy_sequences
+
+@pytest.fixture
+def mock_embedder(mocker):
+    """Mocks the ESMEmbedder to avoid loading a real model."""
+    embedder = mocker.MagicMock()
+    embedder.alphabet = list('ACDEFGHIKLMNPQRSTVWY-') + ['<cls>', '<eos>', '<pad>', '<mask>']
+    embedder.embed_relaxed_seqs.return_value = np.random.rand(10, 320)
+    embedder.lm_output_probabilities.return_value = [np.random.rand(5, 25) for _ in range(10)]
+    return embedder
+
+@pytest.fixture
+def sequence_generator(mock_embedder):
+    """Provides a SequenceGenerator with a mocked embedder."""
+    sampler = TopPSampler()
+    return SequenceGenerator(embedder=mock_embedder, sampler=sampler, batch_size=10)
 
 @pytest.fixture
 def basic_landscape():
@@ -41,6 +63,34 @@ def clustered_data():
     
     return sequences, embeddings
 
+@pytest.fixture
+def phylo_test_data(tmp_path: Path) -> Path:
+    """Creates a simple FASTA alignment file for testing."""
+    fasta_content = """>seq1
+ACDEFGHIKLMNPQRSTVWY
+>seq2
+ACDEFGHIKLMNPQRSTMAD
+>seq3
+ACDEFGHIKLMNPQRSTVAD
+"""
+    fasta_file = tmp_path / "phylo_test.fasta"
+    fasta_file.write_text(fasta_content)
+    return fasta_file
+
+@pytest.fixture
+def diffusion_test_data():
+    """Provides sequences and embeddings with a clear cluster structure."""
+    sequences = [
+        BaseNumpySequence(['A', 'R', 'N', 'D'], alphabet=PROT_20),
+        BaseNumpySequence(['A', 'Q', 'N', 'E'], alphabet=PROT_20),
+        BaseNumpySequence(['Y', 'Y', 'Y', 'Y'], alphabet=PROT_20)  
+    ]
+    embeddings = np.array([
+        [0.1, 0.1], 
+        [0.2, 0.1], 
+        [5.0, 5.0]  
+    ])
+    return sequences, embeddings
 
 def test_sequence_creation_and_distance():
     """
@@ -527,3 +577,131 @@ def test_read_from_fasta(tmp_path: Path):
     assert isinstance(sequences[0], BaseNumpySequence)
     assert sequences[0].id == "seq1"
     assert np.array_equal(sequences[1].to_array(), list("GATTACA"))
+
+def test_create_phylo_digraph_from_fasta(phylo_test_data: Path):
+    """
+    Tests that create_phylo_digraph correctly builds a directed graph
+    from a FASTA file, inferring the tree and ancestral states.
+    """
+    # Run the constructor
+    digraph = create_phylo_digraph(sequences=phylo_test_data)
+    assert isinstance(digraph, nx.DiGraph), "The output should be a NetworkX DiGraph."
+    assert digraph.number_of_nodes() == 5, "Expected 3 tip nodes and 2 ancestral nodes."
+    assert digraph.number_of_edges() == 4, "Expected 4 edges in the phylogenetic tree."
+    assert isinstance(digraph.nodes['seq1']['sequence'], BaseNumpySequence)
+    internal_node = [n for n in digraph.nodes if n not in ['seq1', 'seq2', 'seq3']][0]
+    assert 'sequence' in digraph.nodes[internal_node]
+
+def test_create_evol_diffusion_digraph(diffusion_test_data):
+    """
+    Tests that the evolutionary diffusion graph constructor correctly
+    builds a directed graph using k-NN filtering and soft alignment scoring.
+    """
+    sequences, embeddings = diffusion_test_data
+
+
+    G = create_evol_diffusion_digraph(
+        sequences=sequences,
+        embeddings=embeddings,
+        replacement_matrix=nq_pfam,
+        k=1, # Each node finds only its single nearest neighbor
+        t=2,
+        tau=0.1 # A low tau to create a sharp kernel
+    )
+
+    assert isinstance(G, nx.DiGraph), "The output should be a NetworkX DiGraph."
+    assert G.number_of_nodes() == 3, "Graph should have 3 nodes."
+
+def test_parent_selector():
+    """Tests that the ParentSelector selects the correct number of candidates."""
+    selector = ParentSelector(max_state_size=5)
+    candidates = list(range(10))
+    weights = np.random.rand(10).tolist()
+    selected = selector.select(list(zip(candidates, weights)))
+    assert len(selected) == 5
+
+def test_sampler_initialization(sequence_generator):
+    """Tests that the EvolutionParticleSampler initializes correctly."""
+    selector = ParentSelector(max_state_size=2)
+    sampler = EvolutionParticleSampler(
+        generator=sequence_generator,
+        selector=selector,
+        n_samples=2,
+        traj_length=5
+    )
+    sampler.initialize(seed_sequences=["ACDEF"])
+    
+    assert isinstance(sampler.G, nx.DiGraph)
+    assert sampler.G.number_of_nodes() == 1
+    node_data = list(sampler.G.nodes(data=True))[0][1]
+    assert isinstance(node_data['sequence'], BaseNumpySequence)
+    assert node_data['sequence'].to_str() == "ACDEF"
+
+def test_sampler_step(sequence_generator):
+    """Tests a single step of the sampler to ensure it adds nodes and edges."""
+    selector = ParentSelector(max_state_size=1)
+    sampler = EvolutionParticleSampler(
+        generator=sequence_generator,
+        selector=selector,
+        n_samples=10,
+        traj_length=10
+    )
+    sampler.initialize(seed_sequences=["ACGT"])
+    
+    initial_nodes = sampler.G.number_of_nodes()
+    sampler._step()
+
+    # More tests on function would be good
+    newly_added_nodes = sampler.G.number_of_nodes() - initial_nodes
+    assert isinstance(sampler.G, nx.DiGraph)
+
+@patch('fitness_landscape.core.superscape.HierarchicalRJMCMCAligner')
+@patch('fitness_landscape.utils.ESMEmbedder') # Patch the entire ESMEmbedder class
+def test_superscape_from_parallel_construction(
+    MockESMEmbedder, # The mock for the class
+    MockHierarchicalRJMCMCAligner,
+    phylo_test_data: Path
+):
+    """
+    Tests the generalized `from_parallel_construction` factory method to ensure
+    it can build heterogeneous landscapes in parallel.
+    """
+    mock_embedder_instance = MockESMEmbedder.return_value
+    mock_embedder_instance.embed_relaxed_seqs.side_effect = [
+        np.random.rand(5, 10),
+        np.random.rand(3, 10)
+    ]
+    mock_aligner_instance = MockHierarchicalRJMCMCAligner.return_value
+    mock_aligner_instance.run_alignment.return_value = (nx.DiGraph(), {}) 
+    alignment = load_aligned_seqs(phylo_test_data, moltype="protein")
+    sequence_list = alignment_to_base_numpy_sequences(alignment)
+    construction_jobs = [
+        {
+            "sequences": phylo_test_data,
+            "digraph_type": 'phylogenetic',
+            "_compute_phylo_embeddings": True
+        },
+        {
+            "sequences": sequence_list,
+            "digraph_type": 'diffusion_nq',
+            "k": 2,
+            "t": 2
+        }
+    ]
+
+    superscape = FitnessSuperscape.from_parallel_construction(
+        constructor_type='directed',
+        construction_jobs=construction_jobs,
+        sampler_kwargs={"burn_in": 1, "samples": 1}
+    )
+
+    assert isinstance(superscape, FitnessSuperscape)
+    assert len(superscape.landscapes) == 2, "Should create two landscapes from the two jobs."
+    phylo_landscape = superscape.landscapes[0]
+    assert isinstance(phylo_landscape, DirectedFitnessLandscape)
+    assert phylo_landscape.graph.number_of_nodes() == 5, "Phylogenetic graph should have tips and ancestors."
+    diffusion_landscape = superscape.landscapes[1]
+    assert isinstance(diffusion_landscape, DirectedFitnessLandscape)
+    assert diffusion_landscape.graph.number_of_nodes() == 3, "Diffusion graph should only have tip nodes."    
+    MockHierarchicalRJMCMCAligner.assert_called_once()
+    
