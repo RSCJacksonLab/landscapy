@@ -319,7 +319,7 @@ class SequenceGenerator:
                 processed_data.append({
                     'sequence': sequence_obj,
                     _emb_arr_key: rep,
-                    'lm_output': prob,
+                    'lm_output': prob.cpu().numpy(),
                     'lm_entropy': entropy.item()
                 })
         return processed_data, processed_sequences
@@ -330,7 +330,10 @@ class SequenceGenerator:
         """
         
         """
-        padded_probs, pad_mask = pad_sequences(parent_probs, self.pad_idx)
+        
+        parent_probs_tensors = [torch.tensor(p, dtype=torch.float32) for p in parent_probs]
+        padded_probs, pad_mask = pad_sequences(parent_probs_tensors, self.pad_idx)
+
         expanded_probs = padded_probs.repeat_interleave(n_samples, dim=0)
         
         children_padded = self.sampler.sample(expanded_probs, self.pad_idx)

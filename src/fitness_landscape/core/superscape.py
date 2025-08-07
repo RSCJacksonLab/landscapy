@@ -12,6 +12,7 @@ import ray
 from pathlib import Path
 from cogent3 import ArrayAlignment
 from ..utils import alignment_to_base_numpy_sequences
+import torch
 
 
 class EmbNodeModel(BaseModel):
@@ -27,7 +28,7 @@ class EmbNodeModel(BaseModel):
         return v
 
 # Parallel landscape constructor private function.
-@ray.remote
+@ray.remote(num_gpus=1 if torch.cuda.is_available() else 0)
 def _create_landscape_task(
     constructor_class: Union[FitnessLandscape, DirectedFitnessLandscape],
     sequences: Union[Path, ArrayAlignment, List[BaseNumpySequence]],

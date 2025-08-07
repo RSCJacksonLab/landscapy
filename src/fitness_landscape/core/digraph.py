@@ -376,6 +376,11 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
 
     # Find kNN in embedding space to identify candidate pairs
     # Should scale in O(N*k)
+    
+    # Update value of k if too large.
+    if k > n_sequences - 1:
+        k = n_sequences - 1
+
     nn = NearestNeighbors(n_neighbors=k, algorithm='ball_tree')
     nn.fit(embeddings)
     _, neighbor_indices = nn.kneighbors(embeddings)
