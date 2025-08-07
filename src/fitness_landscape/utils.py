@@ -5,7 +5,7 @@ import torch
 from .core.sequence import BaseNumpySequence, SoftSequence
 from .embedding.soft_embedding import ESMEmbedder
 from ._const import ALPHABET_21, PROT_20
-from cogent3.core.alignment import ArrayAlignment
+cogent3 import ArrayAlignment, make_aligned_seqs, ArrayAlignment 
 
 def cosine_similarity_matrix(A, B):
     """
@@ -276,3 +276,45 @@ def alignment_to_base_numpy_sequences(alignment: ArrayAlignment,
         )
         sequences.append(base_numpy_seq)
     return sequences
+
+def moving_window_alignment(alignment: ArrayAlignment,
+                            window_size: int,
+                            overlap: int) -> List[ArrayAlignment]:
+    """
+    Splits a cogent3 ArrayAlignment object into a list of smaller
+    ArrayAlignment objects using a moving window.
+
+    Parameters
+    ----------
+    alignment : cogent3.core.alignment.ArrayAlignment
+        The alignment to be split.
+    window_size : int
+        The number of sites (columns) in each window.
+    overlap : int
+        The number of sites to overlap between consecutive windows.
+
+    Returns
+    -------
+    list
+        A list of cogent3.core.alignment.ArrayAlignment objects.
+    """    
+    if window_size <= overlap:
+        raise ValueError("Window size must be greater than the overlap.")
+
+    alignment_items = list(alignment.named_seqs.items())
+    
+    # The step size is the amount to move the window forward in each iteration.
+    step_size = window_size - overlap
+    alignment_length = alignment.array_seqs.shape[0]
+    
+    windows = []
+    
+    for start in range(0, alignment_length - window_size + 1, step_size):
+        end = start + window_size
+        window = alignment_items[start:end]
+        window_dict = {
+            seq_id : seq for seq_id, seq in window
+        }
+        windows.append(make_aligned_seqs(window_dict, moltype='protein'))
+        
+    return windows
