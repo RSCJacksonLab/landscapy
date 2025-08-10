@@ -2,6 +2,9 @@ import numpy as np
 import networkx as nx
 from typing import List
 import torch
+from scipy import sparse as sp
+from scipy.spatial import cKDTree, distance_matrix
+from scipy.sparse.csgraph import minimum_spanning_tree
 from .core.sequence import BaseNumpySequence, SoftSequence
 from .embedding.soft_embedding import ESMEmbedder
 
