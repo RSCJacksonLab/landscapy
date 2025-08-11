@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
+from ..graph_matching.minimum_spanning_graph import reconstruct_latent_graph_with_steiner
+from ..core.landscape import FitnessLandscape
 
 
 def _ensure_affinity(G: nx.Graph,
@@ -457,3 +459,125 @@ def local_cheeger_sweep(G: nx.Graph,
             T_star = set(T)
 
     return float(best_phi), T_star
+
+def calculate_local_bottleneck(fitness_landscape: Union[nx.Graph, FitnessLandscape],
+                               latent_graph: Union[nx.Graph, FitnessLandscape] = None,
+                               weight_key: str = 'weight',
+                               sim_key: str = 'sim',
+                               tau: float = None,
+                               normalized_laplacian: bool = True,
+                               normalize_degree: bool = True,
+                               return_latent_graph: bool = False,
+                               **kwargs
+                               ) -> Dict:
+    """
+    Function to compute how locally bottlenecked an observed
+    (connected) fitnesslandscape is, assuming it is an induced subgraph
+    of a larger unobserved latent graph that has been sampled by
+    evolution. 
+
+    Parameters
+    ----------
+    fitness_lanscape : FitnessLandscape or nx.Graph
+        The observed fitness landscape. 
+    
+    latent_graph : nx.Graph, default=`None`
+        The latent graph that the observed landscape has been induced
+        from. If `None`, a minimum spanning latent graph will be 
+        constructed using `reconstruct_latent_graph_with_steiner`.
+    
+    weight_key : str, default=`weight`
+        The key that edge weight attributes are stored under. 
+    
+    sim_key : str, default=`sim`
+        The key that edge similarity attributes are stored under.
+    
+    tau : float, default=`None`
+        The weight-to-similarity `neglog` normalization factor. If
+        `None`, the median weight attribute is used. 
+    
+    normalized_laplacian : bool, default=`True`
+        Boolean to use the normalized Laplacian in Dirichlet operator
+        construction. 
+    
+    normalize_degree : bool, default=`True`
+        Boolean to normalize the Dirichlet operator gradient by
+        sqrt(deg(u)+deg(v)) to temper hubs during throat ranking.
+    
+    return_latent_graph : bool, default=`False`,
+        Boolean to return the latent graph.
+
+    **kwargs
+        Key word args passed to the
+        `reconstruct_latent_graph_with_steiner` function.
+
+    Returns
+    -------
+    results : Dict
+        The dictionary of results.
+    """
+    
+    # Typing for induced graph.
+    if isinstance(fitness_landscape, FitnessLandscape):
+        G_obs = fitness_landscape.graph
+    else:
+        G_obs = fitness_landscape
+    if not isinstance(G_obs, nx.Graph):
+        raise ValueError(f"Expected `nx.Graph` or `FitnessLandscape`, found {type(fitness_landscape)}")
+    
+    # Typing for latent graph
+    # Constrcut the latent spanning graph.
+    if latent_graph is None:
+        latent_graph = reconstruct_latent_graph_with_steiner(G_obs, **kwargs)[0]
+    elif isinstance(latent_graph, FitnessLandscape):
+        latent_graph = latent_graph.graph
+    
+    if not isinstance(latent_graph, nx.Graph):
+        raise ValueError(f"Expected `nx.Graph` or `FitnessLandscape`, found {type(latent_graph)}")
+    
+    S = list(G_obs.nodes())
+
+    # Ensure edges capture similarity key.
+    sim_attr_env = _ensure_affinity(G_obs,
+                                    length_key=weight_key,
+                                    sim_key=sim_key,
+                                    tau=tau)
+
+    # Define leakage boundary model from latent graph.
+    b_leak = _outward_cut_leakage(latent_graph,
+                                  S,
+                                  weight_key=sim_attr_env)
+
+    # Construct Robin Laplacian Dirichlet operator.
+    L_D, nodes_S = build_dirichlet_operator_custom_leak(G=G_obs,
+                                                        S=S,
+                                                        b_leak=b_leak,
+                                                        normalized=normalized_laplacian)
+
+    # Rank eigenfunction bottelenecks.
+    lam1, f1 = first_dirichlet_eigenpair(L_D)
+    throats = rank_throat_edges(G=G_obs,
+                                nodes_S=nodes_S,
+                                f=f1,
+                                weight_key=weight_key,
+                                degree_normalize=normalize_degree)
+
+    # Cheeger cutset sweep.
+    h_est, T_star = local_cheeger_sweep(G=latent_graph,
+                                        S=S,
+                                        f=f1,
+                                        nodes_S=nodes_S,
+                                        weight_key=sim_attr_env)
+
+    results = {
+        "first_dirichlet_eigenvalue": lam1,
+        "first_dirichlet_eigenvector": f1,
+        "dirichlet_eigenfunction_throats": throats,
+        "local_cheeger_constant": h_est,
+        "local_cheeger_cutset": T_star
+    }
+
+    if return_latent_graph:
+        results['latent_graph'] = latent_graph
+    
+    return results
