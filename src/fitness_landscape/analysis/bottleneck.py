@@ -1,5 +1,12 @@
+from __future__ import annotations
+import math
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple, Literal
 import networkx as nx
-from typing import List, Dict, Sequence
+import numpy as np
+import pandas as pd
+import scipy.sparse as sp
+import scipy.sparse.linalg as spla
 
 
 def _ensure_affinity(G: nx.Graph,
@@ -42,6 +49,8 @@ def _ensure_affinity(G: nx.Graph,
     else:
         for _,_,d in G.edges(data=True):
             d[sim_key] = float(d.get("weight", 1.0))
+
+    return sim_key
     
 def _outward_cut_leakage(envelope_graph: nx.Graph,
                          S: Sequence,
@@ -76,48 +85,14 @@ def _outward_cut_leakage(envelope_graph: nx.Graph,
         if u in envelope_graph:
             for v, d in envelope_graph[u].items():
                 if v not in Sset:
-                    leak += float(d.get(weight_attr, 1.0))
+                    leak += float(d.get(weight_key, 1.0))
         b[u] = leak
     return b
-
-
-
-"""
-throat_dirichlet
-================
-
-Constructor-agnostic utilities for bottleneck analysis on observed graphs.
-
-This module provides functions to:
-- build a Dirichlet operator on a subset ``S`` with flexible boundary models,
-- compute the first Dirichlet eigenpair,
-- rank "throat edges" by eigenfunction gradient,
-- estimate the local Cheeger constant (conductance) via a spectral sweep.
-
-All functions work on any symmetric, weighted NetworkX graph.
-"""
-
-from __future__ import annotations
-
-import math
-from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
-
-import networkx as nx
-import numpy as np
-import pandas as pd
-import scipy.sparse as sp
-import scipy.sparse.linalg as spla
-
-
-# -----------------------------------------------------------------------------
-# Data classes and helpers
-# -----------------------------------------------------------------------------
 
 @dataclass
 class BoundaryModel:
     """
-    Parameters for the boundary/leakage model used in the Dirichlet operator.
+    Parameters for the boundary/leakage model used in the Dirichlet operator. Data helper class.
 
     Attributes
     ----------
@@ -133,7 +108,7 @@ class BoundaryModel:
     constant_value : float, optional
         Only used when `kind == 'constant'`. Non-negative constant leakage per node.
     """
-    kind: str = "degree_deficit"
+    kind: Literal['degree_deficit', 'envelope', 'constant', 'custom'] = "envelope"
     alpha: float = 1.0
     constant_value: Optional[float] = None
 
@@ -152,10 +127,10 @@ def _nx_to_sparse_on_nodes(G: nx.Graph,
 
     Returns
     -------
-    W : scipy.sparse.csr_matrix, shape (n, n)
-        Sparse weighted adjacency among `nodes` only.
+    W : scipy.sparse.csr_matrix
+        Sparse weighted adjacency among `nodes` only. shape (n, n)
     index : dict
-        Mapping node -> row/col index in W.
+        Mapping node : row/col index in W.
     """
     idx = {n: i for i, n in enumerate(nodes)}
     rows, cols, data = [], [], []
@@ -172,14 +147,25 @@ def _nx_to_sparse_on_nodes(G: nx.Graph,
 
 
 def _degree_vector(W: sp.csr_matrix) -> np.ndarray:
-    """Row sums of a sparse matrix as a 1-D float array."""
+    """
+    Helper function for row sums of a sparse matrix as a 1-D float array.
+
+    Parameters
+    ----------
+    W : scipy.sparse.csr_matrix
+        The sparse matrix.
+
+    Returns
+    -------
+    np.ndarray
+        The summed row array.
+    """
     return np.asarray(W.sum(axis=1)).ravel()
 
 
 def build_dirichlet_operator(G: nx.Graph,
                              S: Iterable,
                              boundary: BoundaryModel = BoundaryModel(),
-                             envelope_graph: Optional[nx.Graph] = None,
                              normalized: bool = True) -> Tuple[sp.csr_matrix, List]:
     """
     Construct the Dirichlet operator on a subset `S` with a chosen boundary model.
@@ -221,12 +207,6 @@ def build_dirichlet_operator(G: nx.Graph,
     if boundary.kind == "degree_deficit":
         target = np.maximum(d_in, np.median(d_in))  # robust baseline
         b = np.clip(target - d_in, 0.0, np.inf)
-    elif boundary.kind == "envelope":
-        if envelope_graph is None:
-            raise ValueError("envelope_graph must be provided for boundary.kind == 'envelope'.")
-        W_env, _ = _nx_to_sparse_on_nodes(envelope_graph, nodes_S)
-        d_env = _degree_vector(W_env)
-        b = np.clip(d_env - d_in, 0.0, np.inf)
     elif boundary.kind == "constant":
         if boundary.constant_value is None or boundary.constant_value < 0:
             raise ValueError("Provide non-negative constant_value for 'constant' boundary.")
@@ -260,6 +240,7 @@ def build_dirichlet_operator(G: nx.Graph,
     return L_Dn.tocsr(), nodes_S
 
 
+# Always use custom leak with envelope graph.
 def build_dirichlet_operator_custom_leak(G: nx.Graph,
                                          S: Iterable,
                                          b_leak: Dict,
@@ -273,12 +254,12 @@ def build_dirichlet_operator_custom_leak(G: nx.Graph,
         Symmetric weighted graph on observed nodes.
 
     S : iterable
-        Nodes defining the domain.
+        Nodes in the solution set.
 
     b_leak : dict
-        Mapping node -> non-negative leakage value b_i. Missing nodes default to 0.
+        Mapping node : non-negative leakage value b_i. Missing nodes default to 0.
 
-    normalized : bool, optional (default=True)
+    normalized : bool, default=`True`
         If True, return the normalized Dirichlet operator; otherwise, combinatorial.
 
     Returns
@@ -314,7 +295,7 @@ def build_dirichlet_operator_custom_leak(G: nx.Graph,
 
 
 # Note the graph must be connected.
-def first_dirichlet_eigenpair(L_D: np.ndarray
+def first_dirichlet_eigenpair(L_D: np.ndarray,
                               k: int = 1,
                               which: str = "SM",
                               tol: float = 1e-6,
@@ -326,21 +307,21 @@ def first_dirichlet_eigenpair(L_D: np.ndarray
     ----------
     L_D : scipy.sparse.csr_matrix
         Symmetric Dirichlet operator (combinatorial or normalized).
-    k : int, optional (default=1)
+    k : int, optional, default=1
         Number of eigenpairs; only the smallest is returned.
-    which : {'SM','SA'}, optional (default='SM')
+    which : 'SM' or'SA', default='SM'
         Selection mode for ARPACK (smallest magnitude or algebraic).
-    tol : float, optional (default=1e-6)
+    tol : float, default=1e-6
         Convergence tolerance.
-    maxiter : int, optional (default=5000)
+    maxiter : int, default=5000
         Maximum iterations for the eigensolver.
 
     Returns
     -------
     lambda1 : float
         The smallest Dirichlet eigenvalue.
-    f1 : ndarray, shape (n,)
-        The corresponding eigenfunction. Sign is chosen so that sum(f1) >= 0.
+    f1 : ndarray
+        The corresponding eigenfunction. Sign is chosen so that sum(f1) >= 0. Shape (n,)
     """
     try:
         vals, vecs = spla.eigsh(L_D, k=k, which=which, tol=tol, maxiter=maxiter)
@@ -358,7 +339,7 @@ def first_dirichlet_eigenpair(L_D: np.ndarray
 def rank_throat_edges(G: nx.Graph,
                       nodes_S: Sequence,
                       f: np.ndarray,
-                      weight_attr: str = "weight",
+                      weight_key: str = "weight",
                       degree_normalize: bool = True) -> pd.DataFrame:
     """
     Rank edges in the induced subgraph on S by Dirichlet-eigenfunction gradient.
@@ -386,7 +367,7 @@ def rank_throat_edges(G: nx.Graph,
     for u, v, d in G.edges(nodes_S, data=True):
         if u in idx and v in idx:
             i, j = idx[u], idx[v]
-            w = float(d.get(weight_attr, 1.0))
+            w = float(d.get(weight_key, 1.0))
             df = abs(f[i] - f[j]) * w
             if degree_normalize:
                 du = max(G.degree(u), 1)
@@ -434,20 +415,21 @@ def local_cheeger_sweep(G: nx.Graph,
         The subset achieving the minimum (argmin) in the sweep.
     """
     S = list(S)
+    Sset = set(S)
     idx = {n: i for i, n in enumerate(nodes_S)}
     f_on_S = np.array([f[idx[n]] for n in S], dtype=float)
 
     # Sort nodes by decreasing f
     order = [n for _, n in sorted(zip(-f_on_S, S))]
 
-    # Precompute weighted degree (full graph) for volume
-    deg = {}
-    for u in S:
-        deg[u] = 0.0
+    # Degrees in the full graph, but only for nodes in S
+    deg = {u: 0.0 for u in S}
     for u, v, d in G.edges(S, data=True):
         w = float(d.get(weight_key, 1.0))
-        deg[u] += w
-        deg[v] += w
+        if u in Sset:
+            deg[u] += w
+        if v in Sset:
+            deg[v] += w
 
     vol_S = sum(deg.values())
     best_phi = float("inf")
@@ -455,20 +437,21 @@ def local_cheeger_sweep(G: nx.Graph,
     T: Set = set()
     vol_T = 0.0
 
-    for k, x in enumerate(order, 1):
+    for x in order:
         T.add(x)
         vol_T += deg[x]
 
-        if max_half_volume and vol_T > 0.5 * vol_S:
+        if max_half_volume and vol_T > 0.5 * max(vol_S, 1e-12):
             break
 
+        # Cut from T to V\T measured in full G (includes edges to outside S)
         cut = 0.0
         for u in T:
             for v, d in G[u].items():
                 if v not in T:
                     cut += float(d.get(weight_key, 1.0))
-        phi = cut / max(vol_T, 1e-12)
 
+        phi = cut / max(vol_T, 1e-12)
         if phi < best_phi:
             best_phi = phi
             T_star = set(T)
