@@ -2,6 +2,7 @@ import numpy as np
 import networkx as nx
 from typing import List, Union, Literal
 from .sequence import BaseNumpySequence, sequence_distance
+from ..phylo.phylogenetic_asr import ASRConstructor
 import gudhi
 from sklearn.decomposition import PCA
 from sklearn.metrics.pairwise import euclidean_distances, rbf_kernel
@@ -317,3 +318,37 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         
     return G
 
+def create_phylo_graph(sequences: Union[Path, ArrayAlignment],
+                       replacement_matrix: List[str] = ['LG'],
+                       model_fitting: bool = True) -> nx.DiGraph:
+    """
+    Factory function to create an undirected graph using phylogenetic
+    inference and ancestral sequence reconstruction (with an 
+    equilibrium amino acid replacement matrix).
+
+    Parameters
+    ----------
+    alignment : Path or Alignment
+        The alignment of extant sequences to use for ASR and
+        phylogenetic infernece.
+    
+    replacement_matrix : List, default=[`LG`]
+        List of replacement matrices to use for phylogenetic
+        reconstruction. Must be an NQ non-equilibrium model.
+
+    model_fitting : bool, default=`True`
+        Whether to fit the ML model, using the model set defined in
+        `replacement_matrix`.
+
+    Returns
+    -------
+    G : nx.Graph
+        The undirected graph output.
+    """
+    constructor = ASRConstructor(sequences,
+                                 replacement_matrix = replacement_matrix,
+                                 model_fitting = model_fitting)
+    graph = constructor.construct_dag(graph_type='undirected')
+    return graph
+
+    
