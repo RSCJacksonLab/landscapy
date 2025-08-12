@@ -14,6 +14,13 @@ from fitness_landscape.graph_matching.latent_alignment import (
     auto_anchors_by_cosine
 )
 
+from fitness_landscape.graph_matching.minimum_spanning_graph import reconstruct_latent_graph_with_steiner, reconstruct_latent_graph_midpoint
+from fitness_landscape.utils import (
+    make_latent_geometric_graph_connected,
+    sample_observed_induced_connected
+)
+ 
+
 def test_bernoulli_beta_log_marginal():
     """
     Tests the BernoulliBeta log marginal likelihood calculation.
@@ -279,3 +286,33 @@ def test_construct_latent_landscape_with_full_alphabet(mock_align_soft,
     latent_node_0_data = superscape.latent_graph.nodes[0]
     assert 'gapped_arr' in latent_node_0_data
     assert latent_node_0_data['gapped_arr'].shape == (5, len(AMINO_ACID_ALPHABET) + 1)
+
+def test_steiner_latent_graph_reconstruction():
+    """Tests the steiner graph reconstruction of an observed graph"""
+    G = make_latent_geometric_graph_connected(n_latent = 20,
+                                              d_target = 4,
+                                              k_edges = 16,
+                                              seed = 42)
+
+    G_ind = sample_observed_induced_connected(G, node_keep=0.5, edge_keep=0.5, seed=42)
+    
+    G_recon, _, _ = reconstruct_latent_graph_with_steiner(G_ind)
+
+    assert G_recon.number_of_nodes() >= G_ind.number_of_nodes()
+    assert G_recon.number_of_edges() >= G_ind.number_of_edges()
+    assert nx.is_connected(G_recon)
+
+def test_steiner_midpoint_latent_graph_reconstruction():
+    """Tests the steiner graph reconstruction of an observed graph"""
+    G = make_latent_geometric_graph_connected(n_latent = 20,
+                                              d_target = 4,
+                                              k_edges = 16,
+                                              seed = 42)
+
+    G_ind = sample_observed_induced_connected(G, node_keep=0.5, edge_keep=0.5, seed=42)
+    
+    G_recon = reconstruct_latent_graph_midpoint(G_ind)
+
+    assert G_recon.number_of_nodes() >= G_ind.number_of_nodes()
+    assert G_recon.number_of_edges() >= G_ind.number_of_edges()
+    assert nx.is_connected(G_recon)
