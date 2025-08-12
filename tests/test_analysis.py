@@ -65,7 +65,7 @@ def homology_landscape():
         'default': NumericFitness(name='default', values=fitness_values)
     }
     return FitnessLandscape.from_sequences(
-        sequences=sequences,
+        sequences=sequences, 
         fitness_layers=fitness_layers,
         graph_type='hamming'
     )

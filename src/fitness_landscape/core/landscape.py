@@ -3,17 +3,20 @@ import networkx as nx
 import torch
 from torch_geometric.data import Data
 from torch_geometric.utils import from_networkx
-from typing import List, Union, Dict, Any, Iterable, Literal,  Protocol, runtime_checkable, Hashable
+from typing import List, Union, Dict, Any, Iterable, Literal,  Protocol, runtime_checkable, Hashable, Union
 from dataclasses import dataclass
 from .sequence import BaseNumpySequence, make_sequence
-from .graph import create_diffusion_emb_graph, create_hamming_graph, create_tda_graph
-from .fitness import NumericFitness, CategoricalFitness
+from .graph import create_diffusion_emb_graph, create_hamming_graph, create_tda_graph, create_knn_graph
+from .digraph import create_phylo_digraph, create_evol_diffusion_digraph, create_particle_filter_digraph
+from .fitness import NumericFitness, CategoricalFitness, BaseFitnessLayer
 from abc import ABC, abstractmethod
-from .graph import create_knn_graph, create_hamming_graph
-from ..utils import _compute_embeddings_from_sequences
-from .fitness import BaseFitnessLayer
+from ..utils import _compute_embeddings_from_sequences, alignment_to_base_numpy_sequences
 import inspect
 from collections import defaultdict
+from cogent3 import ArrayAlignment, load_aligned_seqs
+from pathlib import Path
+
+from .._const import PROT_20
 
 
 class FitnessLandscape:
@@ -57,8 +60,6 @@ class FitnessLandscape:
 
         self._records = {tuple(seq.to_array()): i for i, seq in enumerate(self.sequences)}
         self._active_view_name = next(iter(self.fitness_layers.keys())) if self.fitness_layers else None
-
-
 
     @classmethod
     def from_sequences(cls,
@@ -185,7 +186,9 @@ class FitnessLandscape:
         """
         if self.graph is None or self.embeddings is None:
             return
-        attrs = {i: {self._emb_arr_key: self.embeddings[i]} for i in self.graph.nodes()}
+        
+        node_to_idx = {node: i for i, node in enumerate(self.graph.nodes())}
+        attrs = {node: {self._emb_arr_key: self.embeddings[idx]} for node, idx in node_to_idx.items()}
         nx.set_node_attributes(self.graph, attrs)
 
     # Validation method.
@@ -273,58 +276,7 @@ class FitnessLandscape:
             raise ValueError("No active fitness layer. Use .view(layer_name) to set one.")
         return self.fitness_layers[self._active_view_name]
     
-    
-    def to_graph(self,
-                 **kwargs) -> None:
-        """
-        Method to construct a networkx graph from the sequences and
-        fitness layers. Symmetrical with the `from_graph` method.
-        """
-        if self.graph_type in self._embedding_based_graphs and self.embeddings is None:
-            raise ValueError('Node embeddings not computed.')
-        
-        if self.graph_type == 'hamming':
-            self.graph = create_hamming_graph(self.sequences,
-                                              weight_by_fitness=kwargs.get('weight_by_fitness', False))
-        
-        elif self.graph_type == '_knn':
-            self.graph = create_knn_graph(self.sequences, 
-                                          k=kwargs.get('k', int(np.sqrt(len(self.sequences)))),
-                                          metric=kwargs.get('metric', 'hamming'),
-                                          weight_by_distance=kwargs.get('weight_by_distance', True))
-        # TODO: Fix c-kNN BUG
-        # elif self.graph_type == 'cknn':
-        #     self.graph = create_cknn_graph(self.sequences,
-        #                                    embeddings=self.embeddings,
-        #                                    k=kwargs.get('k', 3))
-        
-        elif self.graph_type == 'diffusion':
-            self.graph = create_diffusion_emb_graph(self.sequences, 
-                                                embeddings=self.embeddings,
-                                                t=kwargs.get('t', 5),
-                                                connectivity_threshold=kwargs.get('connectivity_threshold', 0.0001))
-        
-        elif self.graph_type == 'tda':
-            self.graph = create_tda_graph(self.sequences,
-                                          embeddings=self.embeddings,
-                                          n_components=kwargs.get('n_components', 3),
-                                          reweight_simplex_edges=kwargs.get('reweight_simplex_edges', False))
-        
-        else:
-            raise ValueError(f"Unsupported graph type for construction: {self.graph_type}")
 
-        seq_to_node_map = {tuple(data['sequence'].to_array()): node_idx
-                           for node_idx, data in self.graph.nodes(data=True)}
-
-        for i, seq in enumerate(self.sequences):
-            node_idx = seq_to_node_map.get(tuple(seq.to_array()))
-            if node_idx is None: continue
-
-            for name, layer in self.fitness_layers.items():
-                attribute_name = f"fitness_{name}"
-                # get_value() retrieves the native data (e.g., list of floats, or a string)
-                self.graph.nodes[node_idx][attribute_name] = layer.get_value(i)
-    
     #Fitness layer appending, modifying and viewing methods.
 
     def view(self, name: str) -> BaseFitnessLayer:
@@ -532,3 +484,121 @@ class FitnessLandscape:
     
     def __repr__(self):
         return f"{self.__class__.__name__}(n_sequences={len(self.sequences)})"
+    
+
+class DirectedFitnessLandscape(FitnessLandscape):
+    """
+    A fitness landscape represented by a directed graph, typically
+    for phylogenetic or evolutionary trajectory data.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not isinstance(self.graph, nx.DiGraph):
+            raise TypeError("DirectedFitnessLandscape requires a networkx.DiGraph object.")
+    
+    @classmethod
+    def from_sequences(cls,
+                       sequences: Union[List[BaseNumpySequence], ArrayAlignment, Path],
+                       fitness_layers: Dict[str, BaseFitnessLayer] = None,
+                       digraph_type: Literal['phylogenetic', 'diffusion_nq'] = 'phylogenetic',
+                       embeddings: np.ndarray = None,
+                       attach_embeddings: bool = True,
+                       _compute_phylo_embeddings: bool = True,
+                       **kwargs) -> 'DirectedFitnessLandscape':
+        """
+        Primary factory method to create a FitnessLandscape from a list
+        of sequences.
+
+        This method orchestrates the computation of embeddings (if needed)
+        and the construction of the graph based on the specified type.
+        """
+
+        embedding_based_digraphs = {'diffusion_nq'}
+
+        # Remove phylogenetic constructor for explicit typing.
+        digraph_constructors = {
+            'diffusion_nq': create_evol_diffusion_digraph,
+            'diffusion_pll': None, # TODO: Directional diffusion on log-likelihood
+            'particle_filter': create_particle_filter_digraph,
+            }
+
+        # Phylogenetic reconstruction requires specific types
+        if digraph_type == 'phylogenetic':
+
+            # Keep alignment for phylo and ASR.
+            alignment = load_aligned_seqs(sequences) if isinstance(sequences, Path) else sequences
+
+            embedding_kwargs = {}
+            if 'model_name' in kwargs:
+                embeddings_kwargs['model_name'] = kwargs.pop('model_name')
+            if 'batch_size' in kwargs:
+                embeddings_kwargs['batch_size'] = kwargs.pop('batch_size')
+            if 'device' in kwargs:
+                embeddings_kwargs['device'] = kwargs.pop('device')
+            
+            # Reconstruct phylogeny and ancestral states.
+            digraph = create_phylo_digraph(alignment, **kwargs)
+            
+            # Collect sequences from the constructed graph (NOT the alignment).
+            sequences = [node[1]['sequence'] for node in digraph.nodes(data=True)]
+
+            # Logic to ensure embeddings are correctly secured for extant and ancestral sequences.
+            if embeddings is not None:
+                if embeddings.shape[0] != len(sequences):
+                    raise ValueError(f"Embeddings expected embeddings shape {len(sequences)} in dim 0, found {embeddings.shape[0]}. Forgot ancestral sequences in precomputed embeddings?")
+            
+            elif _compute_phylo_embeddings:
+                embeddings = _compute_embeddings_from_sequences(sequences, **embedding_kwargs)
+        
+            final_embeddings = embeddings if attach_embeddings else None
+            
+            return cls(sequences=sequences,
+                   graph=digraph,
+                   fitness_layers=fitness_layers,
+                   embeddings=final_embeddings,
+                   emb_arr_key=kwargs.get('emb_arr_key', 'emb_arr')
+                   )
+
+        # Non phylogenetic constructors where sequence typing is easy.
+        # Secure Embeddings.
+        if digraph_type in embedding_based_digraphs:
+            if embeddings is None:
+
+                model_name = kwargs.get('model_name', 'facebook/esm2_t6_8M_UR50D')
+                batch_size = kwargs.get('batch_size', 64)
+                embeddings = _compute_embeddings_from_sequences(
+                    sequences,
+                    model_name=model_name,
+                    batch_size=batch_size
+                )
+    
+
+        constructor_kwargs = kwargs
+        if embeddings is not None:
+            constructor_kwargs['embeddings'] = embeddings
+
+        digraph = digraph_constructors[digraph_type](sequences, **constructor_kwargs)
+            
+        # Update final embeddings to attach to the graph.
+        final_embeddings = embeddings if attach_embeddings else None
+
+        return cls(sequences=sequences,
+                   graph=digraph,
+                   fitness_layers=fitness_layers,
+                   embeddings=final_embeddings,
+                   emb_arr_key=kwargs.get('emb_arr_key', 'emb_arr')
+                   )
+
+    @classmethod
+    def from_graph(cls,
+                   graph: nx.DiGraph, **kwargs) -> 'DirectedFitnessLandscape':
+        """
+        Factory method to create a FitnessLandscape from an existing,
+        annotated networkx graph.
+        """
+        if not isinstance(graph, nx.DiGraph):
+            raise TypeError("Input graph must be a networkx.DiGraph.")
+
+        # Undirected FitnessLandscape logic is correct, just different typing.
+        return super(DirectedFitnessLandscape, cls).from_graph(graph, **kwargs)
+    
