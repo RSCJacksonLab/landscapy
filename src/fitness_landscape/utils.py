@@ -3,7 +3,7 @@ import networkx as nx
 from typing import List, Union
 import torch
 from .core.sequence import BaseNumpySequence, SoftSequence
-from .embedding.soft_embedding import ESMEmbedder
+
 from ._const import ALPHABET_21, PROT_20
 from cogent3 import ArrayAlignment, make_aligned_seqs, ArrayAlignment 
 
@@ -86,6 +86,8 @@ def _compute_embeddings_from_sequences(sequences: List[BaseNumpySequence],
         Array of embedded (soft) sequences.
     """
     
+    from .embedding.soft_embedding import ESMEmbedder
+
     ohe_arrays = []
     for seq in sequences:
         if isinstance(seq, SoftSequence):

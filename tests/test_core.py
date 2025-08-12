@@ -656,7 +656,7 @@ def test_sampler_step(sequence_generator):
     assert isinstance(sampler.G, nx.DiGraph)
 
 @patch('fitness_landscape.core.superscape.HierarchicalRJMCMCAligner')
-@patch('fitness_landscape.utils.ESMEmbedder') # Patch the entire ESMEmbedder class
+@patch('fitness_landscape.core.landscape._compute_embeddings_from_sequences')# Patch the entire ESMEmbedder class
 def test_superscape_from_parallel_construction(
     MockESMEmbedder, # The mock for the class
     MockHierarchicalRJMCMCAligner,
