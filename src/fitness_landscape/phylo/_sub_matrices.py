@@ -1,8 +1,8 @@
 import numpy as np
-from .utils import _reorder_matrix, 
+from ..utils import _reorder_matrix
 from .model import normalise_Q, build_Q
-from ._const import PROT_20
-from ._const import PAML_20
+from .._const import PROT_20
+from .._const import PAML_20
 
 nq_pfam = _reorder_matrix(normalise_Q(
     np.array([

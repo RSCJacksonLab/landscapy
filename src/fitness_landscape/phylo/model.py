@@ -48,7 +48,7 @@ def as_rate_matrix_from_exchangeabilities(S: np.ndarray,
     return Q
 
 def rescale_to_rate1(Q: np.ndarray,
-                     pi: np.ndarray) -> np.ndarry:
+                     pi: np.ndarray) -> np.ndarray:
     """
     Function to rescale rate matrix Q so that -sum_i pi_i Q_ii = 1.
     
@@ -57,7 +57,7 @@ def rescale_to_rate1(Q: np.ndarray,
     Q : np.ndarray
         The rate matrix. 
     
-    pi : np.ndarry
+    pi : np.ndarray
         The equilibrium frequencies.
     
     Returns
@@ -78,7 +78,7 @@ def normalise_Q(Q: np.ndarray,
     Q : np.ndarray
         The rate matrix. 
     
-    pi : np.ndarry
+    pi : np.ndarray
         The equilibrium frequencies.
     
     Returns
@@ -103,7 +103,7 @@ def build_Q(tril_values: np.ndarray,
     tril_values : np.ndarray
         The lower triangle values. 
     
-    pi : np.ndarry
+    pi : np.ndarray
         The equilibrium frequencies.
 
     Returns

@@ -5,9 +5,12 @@ import networkx as nx
 from cogent3 import load_aligned_seqs, ArrayAlignment, PhyloNode, load_tree, get_app
 import piqtree
 from piqtree import Model
-from piqtree.model import AaModel, model_finder
+from piqtree.model import AaModel
+from piqtree import model_finder
 import math
 from cogent3.util.table import Table
+from ..core.sequence import BaseNumpySequence, SoftSequence
+from .._const import PROT_20, ALPHABET_21
 
 class ASRConstructor:
     """
@@ -126,7 +129,7 @@ class ASRConstructor:
         elif model_fitting:
             result = model_finder(self.alignment, model_set=set(replacement_matrix))
             # Choose model by aicc.
-            model = result.aicc
+            model = result.best_aicc
         
         # Use just the provided replacement matrix.
         else:
@@ -296,7 +299,7 @@ class ASRConstructor:
             - `ungapped_arr`: A (L, 20) array representing the ungapped
             sequence in one-hot encoding.
         """
-        if graph_type is not 'undirected' and graph_type is not 'directed':
+        if graph_type != 'undirected' and graph_type != 'directed':
             raise ValueError(f"Expected `graph_type` parameter to be `directed` or `undirected`, found {graph_type}")
         
         G = (nx.Graph() if graph_type == 'undirected' else nx.DiGraph())

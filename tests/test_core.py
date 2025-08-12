@@ -11,7 +11,7 @@ import torch
 from torch_geometric.data import Data
 from fitness_landscape.core.fitness import NumericFitness, CategoricalFitness, ProbabilisticCategoricalFitness
 from pathlib import Path
-from fitness_landscape._sub_matrices import nq_pfam
+from fitness_landscape.phylo._sub_matrices import nq_pfam
 from fitness_landscape.embedding.particle_sampler import SequenceGenerator, TopPSampler
 from unittest.mock import patch
 from fitness_landscape.utils import alignment_to_base_numpy_sequences
