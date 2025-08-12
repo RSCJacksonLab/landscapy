@@ -3,6 +3,7 @@ import networkx as nx
 from typing import List, Union, Literal
 from .sequence import BaseNumpySequence, sequence_distance
 from ..phylo.phylogenetic_asr import ASRConstructor
+from ..phylo._sub_matrices import lg
 import gudhi
 from sklearn.decomposition import PCA
 from sklearn.metrics.pairwise import euclidean_distances, rbf_kernel
@@ -353,7 +354,7 @@ def create_phylo_graph(sequences: Union[Path, ArrayAlignment],
 
 def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                                              embeddings: np.ndarray,
-                                             replacement_matrix: np.ndarray = , #TODO: ADD LG!!!
+                                             replacement_matrix: np.ndarray = lg,
                                              k: int = 50,
                                              t: int = 5,
                                              tau: float = 1.0,

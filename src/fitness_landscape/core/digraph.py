@@ -10,7 +10,7 @@ import math
 from cogent3.util.table import Table
 from .sequence import SoftSequence, BaseNumpySequence
 from .._const import ALPHABET_21, PROT_20
-from .._sub_matrices import nq_pfam
+from ..phylo._sub_matrices import nq_pfam
 from sklearn.neighbors import NearestNeighbors
 from ..phylo.phylogenetic_asr import ASRConstructor
 from ..utils import calculate_gapped_soft_score
