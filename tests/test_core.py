@@ -11,7 +11,7 @@ import torch
 from torch_geometric.data import Data
 from fitness_landscape.core.fitness import NumericFitness, CategoricalFitness, ProbabilisticCategoricalFitness
 from pathlib import Path
-from fitness_landscape._sub_matrices import nq_pfam
+from fitness_landscape.phylo._sub_matrices import nq_pfam
 from fitness_landscape.embedding.particle_sampler import SequenceGenerator, TopPSampler
 from unittest.mock import patch
 from fitness_landscape.utils import alignment_to_base_numpy_sequences
@@ -705,3 +705,33 @@ def test_superscape_from_parallel_construction(
     assert diffusion_landscape.graph.number_of_nodes() == 3, "Diffusion graph should only have tip nodes."    
     MockHierarchicalRJMCMCAligner.assert_called_once()
     
+def test_create_phylo_graph_returns_undirected_graph(phylo_test_data):
+    """
+    Tests that create_phylo_graph returns an undirected nx.Graph with the correct
+    number of nodes (tips + ancestors).
+    """
+    graph = create_phylo_graph(sequences=phylo_test_data, model_fitting=False, replacement_matrix=['LG'])
+
+    assert isinstance(graph, nx.Graph), "The output should be an undirected nx.Graph."
+    assert not graph.is_directed(), "The graph must be undirected."
+
+def test_phylo_graph_is_a_tree(phylo_test_data):
+    """
+    Confirms that the undirected graph produced has the properties of a tree.
+    """
+    graph = create_phylo_graph(sequences=phylo_test_data)
+    assert nx.is_connected(graph), "The phylogenetic graph must be a single connected component."
+    assert graph.number_of_edges() == graph.number_of_nodes() - 1, "The graph should have N-1 edges to be a tree."
+
+def test_create_evol_diffusion_graph_is_undirected_and_symmetric(diffusion_test_data):
+    """
+    Tests that the evolutionary diffusion graph is undirected and its
+    adjacency matrix is symmetric.
+    """
+    sequences, embeddings = diffusion_test_data
+    graph = create_evol_diffusion_graph(sequences, embeddings)
+
+    assert isinstance(graph, nx.Graph), "The output must be an undirected nx.Graph."
+    assert not graph.is_directed(), "The graph should not be directed."
+    adj_matrix = nx.to_numpy_array(graph)
+    assert np.allclose(adj_matrix, adj_matrix.T), "The adjacency matrix of an undirected graph must be symmetric."

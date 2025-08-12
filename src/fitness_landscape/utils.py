@@ -470,3 +470,4 @@ def moving_window_alignment(alignment: ArrayAlignment,
         windows.append(make_aligned_seqs(window_dict, moltype='protein'))
         
     return windows
+

@@ -1,12 +1,19 @@
 import numpy as np
 import networkx as nx
 from typing import List, Union, Literal
-from .sequence import BaseNumpySequence, sequence_distance
+from .sequence import BaseNumpySequence, sequence_distance, SoftSequence
+from ..phylo.phylogenetic_asr import ASRConstructor
+from ..phylo._sub_matrices import lg
 import gudhi
 from sklearn.decomposition import PCA
 from sklearn.metrics.pairwise import euclidean_distances, rbf_kernel
 from sklearn.neighbors import NearestNeighbors
 from sklearn.metrics.pairwise import euclidean_distances
+from pathlib import Path
+from cogent3 import ArrayAlignment
+from .._const import PROT_20
+from ..utils import calculate_gapped_soft_score
+from softalign.soft_alignment import align_soft_sequences
 
 
 def create_hamming_graph(sequences: List[BaseNumpySequence],
@@ -317,3 +324,141 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         
     return G
 
+def create_phylo_graph(sequences: Union[Path, ArrayAlignment],
+                       replacement_matrix: List[str] = ['LG'],
+                       model_fitting: bool = True) -> nx.DiGraph:
+    """
+    Factory function to create an undirected graph using phylogenetic
+    inference and ancestral sequence reconstruction (with an 
+    equilibrium amino acid replacement matrix).
+
+    Parameters
+    ----------
+    alignment : Path or Alignment
+        The alignment of extant sequences to use for ASR and
+        phylogenetic infernece.
+    
+    replacement_matrix : List, default=[`LG`]
+        List of replacement matrices to use for phylogenetic
+        reconstruction. Must be an NQ non-equilibrium model.
+
+    model_fitting : bool, default=`True`
+        Whether to fit the ML model, using the model set defined in
+        `replacement_matrix`.
+
+    Returns
+    -------
+    G : nx.Graph
+        The undirected graph output.
+    """
+    constructor = ASRConstructor(sequences,
+                                 replacement_matrix = replacement_matrix,
+                                 model_fitting = model_fitting)
+    graph = constructor.construct_dag(graph_type='undirected')
+    return graph
+
+def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
+                                             embeddings: np.ndarray,
+                                             replacement_matrix: np.ndarray = lg,
+                                             k: int = 50,
+                                             t: int = 5,
+                                             tau: float = 1.0,
+                                             connectivity_threshold: float = 1e-4,
+                                             **kwargs) -> nx.Graph:
+    """
+    Constructs a diffusion graph by scoring standard alignments with an
+    symmetric equilibrium replacement matrix.
+
+    Parameters
+    ----------
+    sequences : List[BaseNumpySequence]
+        The list of sequence in the landscape. 
+
+    replacement_matrix : np.ndarray, default=lg
+        The symmetric replacememnt matrix used to score symmetric
+        distances.
+    
+    embeddings : np.ndarray
+        Sequence embeddings indexed by the entry in `sequences`.
+    
+    k : int, default=50
+        The number of neighbours to use for kNN pre-filtering.
+    
+    t : int, default=5
+        The number of diffusion steps taken.
+    
+    tau : float, default=1.0
+        The temperature parameter used to smooth the distance kernel.
+
+    Returns
+    -------
+    nx.Graph
+        The constructed graph.
+    """
+    
+     # Type check alphabet first
+    for seq in sequences:
+        if seq.alphabet != PROT_20:
+            raise ValueError("Sequence alphabet must be PROT_20 for all entries.")
+
+    n_sequences = len(sequences)
+    if n_sequences == 0:
+        return nx.Graph()
+
+    if k > n_sequences - 1:
+        k = n_sequences - 1
+
+    nn = NearestNeighbors(n_neighbors=k, algorithm='ball_tree')
+    nn.fit(embeddings)
+    _, neighbor_indices = nn.kneighbors(embeddings)
+
+    pairs_to_align = set()
+    for i in range(n_sequences):
+        for j_idx in neighbor_indices[i]:
+            if i != j_idx:
+                # Add pairs in a canonical order to avoid duplicates
+                pair = tuple(sorted((i, j_idx)))
+                pairs_to_align.add(pair)
+
+    kernel_matrix = np.zeros((n_sequences, n_sequences))
+
+    for i, j in pairs_to_align:
+        seq_i = sequences[i]
+        arr_i = seq_i.posterior if isinstance(seq_i, SoftSequence) else seq_i.to_one_hot()
+
+        seq_j = sequences[j]
+        arr_j = seq_j.posterior if isinstance(seq_j, SoftSequence) else seq_j.to_one_hot()
+
+        alignment, _ = align_soft_sequences(sequences=[arr_i, arr_j], alphabet=PROT_20)
+
+        score = calculate_gapped_soft_score(aligned_seq1=alignment[0],
+                                            aligned_seq2=alignment[1],
+                                            q=replacement_matrix)
+
+        kernel_value = np.exp(score / tau)
+        kernel_matrix[i, j] = kernel_value
+        kernel_matrix[j, i] = kernel_value # Explicitly symmetrize
+
+    np.fill_diagonal(kernel_matrix, 0)
+
+    row_sums = kernel_matrix.sum(axis=1, keepdims=True)
+    row_sums[row_sums == 0] = 1.0
+    transition_matrix = kernel_matrix / row_sums
+
+    diffused_matrix = np.linalg.matrix_power(transition_matrix, t)
+    
+    # Symmetrize the final diffused matrix to ensure the graph is undirected
+    symmetric_diffused_matrix = (diffused_matrix + diffused_matrix.T) / 2
+
+    graph = nx.Graph()
+    graph.add_nodes_from(range(n_sequences))
+
+    rows, cols = np.where(np.triu(symmetric_diffused_matrix > connectivity_threshold, k=1))
+
+    for i, j in zip(rows, cols):
+        graph.add_edge(i, j, weight=symmetric_diffused_matrix[i, j])
+
+    for i, seq in enumerate(sequences):
+        graph.nodes[i]['sequence'] = seq
+
+    return graph

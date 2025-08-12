@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="landscapy",
-    version="0.2.0",  # version 0.2 updated API for directed graphs and cogent3 data structures.
+    version="0.9.0",
     author="Matthew A. Spence",
     author_email="matthew.spence@anu.edu.au",
     description="A package for analyzing fitness landscapes modeled as network graphs",
@@ -42,7 +42,7 @@ setup(
         "faiss-cpu>=1.11",
         "ray>=2.48",
         "gudhi>=3.11",
-        "pulp>=3.2.2"
+        "pandas>=2.3",
         "torch_geometric>=2.6"],
     extras_require={
         "dev": [
