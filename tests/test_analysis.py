@@ -9,7 +9,10 @@ from fitness_landscape.analysis.epistasis import *
 from fitness_landscape.analysis.statistics import *
 from fitness_landscape.analysis.adaptive_walk import *
 from fitness_landscape.analysis.random_walk import *
+from fitness_landscape.analysis.bottleneck import *
+from fitness_landscape.analysis.bottleneck import _ensure_affinity, _outward_cut_leakage
 from fitness_landscape.analysis.dirichlet_energy import *
+from fitness_landscape.analysis.graph_induction_alignment import *
 from fitness_landscape.transforms.graph_fourier import *
 from fitness_landscape.transforms.eigenmode import *
 from fitness_landscape.analysis.graph import *
@@ -24,6 +27,34 @@ from fitness_landscape.analysis.persistent_homology import (
     compute_betti_curves,
 )
 from fitness_landscape.core.fitness import NumericFitness
+from fitness_landscape.utils import make_latent_geometric_graph_connected, sample_observed_induced_connected
+from scipy.sparse import issparse
+
+
+@pytest.fixture
+def simple_graph_bottleneck():
+    """A simple graph for testing."""
+    G = nx.path_graph(5)
+    for u, v in G.edges():
+        G[u][v]["weight"] = 0.9
+    return G
+
+
+@pytest.fixture
+def envelope_graph_and_subgraph_bottleneck():
+    """An envelope graph and a subgraph S for testing leakage."""
+    G_env = nx.Graph()
+    # Add weights to all edges
+    G_env.add_edge(0, 1, weight=0.9)
+    G_env.add_edge(1, 2, weight=0.9)
+    G_env.add_edge(2, 3, weight=0.9)
+    G_env.add_edge(3, 4, weight=0.9)
+    G_env.add_edge(1, 5, weight=0.9)
+    G_env.add_edge(2, 6, weight=0.9)
+    
+    S = [0, 1, 2, 3]
+    G_obs = G_env.subgraph(S).copy()
+    return G_env, G_obs, S
 
 @pytest.fixture
 def homology_landscape():
@@ -827,3 +858,52 @@ def test_get_epistasis_matrix_variance(epistatic_landscape):
     assert np.allclose(epistasis_matrix, epistasis_matrix.T)
     off_diagonal_mask = ~np.eye(n, dtype=bool)
     assert np.any(epistasis_matrix[off_diagonal_mask] > 0)
+
+def test_graph_reconstruction_analysis():
+    """
+    Tests that the graph matching returns a correctly structured dict.
+    Results are not analytical, thus analytical checks are ommitted.
+    """
+
+    G = make_latent_geometric_graph_connected(n_latent = 20,
+                                              d_target = 4,
+                                              k_edges = 16,
+                                              seed = 42)
+
+    G_ind = sample_observed_induced_connected(G, node_keep=0.5, edge_keep=0.5, seed=42)
+    
+    results = evaluate_reconstruction(G, G_ind, G)
+    assert np.isclose(results["edge_precision"], 1)
+    assert np.isclose(results["edge_recall"], 1)
+    assert np.isclose(results["edge_F1"], 1)
+    assert np.isclose(results["sp_RMSE_recon_vs_truth"], 0)
+    assert np.isclose(results["spectral_RMSE"], 0)
+
+def test_outward_cut_leakage_fixed(envelope_graph_and_subgraph_bottleneck):
+    G_env, _, S = envelope_graph_and_subgraph_bottleneck
+    b = _outward_cut_leakage(G_env, S, weight_key="weight")
+    assert b.get(0, 0) == 0
+    assert np.isclose(b.get(1, 0), 0.9)  # Edge to node 5
+    assert np.isclose(b.get(2, 0), 0.9)  # Edge to node 6
+    assert np.isclose(b.get(3, 0), 0.9)  # Edge to node 4
+
+
+def test_local_cheeger_sweep_fixed(envelope_graph_and_subgraph_bottleneck):
+    G_env, _, S = envelope_graph_and_subgraph_bottleneck
+    nodes_S = list(S)
+    f = np.array([-0.5, -0.4, 0.4, 0.5])
+    _ensure_affinity(G_env, length_key="weight", sim_key="sim")
+
+    h_est, T_star = local_cheeger_sweep(G_env, S, f, nodes_S, weight_key="sim")
+
+    assert isinstance(h_est, float)
+    assert T_star == {3}
+
+def test_calculate_local_bottleneck_without_latent_graph_fixed(simple_graph_bottleneck):
+
+    results = calculate_local_bottleneck(simple_graph_bottleneck, return_latent_graph=True)
+
+    assert "first_dirichlet_eigenvalue" in results
+    assert "local_cheeger_constant" in results
+    assert "latent_graph" in results
+    assert isinstance(results["latent_graph"], nx.Graph)
