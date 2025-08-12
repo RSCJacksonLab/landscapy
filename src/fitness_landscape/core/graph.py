@@ -1,7 +1,7 @@
 import numpy as np
 import networkx as nx
 from typing import List, Union, Literal
-from .sequence import BaseNumpySequence, sequence_distance
+from .sequence import BaseNumpySequence, sequence_distance, SoftSequence
 from ..phylo.phylogenetic_asr import ASRConstructor
 from ..phylo._sub_matrices import lg
 import gudhi
@@ -11,6 +11,9 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.metrics.pairwise import euclidean_distances
 from pathlib import Path
 from cogent3 import ArrayAlignment
+from .._const import PROT_20
+from ..utils import calculate_gapped_soft_score
+from softalign.soft_alignment import align_soft_sequences
 
 
 def create_hamming_graph(sequences: List[BaseNumpySequence],
