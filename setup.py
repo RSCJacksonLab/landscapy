@@ -42,6 +42,7 @@ setup(
         "faiss-cpu>=1.11",
         "ray>=2.48",
         "gudhi>=3.11",
+        "pandas>=2.3",
         "torch_geometric>=2.6"],
     extras_require={
         "dev": [
