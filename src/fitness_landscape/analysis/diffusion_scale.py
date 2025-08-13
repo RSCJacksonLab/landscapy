@@ -1,8 +1,10 @@
 import networkx as nx
 import numpy as np
+from scipy.optimize import minimize_scalar
 from typing import Tuple, Union
 from ..transforms.eigenmode import eigenmode_decomposition
 from ..transforms.graph_fourier import graph_fourier_transform
+from ..core.landscape import FitnessLandscape
 
 def _precompute_GMRF_stats(G: nx.Graph,
                            signal: np.ndarray) -> Tuple:
@@ -105,37 +107,6 @@ def compute_log_likelihood_H0(f_hat: np.ndarray,
 
     return log_likelihood, log_det, quadratic_form
 
-
-def _neg_log_posterior(t: float) -> float:
-    """
-    Helper function to return negative log posterior.
-
-    Parameters
-    ----------
-    t : float
-        The timestep of the heat kernel. 
-    
-    Returns
-    -------
-    float
-        The negative log posterior probability.
-    """
-    if t < t_min or t > t_max:
-        return np.inf
-
-    log_pri = 0.0
-    
-    ll = compute_log_likelihood_H0(
-        f_hat=f_hat,
-        eigenvalues=eigenvalues,
-        t=t,
-        sigma_squared=sigma_squared,
-        epsilon=epsilon
-    )[0]
-
-    return -(ll + log_pri)
-
-
 def fit_t_bayesian_laplace(G: nx.Graph,
                            signal: float,
                            t_min: float = 0.01,
@@ -182,45 +153,70 @@ def fit_t_bayesian_laplace(G: nx.Graph,
     """
 
     f_hat, eigenvalues, sigma_squared = _precompute_GMRF_stats(G, signal)
-    
+
+    # Build a closure that has access to the above variables
+    def neg_log_post(t: float) -> float:
+        # enforce support of the (improper) uniform prior
+        if (t < t_min) or (t > t_max):
+            return np.inf
+        ll, _, _ = compute_log_likelihood_H0(
+            f_hat=f_hat,
+            eigenvalues=eigenvalues,
+            t=t,
+            sigma_squared=sigma_squared,
+            epsilon=epsilon
+        )
+        log_pri = 0.0  # uniform on [t_min, t_max]
+        return -(ll + log_pri)
+
+    # Optimize on the bounded interval
     result = minimize_scalar(
-        _neg_log_posterior,
+        neg_log_post,
         bounds=(t_min, t_max),
         method='bounded',
         options={'maxiter': 200}
     )
+    t_map = float(result.x)
 
-    t_map = result.x
+    # Numerical second derivative at t_map for Laplace variance
+    base_h = 1e-4 * max(1.0, abs(t_map))
+    h_left  = t_map - max(t_min, t_map - base_h)
+    h_right = min(t_max, t_map + base_h) - t_map
+    h = min(h_left if h_left > 0 else base_h, h_right if h_right > 0 else base_h)
 
-    h = 1e-4 * max(1.0, abs(t_map))  # step size ~ 1e-4 * scale_of_t
-    t_minus = max(t_min, t_map - h)
-    t_plus  = min(t_max, t_map + h)
+    # If t_map is at a boundary, use a one-sided curvature fallback
+    f0 = neg_log_post(t_map)
+    if t_map - h >= t_min and t_map + h <= t_max:
+        f_minus = neg_log_post(t_map - h)
+        f_plus  = neg_log_post(t_map + h)
+        second_deriv = (f_plus - 2.0*f0 + f_minus) / (h**2)
+    elif t_map + 2*h <= t_max:
+        f1 = neg_log_post(t_map + h)
+        f2 = neg_log_post(t_map + 2*h)
+        # second derivative from forward finite differences
+        second_deriv = (f2 - 2.0*f1 + f0) / (h**2)
+    elif t_map - 2*h >= t_min:
+        f1 = neg_log_post(t_map - h)
+        f2 = neg_log_post(t_map - 2*h)
+        # second derivative from backward finite differences
+        second_deriv = (f2 - 2.0*f1 + f0) / (h**2)
+    else:
+        # Degenerate interval; pick a tiny positive curvature to avoid blow-up
+        second_deriv = 1e-12
 
-    f0 = neg_log_posterior(t_map)
-    f_minus = neg_log_posterior(t_minus)
-    f_plus  = neg_log_posterior(t_plus)
-
-    second_deriv = (f_plus - 2.0*f0 + f_minus) / ( (t_plus - t_minus)/2.0 )**2
-
-    if second_deriv <= 0:
-        # Derivative negative, default to small value.
+    if not np.isfinite(second_deriv) or second_deriv <= 0:
         second_deriv = 1e-12
 
     var_approx = 1.0 / second_deriv
-    std_approx = np.sqrt(var_approx)
+    std_approx = float(np.sqrt(var_approx))
 
-    # 95% credible interval (approx Gaussian)
-    ci_lower = t_map - 1.96 * std_approx
-    ci_upper = t_map + 1.96 * std_approx
+    # 95% CI (Gaussian/Laplace approx), clipped to [t_min, t_max]
+    ci_lower = max(t_min, t_map - 1.96 * std_approx)
+    ci_upper = min(t_max, t_map + 1.96 * std_approx)
 
-    # Clip to [t_min, t_max]
-    ci_lower = max(ci_lower, t_min)
-    ci_upper = min(ci_upper, t_max)
-
-    logpost_map = -(f0) 
+    logpost_map = -f0
 
     return t_map, ci_lower, ci_upper, logpost_map, var_approx
-
 def _compute_variances(eigenvectors: np.ndarray,
                        eigenvalues: np.ndarray,
                        sigma_squared: float,
@@ -310,7 +306,7 @@ def compute_ruggedness_diffusion_scale(landscape: FitnessLandscape,
         signal = landscape.get_signal()
     
     # Make sure not directed graph.
-    if not isinstance(landscape, nx.Graph):
+    if not isinstance(landscape.graph, nx.Graph):
         raise ValueError(f"Expected `landscape.graph` to be `nx.Graph`, found `{type(landscape.graph)}`")
 
     t_map, ci_lower, ci_upper, logpost_map, var_approx = fit_t_bayesian_laplace(landscape.graph,
@@ -417,27 +413,27 @@ def _expected_local_global_dirichlet_energy(G: nx.Graph,
         nz = d > 0
         invsqrt_d[nz] = 1.0 / np.sqrt(d[nz])
         T = np.diag(invsqrt_d)
-        Sigma_prime = T @ Sigma @ T
+        sigma_prime = T @ sigma @ T
         m_prime = T @ mean
         # For normalized energy use A's weights in the pairwise sum
         W = A
     
     else:
 
-        Sigma_prime = Sigma
+        sigma_prime = sigma
         m_prime = mean
         # combinatorial uses the same W = A with weights
         W = A  
 
     # Local contributions: 1/2 sum_j w_ij E[(g_i - g_j)^2]
-    diag_S = np.diag(Sigma_prime)
+    diag_S = np.diag(sigma_prime)
 
     # E[(g_i - g_j)^2] = Var + (mean diff)^2
     # Precompute the (mean diff)^2 matrix efficiently
     m_diff2 = (m_prime[:, None] - m_prime[None, :]) ** 2
     
     # And the variance term via broadcasting:
-    var_pair = diag_S[:, None] + diag_S[None, :] - 2.0 * Sigma_prime
+    var_pair = diag_S[:, None] + diag_S[None, :] - 2.0 * sigma_prime
 
     pair_expect = var_pair + m_diff2
 
@@ -458,7 +454,7 @@ def _expected_local_global_dirichlet_energy(G: nx.Graph,
         # L = D - A
         L = np.diag(d) - A
 
-    expected_global = float(np.trace(L @ Sigma) + mean.T @ L @ mean)
+    expected_global = float(np.trace(L @ sigma) + mean.T @ L @ mean)
 
     return local_energy, expected_global
 
@@ -535,7 +531,7 @@ def compute_ruggedness_variance_energy(landscape: FitnessLandscape,
 
     local_E, global_E = _expected_local_global_dirichlet_energy(
         G=G,
-        Sigma=Sigma,
+        sigma=Sigma,
         mean=np.zeros_like(signal, dtype=float), # Signal is centered on 0!
         normalized=normalized,
         weight_key=weight_key,

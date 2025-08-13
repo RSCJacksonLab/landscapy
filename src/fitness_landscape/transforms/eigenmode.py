@@ -48,7 +48,13 @@ def eigenmode_decomposition(graph: Union[nx.Graph, FitnessLandscape],
 
     elif matrix == 'norm_laplacian':
         # Dense matrix
-        eig_mat = nx.normalized_laplacian_matrix(graph, weight=weight_key).asfptype().toarray()
+        M = nx.normalized_laplacian_matrix(graph, weight=weight_key)
+        # Works for csr_array and csr_matrix:
+        try:
+            eig_mat = M.astype(float).toarray()
+        except AttributeError:
+            # Extremely old SciPy/NetworkX fallback
+            eig_mat = np.asarray(M.todense(), dtype=float)
     
     # Row stochastic Markov transition matrix.
     elif matrix == 'transition':
