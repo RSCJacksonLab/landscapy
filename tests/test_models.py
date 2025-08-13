@@ -50,7 +50,7 @@ def test_gnk_with_base_sequence():
     base_seq = [c if c in alphabet else alphabet[0] for c in base_seq]
 
     landscape = create_gnk_landscape(
-        N=5,
+        N=2,
         K=1,
         alphabet=alphabet,
         base_sequence=base_seq,
@@ -80,22 +80,82 @@ def test_gnk_with_adjacency_matrix():
     
     assert not np.array_equal(landscape.get_signal(), default_landscape.get_signal())
 
+def test_gnk_with_variable_sites():
+    """
+    Test the gNK generating with variable sites provided.
+    """
+    wt_seq = "ACDEFGHIKLM"
+    alphabet = ["C", "E", "F"]
+    landscape = create_gnk_landscape(N=3, 
+                                     K=2, 
+                                     alphabet=alphabet,
+                                     seed=42,
+                                     base_sequence=wt_seq,
+                                     variable_sites=[1, 3, 4])
+    assert len(landscape.sequences) == 3**len(alphabet)
+    assert isinstance(landscape.sequences[0], BaseNumpySequence)
+    assert len(landscape.get_signal()) == 3**len(alphabet)
+
+def test_gnk_with_variable_sites_and_adjacency_matrix():
+    """
+    Test the gNK generating with variable sites provided.
+    """
+    N = 4
+    wt_seq = "ACDEFGHIKLM"
+    alphabet = ["C", "E", "F", "G"]
+    adj_mat = np.array([
+        [0, 1, 0, 0],
+        [1, 0, 1, 0],
+        [0, 1, 0, 1],
+        [0, 0, 1, 0]
+    ])
+    landscape = create_gnk_landscape(N=N, 
+                                     alphabet=alphabet,
+                                     seed=42,
+                                     adj_mat=adj_mat,
+                                     base_sequence=wt_seq,
+                                     variable_sites=[1, 3, 4, 5])
+    assert len(landscape.sequences) == N**len(alphabet)
+    assert isinstance(landscape.sequences[0], BaseNumpySequence)
+    assert len(landscape.get_signal()) == N**len(alphabet)
+
+def test_binary_gnk_with_variable_sites_and_adjacency_matrix():
+    """
+    Test the gNK generating with variable sites provided.
+    """
+    N = 4
+    adj_mat = np.array([
+        [0, 1, 0, 0],
+        [1, 0, 1, 0],
+        [0, 1, 0, 1],
+        [0, 0, 1, 0]
+    ])
+    landscape = create_nk_binary_landscape(N=N,
+                                           seed=42,
+                                           adj_mat=adj_mat)
+    assert len(landscape.sequences) == N**2
+    assert isinstance(landscape.sequences[0], BinarySequence)
+    assert len(landscape.get_signal()) == N**2
+
 def test_gnk_invalid_arguments():
     """
     Tests that the gNK landscape raises appropriate errors for invalid
     arguments.
     """
     with pytest.raises(ValueError):
+        # N is longer than base sequence
         create_gnk_landscape(
             N=4, K=1, alphabet=['A', 'C'],
             base_sequence=['A', 'C', 'G'], variable_sites=[0]
         )
         
     with pytest.raises(IndexError):
+        # Variable site index out of bounds
         create_gnk_landscape(
-            N=3, K=1, alphabet=['A', 'C', 'G'],
+            N=1, K=1, alphabet=['A', 'C', 'G'],
             base_sequence=['A', 'C', 'G'], variable_sites=[3]
         )
+
 def test_rmf_landscape_smooth_component():
     """
     Tests that RMF fitness correlates with distance from the optimum.

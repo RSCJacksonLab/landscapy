@@ -1,17 +1,22 @@
 import numpy as np
-import networkx as nx
-from typing import Optional, List
+import random
+
+from itertools import product
+from typing import List, Optional, Union
+
+from torch import ne
+
 from ..core.landscape import FitnessLandscape
 from ..core.fitness import NumericFitness
 from ..core.sequence import BaseNumpySequence, BinarySequence, MultialleleSequence
-from itertools import product
+
 
 def generate_NK_states(N: int,
-                       K: int,
+                       K: Optional[int] = None,
                        alphabet: List = [0,1],
-                       seed: int = None,
+                       seed: Optional[int] = None,
                        adj_mat: Optional[np.ndarray] = None,
-                       base_sequence: Optional[List] = None,
+                       base_sequence: Optional[Union[List, str]] = None,
                        variable_sites: Optional[List[int]] = None) -> tuple[np.ndarray, np.ndarray]:
     """
     Generate sequences and fitness values for a generalized NK landscape.
@@ -19,9 +24,12 @@ def generate_NK_states(N: int,
     Parameters
     ----------
     N : int
-        Number of sites in each sequence.
+        Number of variable sites in each sequence. If variable sites is
+        not specified but a base sequence is, the first N sites will be
+        varied.
     K : int
-        Number of interacting neighbors for each site.
+        Number of interacting neighbors for each site. Not required if an
+        adjacency matrix is provided.
     alphabet : list
         The alphabet of characters or symbols to use for the sequences.
     seed : int, optional
@@ -33,7 +41,8 @@ def generate_NK_states(N: int,
         A template sequence. If provided, only the sites specified in
         `variable_sites` will be varied.
     variable_sites : list of int, optional
-        Indices of the sites to be varied in the `base_sequence`.
+        Indices of the sites to be varied in the `base_sequence`. The
+        sites are assumed to be pre-zero indexed.
 
     Returns
     -------
@@ -44,19 +53,38 @@ def generate_NK_states(N: int,
     """
     if seed is not None:
         np.random.seed(seed)
+        random.seed(seed)
 
     alphabet_size = len(alphabet)
     allele_map = {allele: i for i, allele in enumerate(alphabet)}
 
-    if base_sequence is not None and variable_sites is not None: 
-        
-        if len(base_sequence) != N:
-            raise ValueError("Length of base_sequence must be equal to N.")
-        if any(i >= N for i in variable_sites):
-            raise IndexError("All indices in variable_sites must be less than N.")
-        # Check that all non-variable sites in the base sequence are in the alphabet
-        fixed_sites = [idx for idx in range(N) if idx not in variable_sites]
-        for idx in fixed_sites:
+    # If no variable sites assume all sites should vary
+    if variable_sites is None:
+        variable_sites = list(range(N))
+    elif len(variable_sites) != N:
+        raise ValueError("Length of variable_sites must equal to N.")
+    
+    # Check for either K or adjacency matrix
+    if K is None and adj_mat is None:
+        raise ValueError("Either K or adj_mat must be provided.")
+    if K is not None and adj_mat is not None:
+        print(
+            "Warning: Both K and adj_mat provided. Using adj_mat for "
+            "interactions."
+        )
+
+    if base_sequence is not None:
+        if len(base_sequence) < N:
+            raise ValueError(
+                "Length of base_sequence must longer than or equal to N."
+            )
+        if any(i >= (len(base_sequence)) for i in variable_sites):
+            raise IndexError(
+                "All indices in variable_sites must correspond to an index "
+                "in the provided base sequence."
+            )
+        # Check that all variable sites in the base sequence are in the alphabet
+        for idx in variable_sites:
             if base_sequence[idx] not in alphabet:
                 raise ValueError(
                     f"Character '{base_sequence[idx]}' at position {idx} of base_sequence "
@@ -79,41 +107,52 @@ def generate_NK_states(N: int,
     num_sequences = len(sequences)
     fitness_values = np.zeros(num_sequences)
 
+    # make fitness contributions for each interaction
     fitness_contrib = []
-    for _ in range(N):
-        table_size = alphabet_size ** (K + 1)
-        fitness_contrib.append(np.random.rand(table_size))
+    for j in range(N):
+        if adj_mat is not None:
+            neighbours = np.where(adj_mat[j] == 1)[0]
+            neighbours = neighbours[neighbours != j]
+            n_interactions = 1 + len(neighbours)
+        elif K is not None:
+            n_interactions = K + 1
+        else:
+            raise ValueError("Either K or adj_mat must be provided.")
+        fitness_contrib.append(np.random.rand(alphabet_size ** n_interactions))
 
-    for i, seq in enumerate(sequences):
+    # get fitness contributions for each sequence
+    for seq_idx, seq in enumerate(sequences):
         total_fit = 0.0
-        for j in range(N):
+        for site_idx, site in enumerate(variable_sites):
             if adj_mat is not None:
-                neighbors = np.where(adj_mat[j] == 1)[0]
-                if len(neighbors) > K:
-                    neighbors = np.random.choice(neighbors, K, replace=False)
-                indices = np.sort(np.append(neighbors, j))
+                neighbors = np.where(adj_mat[site_idx] == 1)[0]
+                indices = [site] + [variable_sites[x] for x in neighbors
+                                    if x != site_idx]
+            elif K is not None:
+                interaction_options = [x for x in variable_sites
+                                       if x != site]
+                indices = [site] + random.sample(interaction_options, K)
             else:
-                indices = [(j + offset) % N for offset in range(K + 1)]
-            
-            config = seq[indices]
+                raise ValueError("Either K or adj_mat must be provided.")
+            config = [seq[pos] for pos in indices]
             
             index = 0
             for allele_idx, allele in enumerate(config):
                 numeric_allele = allele_map[allele]
                 index += numeric_allele * (alphabet_size ** (len(config) - 1 - allele_idx))
             
-            total_fit += fitness_contrib[j][index]
+            total_fit += fitness_contrib[site_idx][index]
 
-        fitness_values[i] = total_fit / N
+        fitness_values[seq_idx] = total_fit / N
 
     return sequences, fitness_values
 
 def create_gnk_landscape(N: int,
-                         K: int,
+                         K: Optional[int] = None,
                          alphabet: List = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y'],
                          seed: Optional[int] = None,
                          adj_mat: Optional[np.ndarray] = None,
-                         base_sequence: Optional[List] = None,
+                         base_sequence: Optional[Union[List, str]] = None,
                          variable_sites: Optional[List[int]] = None,
                          **kwargs) -> FitnessLandscape:
     """
@@ -122,9 +161,12 @@ def create_gnk_landscape(N: int,
     Parameters
     ----------
     N : int
-        Number of sites in each sequence.
+        Number of variable sites in each sequence. If variable sites is
+        not specified but a base sequence is, the first N sites will be
+        varied.
     K : int
-        Number of interacting neighbors for each site.
+        Number of interacting neighbors for each site. If not specified,
+        will be inferred from the adjacency matrix.
     alphabet : list
         The alphabet of characters or symbols to use for the sequences.
     seed : int, optional
@@ -134,7 +176,8 @@ def create_gnk_landscape(N: int,
     base_sequence : list, optional
         A template sequence.
     variable_sites : list of int, optional
-        Indices of the sites to be varied.
+        Indices of the sites to be varied in the `base_sequence`. The
+        sites are assumed to be pre-zero indexed.
     **kwargs : dict, optional
         Additional keyword arguments for the FitnessLandscape constructor.
 
@@ -168,8 +211,9 @@ def create_gnk_landscape(N: int,
     )
 
 def create_nk_binary_landscape(N: int,
-                               K: int,
+                               K: Optional[int] = None,
                                seed: Optional[int] = None,
+                               adj_mat: Optional[np.ndarray] = None,
                                **kwargs) -> FitnessLandscape:
     """
     Factory function to create a binary NK fitness landscape.
@@ -187,6 +231,8 @@ def create_nk_binary_landscape(N: int,
         sequences).
     seed : int, optional
         Random seed for reproducibility.
+    adj_mat : np.ndarray, optional
+        Adjacency matrix defining epistatic interactions.
     **kwargs : dict, optional
         Additional keyword arguments to pass to the FitnessLandscape
         constructor.
@@ -197,7 +243,11 @@ def create_nk_binary_landscape(N: int,
         An instance of the FitnessLandscape class representing the NK
         landscape.
     """
-    sequences_np, fitness_values = generate_NK_states(N, K, alphabet=[0,1], seed=seed)
+    sequences_np, fitness_values = generate_NK_states(N, 
+                                                      K, 
+                                                      alphabet=[0,1], 
+                                                      seed=seed,
+                                                      adj_mat=adj_mat)
     
     sequences = [BinarySequence(seq) for seq in sequences_np]
 
