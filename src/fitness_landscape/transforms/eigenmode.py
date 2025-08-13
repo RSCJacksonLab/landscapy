@@ -8,7 +8,8 @@ from ..core.landscape import FitnessLandscape
 
 def eigenmode_decomposition(graph: Union[nx.Graph, FitnessLandscape],
                             k: int = None,
-                            matrix: Literal['adjacency', 'laplacian', 'transition'] = 'laplacian',
+                            matrix: Literal['adjacency', 'laplacian', 'transition', 'norm_laplacian'] = 'laplacian',
+                            weight_key: str = 'weight',
                             backend: Literal['numpy', 'torch'] = 'numpy'):
     """
     Compute eigenmode decomposition of a graph.
@@ -44,6 +45,10 @@ def eigenmode_decomposition(graph: Union[nx.Graph, FitnessLandscape],
     
     elif matrix == 'laplacian':
         eig_mat = nx.laplacian_matrix(graph)
+
+    elif matrix == 'norm_laplacian':
+        # Dense matrix
+        eig_mat = nx.normalized_laplacian_matrix(graph, weight=weight_key).asfptype().toarray()
     
     # Row stochastic Markov transition matrix.
     elif matrix == 'transition':

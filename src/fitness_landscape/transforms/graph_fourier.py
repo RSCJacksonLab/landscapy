@@ -8,8 +8,8 @@ from .eigenmode import eigenmode_decomposition
 
 
 def graph_fourier_transform(graph: Union[nx.Graph, FitnessLandscape],
-                            signal=None,
-                            k=None,
+                            signal: np.ndarray = None,
+                            k: int = None,
                             backend: Literal['numpy, torch'] = 'numpy') -> Union[torch.Tensor, np.ndarray]:
     """
     Compute graph Fourier transform of a signal on the graph.
