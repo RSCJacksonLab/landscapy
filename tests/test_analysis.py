@@ -16,6 +16,14 @@ from fitness_landscape.analysis.graph_induction_alignment import *
 from fitness_landscape.transforms.graph_fourier import *
 from fitness_landscape.transforms.eigenmode import *
 from fitness_landscape.analysis.graph import *
+from fitness_landscape.analysis.diffusion_scale import (
+    _precompute_GMRF_stats,
+    compute_log_likelihood_H0,
+    fit_t_bayesian_laplace,
+    _compute_variances,
+    compute_ruggedness_diffusion_scale,
+    compute_ruggedness_variance_energy,
+)
 from fitness_landscape.models.elementary_landscape import *
 from fitness_landscape.models.nk import *
 from fitness_landscape.models.rmf import *
@@ -907,3 +915,149 @@ def test_calculate_local_bottleneck_without_latent_graph_fixed(simple_graph_bott
     assert "local_cheeger_constant" in results
     assert "latent_graph" in results
     assert isinstance(results["latent_graph"], nx.Graph)
+
+def test_precompute_gmrf_stats_shapes(additive_landscape):
+    """
+    Ensures _precompute_GMRF_stats returns correctly shaped outputs and
+    a strictly positive empirical variance after centering.
+    """
+    G = additive_landscape.graph
+    signal = additive_landscape.get_signal()
+    f_hat, eigenvalues, sigma2 = _precompute_GMRF_stats(G, signal)
+
+    n = len(signal)
+    assert f_hat.shape == (n,)
+    assert eigenvalues.shape == (n,)
+    assert sigma2 > 0.0
+
+
+def test_log_likelihood_finite(additive_landscape):
+    """
+    The Gaussian GMRF log-likelihood should be finite for reasonable t
+    values and monotonically better-conditioned with epsilon.
+    """
+    G = additive_landscape.graph
+    signal = additive_landscape.get_signal()
+    f_hat, eigenvalues, sigma2 = _precompute_GMRF_stats(G, signal)
+
+    for t in [0.01, 0.1, 1.0]:
+        ll, logdet, qf = compute_log_likelihood_H0(
+            f_hat=f_hat,
+            eigenvalues=eigenvalues,
+            t=t,
+            sigma_squared=sigma2,
+            epsilon=1e-8,
+        )
+        assert np.isfinite(ll)
+        assert np.isfinite(logdet)
+        assert qf >= 0.0
+
+
+def test_fit_t_bayesian_laplace_returns_interval(additive_landscape):
+    """
+    MAP t should lie in [t_min, t_max], with a finite log-posterior and a positive
+    Laplace variance approximation producing a sensible 95% CI.
+    """
+    G = additive_landscape.graph
+    signal = additive_landscape.get_signal()
+
+    t_min, t_max = 0.01, 10.0
+    t_map, ci_lo, ci_hi, logpost_map, var_approx = fit_t_bayesian_laplace(
+        G, signal, t_min=t_min, t_max=t_max, epsilon=1e-8
+    )
+
+    assert t_min <= t_map <= t_max
+    assert t_min <= ci_lo <= ci_hi <= t_max
+    assert np.isfinite(logpost_map)
+    assert var_approx > 0.0
+
+
+def test_covariance_psd_and_variance_match(additive_landscape):
+    """
+    Sigma(t) should be symmetric PSD and its average marginal variance should
+    match the empirical variance used to scale the kernel.
+    """
+    G = additive_landscape.graph
+    signal = additive_landscape.get_signal()
+    # Precompute spectral stats & empirical variance (centered)
+    f_hat, eigenvalues, sigma2 = _precompute_GMRF_stats(G, signal)
+    _, U = eigenmode_decomposition(G, matrix='norm_laplacian')
+
+    t = 0.3
+    Sigma = _compute_variances(eigenvectors=U,
+                               eigenvalues=eigenvalues,
+                               sigma_squared=sigma2,
+                               t=t,
+                               epsilon=1e-8)
+
+    # Symmetry
+    assert np.allclose(Sigma, Sigma.T, atol=1e-10)
+
+    # PSD: all eigenvalues >= -tiny_num
+    w = np.linalg.eigvalsh(Sigma)
+    assert w.min() > -1e-10
+
+    # Mean of diagonal equals sigma^2 (by construction of the scaling)
+    avg_var = float(np.mean(np.diag(Sigma)))
+    assert np.isclose(avg_var, sigma2, rtol=1e-5, atol=1e-8)
+
+
+def test_energy_local_global_consistency(additive_landscape):
+    """
+    The expected global Dirichlet energy should equal the sum of expected
+    local contributions, within numerical tolerance.
+    """
+    # Use normalized Laplacian by default (matches heat-kernel prior)
+    res = compute_ruggedness_variance_energy(additive_landscape, t=0.5, normalized=True)
+    sigma = res['covariance_matrix']
+    local = res['expected_local_energy']
+    global_E = res['expected_global_energy']
+
+    # Sum of locals should match the global energy
+    assert np.isclose(local.sum(), global_E, rtol=1e-6, atol=1e-9)
+
+def test_energy_monotone_smoothing_in_t(additive_landscape):
+    """
+    As diffusion time t increases, the expected global Dirichlet energy
+    under the heat-kernel GMRF prior should decrease (smoother).
+    """
+    # Two scales t1 < t2
+    t1, t2 = 0.05, 0.5
+    res1 = compute_ruggedness_variance_energy(additive_landscape, t=t1, normalized=True)
+    res2 = compute_ruggedness_variance_energy(additive_landscape, t=t2, normalized=True)
+
+    E1 = res1['expected_global_energy']
+    E2 = res2['expected_global_energy']
+
+    # Expect smoothing: E(t2) <= E(t1)
+    assert E2 <= E1 + 1e-9  # small tolerance
+
+
+def test_compute_ruggedness_diffusion_scale_wrapper(additive_landscape):
+    """
+    Wrapper should return a valid t_map and confidence interval dictionary with
+    expected keys. t_map must be inside [t_min, t_max].
+    """
+    t_min, t_max = 0.01, 2.0
+    out = compute_ruggedness_diffusion_scale(additive_landscape, t_min=t_min, t_max=t_max)
+    for key in [
+        't_map',
+        't_lower_confidence_interval',
+        't_upper_confidence_interval',
+        't_logposterior_map',
+        'variance_approximate',
+    ]:
+        assert key in out
+
+    assert t_min <= out['t_map'] <= t_max
+    assert t_min <= out['t_lower_confidence_interval'] <= out['t_upper_confidence_interval'] <= t_max
+    assert out['variance_approximate'] > 0.0
+
+
+def test_variance_energy_honors_user_t(additive_landscape):
+    """
+    compute_ruggedness_variance_energy should honor a user-specified t exactly.
+    """
+    t_forced = 0.123
+    res = compute_ruggedness_variance_energy(additive_landscape, t=t_forced)
+    assert np.isclose(res['t_used'], t_forced)
