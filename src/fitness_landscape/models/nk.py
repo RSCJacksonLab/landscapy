@@ -211,8 +211,9 @@ def create_gnk_landscape(N: int,
     )
 
 def create_nk_binary_landscape(N: int,
-                               K: int,
+                               K: Optional[int] = None,
                                seed: Optional[int] = None,
+                               adj_mat: Optional[np.ndarray] = None,
                                **kwargs) -> FitnessLandscape:
     """
     Factory function to create a binary NK fitness landscape.
@@ -230,6 +231,8 @@ def create_nk_binary_landscape(N: int,
         sequences).
     seed : int, optional
         Random seed for reproducibility.
+    adj_mat : np.ndarray, optional
+        Adjacency matrix defining epistatic interactions.
     **kwargs : dict, optional
         Additional keyword arguments to pass to the FitnessLandscape
         constructor.
@@ -240,7 +243,11 @@ def create_nk_binary_landscape(N: int,
         An instance of the FitnessLandscape class representing the NK
         landscape.
     """
-    sequences_np, fitness_values = generate_NK_states(N, K, alphabet=[0,1], seed=seed)
+    sequences_np, fitness_values = generate_NK_states(N, 
+                                                      K, 
+                                                      alphabet=[0,1], 
+                                                      seed=seed,
+                                                      adj_mat=adj_mat)
     
     sequences = [BinarySequence(seq) for seq in sequences_np]
 

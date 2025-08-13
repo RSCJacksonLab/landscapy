@@ -119,6 +119,24 @@ def test_gnk_with_variable_sites_and_adjacency_matrix():
     assert isinstance(landscape.sequences[0], BaseNumpySequence)
     assert len(landscape.get_signal()) == N**len(alphabet)
 
+def test_binary_gnk_with_variable_sites_and_adjacency_matrix():
+    """
+    Test the gNK generating with variable sites provided.
+    """
+    N = 4
+    adj_mat = np.array([
+        [0, 1, 0, 0],
+        [1, 0, 1, 0],
+        [0, 1, 0, 1],
+        [0, 0, 1, 0]
+    ])
+    landscape = create_nk_binary_landscape(N=N,
+                                           seed=42,
+                                           adj_mat=adj_mat)
+    assert len(landscape.sequences) == N**2
+    assert isinstance(landscape.sequences[0], BinarySequence)
+    assert len(landscape.get_signal()) == N**2
+
 def test_gnk_invalid_arguments():
     """
     Tests that the gNK landscape raises appropriate errors for invalid
