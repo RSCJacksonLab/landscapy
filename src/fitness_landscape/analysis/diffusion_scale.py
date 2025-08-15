@@ -217,6 +217,7 @@ def fit_t_bayesian_laplace(G: nx.Graph,
     logpost_map = -f0
 
     return t_map, ci_lower, ci_upper, logpost_map, var_approx
+
 def _compute_variances(eigenvectors: np.ndarray,
                        eigenvalues: np.ndarray,
                        sigma_squared: float,
@@ -323,35 +324,6 @@ def compute_ruggedness_diffusion_scale(landscape: FitnessLandscape,
         'variance_approximate': var_approx,
         }
     
-
-def compute_ruggedness_variance_energy(landscape: FitnessLandscape,
-                                       t: float = None, 
-                                       **kwargs):
-    """
-    Function to compute expectations on the Dirichlet energy according
-    to a diffusion process. 
-
-    Parameters
-    ----------
-    landscape : FitnessLandscape
-        The fitness landscape to analyze.
-    
-    t : float, default=`None`
-        The diffusion scale parameter. If `None`, the maximum a
-        posteriori value is computed and used. 
-    
-    **kwargs
-        Keyword arguments used in fitting the t_map.
-    
-    Returns
-    -------
-    Dict 
-        Dictionary of results with entriesL
-        - covariance_matrix : the covariance array
-        global_dirichlet_energy_expectation 
-        
-    """
-
 def _expected_local_global_dirichlet_energy(G: nx.Graph,
                                             sigma: np.ndarray,
                                             mean: np.ndarray,
