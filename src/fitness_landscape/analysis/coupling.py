@@ -190,6 +190,7 @@ def cross_spectral_coherence(landscape: FitnessLandscape,
         F_cols = [ _walsh_coeffs_for_layer(landscape, lname) for lname in layer_names ]
         F = np.vstack(F_cols).T  # (2^L x N)
         evals = None
+
         # per-order aggregation (bitcount masks) if requested
         if walsh_aggregate == 'order':
             L = int(np.log2(F.shape[0]))
@@ -216,7 +217,9 @@ def cross_spectral_coherence(landscape: FitnessLandscape,
         denom = np.outer(power, power)
         Sab = np.outer(fk, np.conj(fk)) # (N x N)
         coh = np.zeros((N, N), dtype=float)
-        nz = denom > 0
+        # (1e-12)^2 as a coherent power^2 floor
+        tiny = 1e-24  
+        nz = denom > tiny
         coh[nz] = (np.abs(Sab[nz])**2) / denom[nz]
         np.fill_diagonal(coh, 1.0)
         coherence_per_mode.append(coh)
