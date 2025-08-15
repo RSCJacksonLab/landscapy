@@ -3,7 +3,7 @@ from typing import Dict, List, Optional, Tuple, Literal
 from ..core.landscape import FitnessLandscape
 from ..core.fitness import NumericFitness
 from ..utils import check_full_hamming
-from ..transforms.walsh_hadamard import inverse_walsh_transform, walsh_transform
+from ..transforms.walsh_hadamard import walsh_transform
 from ..transforms.eigenmode import eigenmode_decomposition
 
 def _get_layer_matrix(landscape: FitnessLandscape,
@@ -82,7 +82,7 @@ def _walsh_coeffs_for_layer(landscape: FitnessLandscape,
     try:
         lyr = landscape.get_layer(layer_name)
         landscape.view(lyr.name)
-        coef = walsh_transform(landscape, order=None, backend='numpy')
+        coef = walsh_transform(landscape, order=None)
         return np.asarray(coef, dtype=float)
     finally:
         if prev is not None and prev in landscape.fitness_layers:
