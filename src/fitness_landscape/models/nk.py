@@ -3,9 +3,6 @@ import random
 
 from itertools import product
 from typing import List, Optional, Union
-
-from torch import ne
-
 from ..core.landscape import FitnessLandscape
 from ..core.fitness import NumericFitness
 from ..core.sequence import BaseNumpySequence, BinarySequence, MultialleleSequence
@@ -51,10 +48,8 @@ def generate_NK_states(N: int,
     fitness_values : np.ndarray
         Array of corresponding fitness values.
     """
-    if seed is not None:
-        np.random.seed(seed)
-        random.seed(seed)
-
+    rng = np.random.default_rng(seed)
+    
     alphabet_size = len(alphabet)
     allele_map = {allele: i for i, allele in enumerate(alphabet)}
 
@@ -107,42 +102,56 @@ def generate_NK_states(N: int,
     num_sequences = len(sequences)
     fitness_values = np.zeros(num_sequences)
 
-    # make fitness contributions for each interaction
-    fitness_contrib = []
-    for j in range(N):
-        if adj_mat is not None:
-            neighbours = np.where(adj_mat[j] == 1)[0]
-            neighbours = neighbours[neighbours != j]
-            n_interactions = 1 + len(neighbours)
-        elif K is not None:
-            n_interactions = K + 1
-        else:
-            raise ValueError("Either K or adj_mat must be provided.")
-        fitness_contrib.append(np.random.rand(alphabet_size ** n_interactions))
+    # Build neighbor sets in GLOBAL indices (matching the sequence positions)
+    neighbor_sets_global: list[list[int]] = []
+    if adj_mat is not None:
+        if adj_mat.shape != (N, N):
+            raise ValueError(f"adj_mat must be shape ({N},{N}), got {adj_mat.shape}")
+        for si, site in enumerate(variable_sites):
+            
+            # neighbors are given in local [0..N-1] indexing of variable_sites
+            nbr_local = np.where(adj_mat[si] == 1)[0]
+            nbr_local = [j for j in nbr_local if j != si]  # exclude self
+            
+            # convert to global indices
+            neigh_global = [variable_sites[j] for j in nbr_local]
+            
+            # sort to make the order deterministic
+            idxs_global = [site] + sorted(neigh_global)
+            neighbor_sets_global.append(idxs_global)
+    else:
+        # sample K neighbors ONCE per site from the other variable sites
+        for si, site in enumerate(variable_sites):
+            choices = [v for v in variable_sites if v != site]
+            if K > len(choices):
+                raise ValueError(f"K={K} exceeds available neighbor choices={len(choices)} for site {site}")
+            neigh_global = rng.choice(choices, size=K, replace=False).tolist()
+            idxs_global = [site] + sorted(neigh_global)  # sorted for stable ordering
+            neighbor_sets_global.append(idxs_global)
 
-    # get fitness contributions for each sequence
+    # Build one lookup table per site using fixed neighbors
+    # Zero-center each table to reduce intercept bias
+    fitness_contrib = []
+    for idxs_global in neighbor_sets_global:
+        arity = len(idxs_global)  # typically K+1
+        table = rng.random(alphabet_size ** arity)
+        table -= table.mean()     # zero-center subfunction (optional but helpful)
+        fitness_contrib.append(table)
+
+    # Evaluate sequences using the SAME order for indexing
+    # Mixed-radix index consistent with the order used to build the table
     for seq_idx, seq in enumerate(sequences):
         total_fit = 0.0
-        for site_idx, site in enumerate(variable_sites):
-            if adj_mat is not None:
-                neighbors = np.where(adj_mat[site_idx] == 1)[0]
-                indices = [site] + [variable_sites[x] for x in neighbors
-                                    if x != site_idx]
-            elif K is not None:
-                interaction_options = [x for x in variable_sites
-                                       if x != site]
-                indices = [site] + random.sample(interaction_options, K)
-            else:
-                raise ValueError("Either K or adj_mat must be provided.")
-            config = [seq[pos] for pos in indices]
+        for si, idxs_global in enumerate(neighbor_sets_global):
             
+            # extract config in the fixed, deterministic order
+            config = [seq[pos] for pos in idxs_global]
+            
+            # compute base-(alphabet_size) index
             index = 0
-            for allele_idx, allele in enumerate(config):
-                numeric_allele = allele_map[allele]
-                index += numeric_allele * (alphabet_size ** (len(config) - 1 - allele_idx))
-            
-            total_fit += fitness_contrib[site_idx][index]
-
+            for allele in config:
+                index = index * alphabet_size + allele_map[allele]
+            total_fit += fitness_contrib[si][index]
         fitness_values[seq_idx] = total_fit / N
 
     return sequences, fitness_values
