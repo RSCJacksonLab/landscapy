@@ -99,6 +99,18 @@ def generate_NK_states(N: int,
     else:
         sequences = np.array(list(product(alphabet, repeat=N)))
 
+    # If K == 0 special logic.
+    if adj_mat is None and (K is not None and K == 0):
+        # Binary: fitness = Hamming weight / N  → mean ~ 0.5 over the full cube
+        if alphabet_size == 2 and set(alphabet) == {0, 1}:
+            fitness_values = sequences.astype(float).mean(axis=1)
+        else:
+            # Multi-allele: map alleles to 0..A-1 and normalize each site by (A-1)
+            inv_map = {allele: i for i, allele in enumerate(alphabet)}  # 0..A-1
+            seq_num = np.vectorize(inv_map.__getitem__)(sequences)       # shape (2^N, N)
+            fitness_values = (seq_num / float(alphabet_size - 1)).mean(axis=1)
+        return sequences, fitness_values
+
     num_sequences = len(sequences)
     fitness_values = np.zeros(num_sequences)
 
@@ -119,6 +131,7 @@ def generate_NK_states(N: int,
             # sort to make the order deterministic
             idxs_global = [site] + sorted(neigh_global)
             neighbor_sets_global.append(idxs_global)
+
     else:
         # sample K neighbors ONCE per site from the other variable sites
         for si, site in enumerate(variable_sites):
@@ -128,7 +141,7 @@ def generate_NK_states(N: int,
             neigh_global = rng.choice(choices, size=K, replace=False).tolist()
             idxs_global = [site] + sorted(neigh_global)  # sorted for stable ordering
             neighbor_sets_global.append(idxs_global)
-
+                
     # Build one lookup table per site using fixed neighbors
     # Zero-center each table to reduce intercept bias
     fitness_contrib = []

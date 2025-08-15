@@ -424,8 +424,6 @@ def test_walsh_on_epistatic_landscape(epistatic_landscape):
     results = calculate_epistasis_walsh(epistatic_landscape, order=4)
     nonzero_higher = []
     for order, coeffs in results['by_order'].items():
-
-
         if order >= 2:
             nonzero_higher.extend([abs(v) for v in coeffs.values()])
     assert any(v > 1e-8 for v in nonzero_higher), \
