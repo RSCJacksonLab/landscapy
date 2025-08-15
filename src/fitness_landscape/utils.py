@@ -1,12 +1,13 @@
 import numpy as np
 import networkx as nx
-from typing import List, Union
+from typing import List, Union, Optional, Tuple, Dict
 import torch
 from scipy import sparse as sp
 from scipy.spatial import cKDTree, distance_matrix
 from scipy.sparse.csgraph import minimum_spanning_tree
 from .core.sequence import BaseNumpySequence, SoftSequence
-from .core.landscape import FitnessLandscape
+from dataclasses import dataclass
+
 
 from ._const import ALPHABET_21, PROT_20
 from cogent3 import ArrayAlignment, make_aligned_seqs, ArrayAlignment 
@@ -618,7 +619,7 @@ def _check_graph_is_hypercube(G: nx.Graph,
 
     return True, None
 
-def check_full_hamming(landscape: FitnessLandscape,
+def check_full_hamming(landscape: 'FitnessLandscape',
                        *,
                        check_graph: bool = True,
                        return_info: bool = True) -> HammingCheckResult:

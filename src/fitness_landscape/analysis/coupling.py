@@ -3,7 +3,7 @@ from typing import Dict, List, Optional, Tuple, Literal
 from ..core.landscape import FitnessLandscape
 from ..core.fitness import NumericFitness
 from ..utils import check_full_hamming
-from ..transforms.walsh_hadamard import inverse_walsh_transform
+from ..transforms.walsh_hadamard import inverse_walsh_transform, walsh_transform
 from ..transforms.eigenmode import eigenmode_decomposition
 
 def _get_layer_matrix(landscape: FitnessLandscape,
@@ -50,7 +50,7 @@ def _get_layer_matrix(landscape: FitnessLandscape,
     N = len(layer_names)
     X = np.zeros((len(nodes), N), dtype=float)
     for j, lname in enumerate(layer_names):
-        layer = landscape.fitness_layers[lname]
+        layer = landscape.get_layer(lname)
         if layer.dtype == 'numeric':
             vals = layer.to_scalar(aggregate_func=numeric_agg)
             X[:, j] = vals[node_to_seq_idx]
@@ -80,8 +80,9 @@ def _walsh_coeffs_for_layer(landscape: FitnessLandscape,
     """
     prev = landscape._active_view_name
     try:
-        landscape.view(layer_name)
-        coef = walsh_transform(landscape, order=None, backend='numpy')  # shape = (2^L,)
+        lyr = landscape.get_layer(layer_name)
+        landscape.view(lyr.name)
+        coef = walsh_transform(landscape, order=None, backend='numpy')
         return np.asarray(coef, dtype=float)
     finally:
         if prev is not None and prev in landscape.fitness_layers:
@@ -191,8 +192,7 @@ def cross_spectral_coherence(landscape: FitnessLandscape,
         evals = None
         # per-order aggregation (bitcount masks) if requested
         if walsh_aggregate == 'order':
-            # reuse your Hamming utils to get L quickly
-            L = res.L
+            L = int(np.log2(F.shape[0]))
             orders = np.array([int(i).bit_count() for i in range(1 << L)], dtype=int)
             mode_masks = [orders == r for r in range(L+1)]
         else:
