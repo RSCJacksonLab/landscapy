@@ -41,6 +41,42 @@ from scipy.sparse import issparse
 
 
 @pytest.fixture
+def cubic_only_landscape():
+    """
+    Synthetic landscape on N=4 that contains ONLY up to cubic interactions
+    in z_i = (-1)^{x_i}. Therefore its Walsh spectrum has no order-4 mass.
+    """
+    rng = np.random.default_rng(12345)
+    N = 4
+    seqs = generate_sequences(N, [0, 1])  # full 2^N set
+
+    # Map each 0/1 sequence x -> z in {+1,-1}^N by z_i = (-1)^{x_i}
+    Z = np.array([1 - 2 * s.to_array().astype(int) for s in seqs])  # shape (16, 4)
+
+    # Build f(z) = a0 + a^T z + z^T B z + sum_{i<j<k} c_{ijk} z_i z_j z_k
+    a0 = 0.1
+    a = rng.normal(0, 0.2, size=N)
+
+    B = rng.normal(0, 0.1, size=(N, N))
+    B = np.triu(B, 1)
+    B = B + B.T  # symmetric, zero diagonal
+
+    triples = [(0, 1, 2), (1, 2, 3)]
+    c = {t: rng.normal(0, 0.05) for t in triples}
+
+    f = np.full(Z.shape[0], a0, dtype=float)
+    f += Z @ a
+    f += 0.5 * np.sum((Z @ B) * Z, axis=1)  # quadratic form
+    for (i, j, k), w in c.items():
+        f += w * (Z[:, i] * Z[:, j] * Z[:, k])
+
+    layer = NumericFitness(name="default", values=[[float(x)] for x in f])
+    L = FitnessLandscape.from_sequences(
+        sequences=seqs, fitness_layers={"default": layer}, graph_type="hamming"
+    )
+    return L
+
+@pytest.fixture
 def two_layer_additive(additive_landscape):
     """
     Add a second numeric layer identical to the default layer.
@@ -379,6 +415,44 @@ def test_walsh_on_additive_landscape(additive_landscape):
         if order > 1:
             for term, value in coeffs.items():
                 assert np.isclose(value, 0), f"Walsh term {term} should be zero"
+
+def test_walsh_on_epistatic_landscape(epistatic_landscape):
+    """
+    For an NK landscape with N=4, K=2, there should be non-zero higher-order
+    (>= 2) Walsh coefficients (interactions up to order K+1 = 3 expected).
+    """
+    results = calculate_epistasis_walsh(epistatic_landscape, order=4)
+    nonzero_higher = []
+    for order, coeffs in results['by_order'].items():
+
+
+        if order >= 2:
+            nonzero_higher.extend([abs(v) for v in coeffs.values()])
+    assert any(v > 1e-8 for v in nonzero_higher), \
+        "Expected at least one non-zero higher-order Walsh coefficient for K=2."
+
+    ve = results.get('variance_explained')
+    if ve is not None:
+        higher_mass = sum(ve.get(o, 0.0) for o in range(2, 5))
+
+        assert higher_mass > 0.05, \
+            f"Expected >5% variance in orders >=2 for K=2, got {higher_mass:.3f}."
+        assert ve.get(1, 0.0) < 0.95, \
+            f"Order-1 variance should not explain ~all signal for K=2, got {ve.get(1, 0.0):.3f}."
+
+# NK "leaks" higher order interactions.
+def test_walsh_quartic_zero_on_cubic_landscape(cubic_only_landscape):
+    """
+    A cubic-only polynomial in z_i = (-1)^{x_i} has no 4th-order Walsh content.
+    """
+    results = calculate_epistasis_walsh(cubic_only_landscape, order=4)
+
+    # Ensure order-4 entries are present and (numerically) zero
+    order4 = results['by_order'].get(4, {})
+    assert order4, "Order-4 bucket should exist when requesting order=4."
+
+    mags = [abs(v) for v in order4.values()]
+    assert np.isclose(max(mags), 0), f"Unexpected 4th-order mass: max {max(mags):.3e}"
 
 def test_regression_on_additive_landscape(additive_landscape):
     """

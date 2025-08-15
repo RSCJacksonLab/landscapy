@@ -10,7 +10,6 @@ from itertools import combinations, product
 
 def calculate_epistasis_walsh(landscape: FitnessLandscape,
                                order: int,
-                               backend: Literal['numpy', 'torch'] = 'numpy',
                                **kwargs) -> Dict:
     """
     Function to measure epistasis using the Walsh-Hadamard
@@ -24,9 +23,6 @@ def calculate_epistasis_walsh(landscape: FitnessLandscape,
     
     order : int
         The order of interactions to test up to. 
-    
-    backend : str, default=`numpy`
-        The backend to use.
     
     Returns
     -------
@@ -43,8 +39,7 @@ def calculate_epistasis_walsh(landscape: FitnessLandscape,
     if is_binary:
         # Use standard Walsh transform for binary sequences
         coeffs = walsh_coefficients(landscape,
-                                    order=order,
-                                    backend=backend)
+                                    order=order)
         
         # Organize coefficients by order
         result = {
