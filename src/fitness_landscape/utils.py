@@ -1,11 +1,13 @@
 import numpy as np
 import networkx as nx
-from typing import List, Union
+from typing import List, Union, Optional, Tuple, Dict
 import torch
 from scipy import sparse as sp
 from scipy.spatial import cKDTree, distance_matrix
 from scipy.sparse.csgraph import minimum_spanning_tree
 from .core.sequence import BaseNumpySequence, SoftSequence
+from dataclasses import dataclass
+
 
 from ._const import ALPHABET_21, PROT_20
 from cogent3 import ArrayAlignment, make_aligned_seqs, ArrayAlignment 
@@ -471,3 +473,236 @@ def moving_window_alignment(alignment: ArrayAlignment,
         
     return windows
 
+@dataclass
+class HammingCheckResult:
+    is_full_hamming: bool
+    L: int
+    n: int
+    is_binary: bool
+    all_same_length: bool
+    has_all_genotypes: bool
+    no_duplicates: bool
+    graph_is_hypercube: Optional[bool]
+    reason: Optional[str]
+    lex_perm: Optional[np.ndarray]  # permutation to lexicographic binary order
+    codes: Optional[np.ndarray]     # integer code for each sequence (in `landscape.sequences` order)
+
+def _seq_array_to_bits(arr: np.ndarray) -> np.ndarray:
+    """
+    Coerce an array-like (chars or ints) of length L to 0/1 np.uint8.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        The input sequence array. 
+    
+    Returns
+    -------
+    The array as an 8-bit integer.
+    """
+    if arr.dtype.kind in ('U', 'S', 'O'):
+        return np.array([0 if (x == '0' or x == 0) else 1 for x in arr], dtype=np.uint8)
+    elif arr.dtype.kind in ('i','u','b'):
+        x = arr.astype(np.uint8)
+        if not np.all((x == 0) | (x == 1)):
+            raise ValueError("Non-binary integer values present.")
+        return x
+    else:
+        x = arr.astype(float)
+        if not np.all((x == 0.0) | (x == 1.0)):
+            raise ValueError("Non-binary numeric values present.")
+        return x.astype(np.uint8)
+
+def _bits_to_int_code(bits: np.ndarray) -> int:
+    """
+    Map a 0/1 vector (length L) to an integer code using big-endian bit
+    order.
+
+    Parameters
+    ----------
+    bits : np.ndarray
+        The sequence bits array 
+    
+    Returns
+    -------
+    out : int
+        The integer code.
+    """
+    out = 0
+    for b in bits:
+        out = (out << 1) | int(b)
+    return out
+
+def _compute_codes_and_L(sequences: List[BaseNumpySequence]) -> Tuple[np.ndarray, int]:
+    """
+    Convert all sequences to bit-vectors and integer codes. Ensures
+    same length.
+
+    Parameters
+    ----------
+    sequences : List[BaseNumpySequence]
+        The list of input sequences. 
+    
+    Returns
+    -------
+    Tuple
+        Tuple of integer codes and sequence length.
+    """
+    first = sequences[0].to_array()
+    L = len(first)
+    codes = np.empty(len(sequences), dtype=np.int64)
+    for i, seq in enumerate(sequences):
+        arr = np.asarray(seq.to_array())
+        if len(arr) != L:
+            raise ValueError(f"Sequences have differing lengths: found {len(arr)} vs expected {L}.")
+        bits = _seq_array_to_bits(arr)
+        codes[i] = _bits_to_int_code(bits)
+    return codes, L
+
+def _check_graph_is_hypercube(G: nx.Graph,
+                              codes: np.ndarray,
+                              L: int,
+                              node_to_seq_code: Dict) -> Tuple[bool, Optional[str]]:
+    """
+    Function to validate that the provided graph is the L-dimensional
+    hypercube on the given nodes.
+
+    Parameters
+    ----------
+    G : nx.Graph
+        The input graph. 
+    
+    codes : np.ndarray
+        The integer array for sequence encoding. 
+    
+    L : int
+        The sequence length. 
+    
+    node_to_seq_code : Dict
+        Dictionary of node index to integer sequence code. 
+    
+    Returns
+    -------
+    Tuple
+        Boolean of whether fully connected Hamming graph and error 
+        message if `False`.
+    """
+    n = len(codes)
+    # Basic counts
+    if G.number_of_nodes() != n:
+        return False, f"Graph has {G.number_of_nodes()} nodes but sequences have {n}."
+
+    expected_edges = (n * L) // 2
+    if G.number_of_edges() != expected_edges:
+        return False, f"Graph has {G.number_of_edges()} edges; expected {expected_edges} for L={L}."
+
+    # Degree L everywhere
+    for v, deg in G.degree():
+        if deg != L:
+            return False, f"Node {v} has degree {deg}; expected {L}."
+
+    # Every edge flips exactly one bit
+    for u, v in G.edges():
+        cu = node_to_seq_code.get(u, None)
+        cv = node_to_seq_code.get(v, None)
+        if cu is None or cv is None:
+            return False, "Graph nodes missing 'sequence' attribute mapping to a code."
+        
+        # XOR has Hamming weight 1 iff Hamming distance == 1
+        x = cu ^ cv
+        if x == 0 or (x & (x - 1)) != 0:
+            return False, "Found an edge that is not Hamming distance 1."
+
+    # Connectivity
+    if not nx.is_connected(G):
+        return False, "Graph is not connected."
+
+    return True, None
+
+def check_full_hamming(landscape: 'FitnessLandscape',
+                       *,
+                       check_graph: bool = True,
+                       return_info: bool = True) -> HammingCheckResult:
+    """
+    Function to verify that a `FitnessLandscape` lives on a full binary
+    Hamming hypercube and (optionally) that `landscape.graph` equals
+    the L-dimensional hypercube.
+
+    Parameters
+    ----------
+    landscape : FitnessLandscape
+        The fitness landscape to check. 
+    
+    check_graph : bool, default=`True`
+        Boolean to check graph connectivity. 
+    
+    return_info : bool, default=`True`
+        Boolean to return `HammingCheckResult`.
+    
+    Returns
+    -------
+    HammingCheckResult
+        a HammingCheckResult with diagnostics and the permutation to
+        lex order.
+    """
+    n = len(landscape.sequences)
+    reason = None
+
+    # Sequence checks
+    try:
+        codes, L = _compute_codes_and_L(landscape.sequences)
+        is_binary = True
+        all_same_length = True
+    except ValueError as e:
+        # non-binary or varying lengths
+        return HammingCheckResult(
+            is_full_hamming=False, L=-1, n=n, is_binary=False, all_same_length=False,
+            has_all_genotypes=False, no_duplicates=False, graph_is_hypercube=None,
+            reason=str(e), lex_perm=None, codes=None
+        )
+
+    # uniqueness and coverage
+    uniq_codes, counts = np.unique(codes, return_counts=True)
+    no_duplicates = np.all(counts == 1)
+    has_all = (n == (1 << L)) and (len(uniq_codes) == n)
+    if not has_all:
+        missing = (1 << L) - n
+        reason = f"Missing genotypes or duplicates: got {n} unique={len(uniq_codes)} expected {1<<L}."
+    if not no_duplicates:
+        reason = "Duplicate genotypes detected."
+
+    # permutation to lexicographic order (0..2^L-1)
+    lex_perm = np.argsort(codes)
+
+    # Graph mapping (node -> code)
+    graph_ok = None
+    if check_graph:
+        node_to_seq_code = {}
+        for node, data in landscape.graph.nodes(data=True):
+            seq = data.get('sequence', None)
+            if seq is None:
+                graph_ok = False
+                reason = "Graph node missing 'sequence' attribute."
+                break
+            bits = _seq_array_to_bits(np.asarray(seq.to_array()))
+            node_to_seq_code[node] = _bits_to_int_code(bits)
+        if graph_ok is not False:
+            graph_ok, g_reason = _check_graph_is_hypercube(landscape.graph, codes, L, node_to_seq_code)
+            if not graph_ok:
+                reason = g_reason
+
+    is_full = (is_binary and all_same_length and has_all and no_duplicates and ((graph_ok is True) if check_graph else True))
+
+    return HammingCheckResult(
+        is_full_hamming=is_full,
+        L=L,
+        n=n,
+        is_binary=is_binary,
+        all_same_length=all_same_length,
+        has_all_genotypes=has_all,
+        no_duplicates=no_duplicates,
+        graph_is_hypercube=graph_ok,
+        reason=reason,
+        lex_perm=lex_perm,
+        codes=codes
+    )

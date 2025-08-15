@@ -59,7 +59,14 @@ class FitnessLandscape:
             self._annotate_graph_nodes_with_embeddings()
 
         self._records = {tuple(seq.to_array()): i for i, seq in enumerate(self.sequences)}
-        self._active_view_name = next(iter(self.fitness_layers.keys())) if self.fitness_layers else None
+        
+        if self.fitness_layers:
+            self._active_view_name = (
+                'default' if 'default' in self.fitness_layers
+                else next(iter(self.fitness_layers.keys()))
+            )
+        else:
+            self._active_view_name = None
 
     @classmethod
     def from_sequences(cls,
@@ -358,6 +365,45 @@ class FitnessLandscape:
             else:
                 # No layers left
                 self._active_view_name = None
+
+    @property
+    def active_layer_name(self) -> str | None:
+        return getattr(self, "_active_view_name", None)
+
+    def get_layer(self,
+                  name: str,
+                  *,
+                  allow_active_default: bool = True):
+        """
+        Method to get return a layer. 
+
+        Parameters
+        ----------
+        name : str
+            The layer name. 
+        
+        allow_active_default : bool, default=`True`
+            Boolean to include the active layer in be resolved by the
+            method.
+        
+        Returns
+        -------
+        FitnessLayer
+            The resolved fitness layer.
+        """
+        d = self.fitness_layers
+        if name in d:
+            return d[name]
+        for lyr in d.values():
+            if getattr(lyr, "name", None) == name:
+                return lyr
+        if allow_active_default and name == "default":
+            active = self.active_layer_name
+            if active and active in d:
+                return d[active]
+
+        raise KeyError(f"Layer '{name}' not found. Available keys: {list(d.keys())}; "
+                       f"active={self.active_layer_name!r}")
 
 
     def to_graph_tensor(self) -> 'Data':

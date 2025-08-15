@@ -10,7 +10,6 @@ from itertools import combinations, product
 
 def calculate_epistasis_walsh(landscape: FitnessLandscape,
                                order: int,
-                               backend: Literal['numpy', 'torch'] = 'numpy',
                                **kwargs) -> Dict:
     """
     Function to measure epistasis using the Walsh-Hadamard
@@ -24,9 +23,6 @@ def calculate_epistasis_walsh(landscape: FitnessLandscape,
     
     order : int
         The order of interactions to test up to. 
-    
-    backend : str, default=`numpy`
-        The backend to use.
     
     Returns
     -------
@@ -43,8 +39,7 @@ def calculate_epistasis_walsh(landscape: FitnessLandscape,
     if is_binary:
         # Use standard Walsh transform for binary sequences
         coeffs = walsh_coefficients(landscape,
-                                    order=order,
-                                    backend=backend)
+                                    order=order)
         
         # Organize coefficients by order
         result = {
@@ -129,16 +124,18 @@ def calculate_epistasis_regression(landscape: FitnessLandscape,
     """
     Function to measure epistasis with linear modelling using one-hot encoding.
     """
-    sequences = np.array([seq.to_array() for seq in landscape.sequences])
-    fitness_values = np.array([landscape.get_fitness(seq) for seq in landscape.sequences])
-    
-    # Determine the alphabet from the landscape's sequences
-    alphabet = sorted(list(set(allele for seq in sequences for allele in seq)))
-    
-    # Create the design matrix and feature names
-    X, feature_names = _create_design_matrix_one_hot(sequences, order, alphabet)
-    
-    # Choose and fit the regression model
+    # Sequences (M x N) as 0/1
+    X01 = np.vstack([s.to_array().astype(int) for s in landscape.sequences])
+    y = landscape.get_signal().astype(float)
+
+    # Center the response so the intercept is the mean
+    y_mean = float(np.mean(y))
+    y_centered = y - y_mean
+
+    # Build orthogonal (effect-coded) design up to `order`
+    X, feature_names, index_by_order = _build_effect_design(landscape.sequences, order)
+
+    # Choose linear model (no regularization by default)
     if regularization is None:
         model = LinearRegression()
     elif regularization == 'l1':
@@ -149,96 +146,83 @@ def calculate_epistasis_regression(landscape: FitnessLandscape,
         model = ElasticNet(alpha=alpha, l1_ratio=kwargs.get('l1_ratio', 0.5))
     else:
         raise ValueError(f"Unsupported regularization: {regularization}")
-        
-    model.fit(X, fitness_values)
-    
-    # Extract coefficients
-    coeffs = {'intercept': model.intercept_}
+
+    # Fit to the centered response
+    model.fit(X, y_centered)
+
+    # Coefficients: intercept is the empirical mean
+    coeffs = {'intercept': y_mean}
     for i, name in enumerate(feature_names):
-        coeffs[name] = model.coef_[i]
-    
-    # Organize coefficients by order and calculate statistics
+        coeffs[name] = float(model.coef_[i])
+
+    # Group by order from our index map
+    by_order: Dict[int, Dict[str, float]] = {}
+    for r, idxs in index_by_order.items():
+        if r == 0:
+            by_order.setdefault(0, {})['intercept'] = y_mean
+            continue
+        by_order.setdefault(r, {})
+        for j in idxs:
+            by_order[r][feature_names[j]] = float(model.coef_[j])
+
+    # Compute R^2 using the full prediction with intercept
+    y_hat = X @ model.coef_ + y_mean
+    ss_res = float(np.sum((y - y_hat) ** 2))
+    ss_tot = float(np.sum((y - y_mean) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 1.0
+
     result = {
         'coefficients': coeffs,
-        'by_order': {},
+        'by_order': by_order,
         'model': {
-            'r2_score': model.score(X, fitness_values),
-            'model_type': model.__class__.__name__
-        }
+            'r2_score': r2,
+            'model_type': model.__class__.__name__,
+        },
+        'statistics': _calculate_epistasis_statistics(coeffs),
     }
-    
-    for term, value in coeffs.items():
-        order_key = 0 if term == 'intercept' else len(term.split('*'))
-        if order_key not in result['by_order']:
-            result['by_order'][order_key] = {}
-        result['by_order'][order_key][term] = value
-        
-    result['statistics'] = _calculate_epistasis_statistics(coeffs)
-    
     return result
 
 
-def _create_design_matrix_one_hot(sequences: np.ndarray,
-                                  order: int,
-                                  alphabet: List) -> Tuple[np.ndarray, List[str]]:
+def _build_effect_design(sequences,
+                         order: int) -> Tuple[np.ndarray, List[str], Dict[int, List[int]]]:
     """
-    Creates a design matrix for regression using one-hot encoding for sequences
-    and their interactions.
+    Build an orthogonal design on the full 2^N cube using effect coding.
     """
-    n_sequences, seq_length = sequences.shape
-    alphabet_map = {val: i for i, val in enumerate(alphabet)}
-    n_alphabet = len(alphabet)
+    # Convert sequences to (M x N) 0/1
+    if hasattr(sequences[0], "to_array"):
+        X01 = np.vstack([s.to_array().astype(int) for s in sequences])
+    else:
+        X01 = np.asarray(sequences, dtype=int)
+    M, N = X01.shape
 
-    # One-hot encode all sequences
-    one_hot_sequences = np.zeros((n_sequences, seq_length, n_alphabet))
-    for i, seq in enumerate(sequences):
-        for j, allele in enumerate(seq):
-            if allele in alphabet_map:
-                one_hot_sequences[i, j, alphabet_map[allele]] = 1
+    # Effect coding
+    Z = 1 - 2 * X01  # 0 -> +1, 1 -> -1
 
-    features = []
-    feature_names = []
+    cols = []
+    names = []
+    index_by_order: Dict[int, List[int]] = {}
+    next_col = 0
 
-    # Add bias term 
-    # Order 1: Main effects of each allele at each position
-    if order >= 1:
+    # Order 1 (main effects)
+    for i in range(N):
+        cols.append(Z[:, i][:, None].astype(float))
+        names.append(f"pos{i}")
+    index_by_order[1] = list(range(next_col, next_col + N))
+    next_col += N
 
-        #(n_sequences, seq_length * n_alphabet)
-        order_1_features = one_hot_sequences.reshape(n_sequences, -1)
-        features.append(order_1_features)
-        for i in range(seq_length):
-            for allele in alphabet:
-                feature_names.append(f"pos{i}_{allele}")
-    
-    # Higher Orders of interactions
-    for o in range(2, order + 1):
-        for pos_indices in combinations(range(seq_length), o):
+    # Higher orders: products of z-columns
+    for r in range(2, order + 1):
+        start = next_col
+        for idxs in combinations(range(N), r):
+            col = np.prod(Z[:, idxs], axis=1, dtype=float)[:, None]
+            cols.append(col)
+            names.append("*".join(f"pos{i}" for i in idxs))
+            next_col += 1
+        if next_col > start:
+            index_by_order[r] = list(range(start, next_col))
 
-            # Start with the one-hot features of the first position in the combination
-            interaction_features = one_hot_sequences[:, pos_indices[0], :]
-            
-            # Iteratively compute the outer product with the other positions
-            for i in range(1, o):
-
-                # Einsum computes the batch-wise outer product
-                interaction_features = np.einsum('...i,...j->...ij', interaction_features, one_hot_sequences[:, pos_indices[i], :])
-                
-                # Flatten the last dimensions to keep the feature matrix 2D
-                interaction_features = interaction_features.reshape(n_sequences, -1)
-            
-            features.append(interaction_features)
-            
-            # Generate feature names for this interaction
-            allele_combos = product(alphabet, repeat=o)
-            base_names = [f"pos{p}" for p in pos_indices]
-            for alleles in allele_combos:
-                name = "*".join([f"{base}_{a}" for base, a in zip(base_names, alleles)])
-                feature_names.append(name)
-    
-    # Combine all features into the final design matrix
-    X = np.concatenate(features, axis=1) if features else np.empty((n_sequences, 0))
-    
-    return X, feature_names
+    X = np.hstack(cols) if cols else np.zeros((M, 0), dtype=float)
+    return X, names, index_by_order
 
 
 def calculate_epistasis_ensemble(landscape: FitnessLandscape,

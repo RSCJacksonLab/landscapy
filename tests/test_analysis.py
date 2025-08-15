@@ -24,6 +24,7 @@ from fitness_landscape.analysis.diffusion_scale import (
     compute_ruggedness_diffusion_scale,
     compute_ruggedness_variance_energy,
 )
+from fitness_landscape.analysis.coupling import *
 from fitness_landscape.models.elementary_landscape import *
 from fitness_landscape.models.nk import *
 from fitness_landscape.models.rmf import *
@@ -37,6 +38,73 @@ from fitness_landscape.analysis.persistent_homology import (
 from fitness_landscape.core.fitness import NumericFitness
 from fitness_landscape.utils import make_latent_geometric_graph_connected, sample_observed_induced_connected
 from scipy.sparse import issparse
+
+
+@pytest.fixture
+def cubic_only_landscape():
+    """
+    Synthetic landscape on N=4 that contains ONLY up to cubic interactions
+    in z_i = (-1)^{x_i}. Therefore its Walsh spectrum has no order-4 mass.
+    """
+    rng = np.random.default_rng(12345)
+    N = 4
+    seqs = generate_sequences(N, [0, 1])  # full 2^N set
+
+    # Map each 0/1 sequence x -> z in {+1,-1}^N by z_i = (-1)^{x_i}
+    Z = np.array([1 - 2 * s.to_array().astype(int) for s in seqs])  # shape (16, 4)
+
+    # Build f(z) = a0 + a^T z + z^T B z + sum_{i<j<k} c_{ijk} z_i z_j z_k
+    a0 = 0.1
+    a = rng.normal(0, 0.2, size=N)
+
+    B = rng.normal(0, 0.1, size=(N, N))
+    B = np.triu(B, 1)
+    B = B + B.T  # symmetric, zero diagonal
+
+    triples = [(0, 1, 2), (1, 2, 3)]
+    c = {t: rng.normal(0, 0.05) for t in triples}
+
+    f = np.full(Z.shape[0], a0, dtype=float)
+    f += Z @ a
+    f += 0.5 * np.sum((Z @ B) * Z, axis=1)  # quadratic form
+    for (i, j, k), w in c.items():
+        f += w * (Z[:, i] * Z[:, j] * Z[:, k])
+
+    layer = NumericFitness(name="default", values=[[float(x)] for x in f])
+    L = FitnessLandscape.from_sequences(
+        sequences=seqs, fitness_layers={"default": layer}, graph_type="hamming"
+    )
+    return L
+
+@pytest.fixture
+def two_layer_additive(additive_landscape):
+    """
+    Add a second numeric layer identical to the default layer.
+    For a proportional copy, Walsh/GFT coherence should be ~1 wherever power>0.
+    """
+    vals = additive_landscape.active_layer.to_scalar()
+    copy_layer = NumericFitness(name='copy', values=[[float(v)] for v in vals])
+    additive_landscape.attach(copy_layer)
+    return additive_landscape
+
+
+@pytest.fixture
+def simple_gft_landscape():
+    """
+    Build a small non-Hamming landscape on a path graph (n=6) with two numeric layers.
+    """
+    G = nx.path_graph(6)
+    # annotate nodes with sequences and two numeric layers
+    for i in G.nodes():
+        G.nodes[i]['sequence'] = BaseNumpySequence([i])  # trivial sequence
+        G.nodes[i]['fitness_default'] = float(i) # linear ramp
+        G.nodes[i]['fitness_copy'] = float(i) * 2.0  # proportional copy
+        G.nodes[i]['gapped_arr'] = np.zeros((1, 21))
+        G.nodes[i]['ungapped_arr'] = np.zeros((1, 20))
+    L = FitnessLandscape.from_graph(G, emb_nodes=False)
+
+    assert 'default' in L.fitness_layers and 'copy' in L.fitness_layers
+    return L
 
 
 @pytest.fixture
@@ -348,6 +416,42 @@ def test_walsh_on_additive_landscape(additive_landscape):
             for term, value in coeffs.items():
                 assert np.isclose(value, 0), f"Walsh term {term} should be zero"
 
+def test_walsh_on_epistatic_landscape(epistatic_landscape):
+    """
+    For an NK landscape with N=4, K=2, there should be non-zero higher-order
+    (>= 2) Walsh coefficients (interactions up to order K+1 = 3 expected).
+    """
+    results = calculate_epistasis_walsh(epistatic_landscape, order=4)
+    nonzero_higher = []
+    for order, coeffs in results['by_order'].items():
+        if order >= 2:
+            nonzero_higher.extend([abs(v) for v in coeffs.values()])
+    assert any(v > 1e-8 for v in nonzero_higher), \
+        "Expected at least one non-zero higher-order Walsh coefficient for K=2."
+
+    ve = results.get('variance_explained')
+    if ve is not None:
+        higher_mass = sum(ve.get(o, 0.0) for o in range(2, 5))
+
+        assert higher_mass > 0.05, \
+            f"Expected >5% variance in orders >=2 for K=2, got {higher_mass:.3f}."
+        assert ve.get(1, 0.0) < 0.95, \
+            f"Order-1 variance should not explain ~all signal for K=2, got {ve.get(1, 0.0):.3f}."
+
+# NK "leaks" higher order interactions.
+def test_walsh_quartic_zero_on_cubic_landscape(cubic_only_landscape):
+    """
+    A cubic-only polynomial in z_i = (-1)^{x_i} has no 4th-order Walsh content.
+    """
+    results = calculate_epistasis_walsh(cubic_only_landscape, order=4)
+
+    # Ensure order-4 entries are present and (numerically) zero
+    order4 = results['by_order'].get(4, {})
+    assert order4, "Order-4 bucket should exist when requesting order=4."
+
+    mags = [abs(v) for v in order4.values()]
+    assert np.isclose(max(mags), 0), f"Unexpected 4th-order mass: max {max(mags):.3e}"
+
 def test_regression_on_additive_landscape(additive_landscape):
     """
     Tests that regression finds no high-order epistasis and has a perfect fit for a K=0 landscape.
@@ -620,54 +724,6 @@ def test_analyze_fitness_distribution(additive_landscape: additive_landscape):
     # The Shapiro-Wilk test p-value should be > 0.05.
     assert results['normality_test']['is_normal'] == True
     assert results['mean'] == pytest.approx(0.5, abs=0.1)
-
-def test_correlation_analysis(linear_rmf_landscape: linear_rmf_landscape):
-    """
-    Tests that correlation analysis correctly identifies the perfect
-    linear relationship in a noise-free RMF landscape.
-
-    Parameters
-    ----------
-    additive_landscape : RMFFitnessLandscape
-        An RMF landscape with a linear fitness signal.
-    Raises
-    ------
-    AssertionError
-        If the Pearson correlation is not close to -1.0, indicating a
-        perfect anti-correlation with distance from the optimum.
-    """
-    # Create a feature that is the Hamming distance from the optimum ("00...0")
-    distances = [np.sum(seq.to_array().astype(int)) for seq in linear_rmf_landscape.sequences]
-    features = {'distance_from_optimum': distances}
-    
-    results = correlation_analysis(linear_rmf_landscape, features)
-    
-    pearson_corr = results['pearson']['distance_from_optimum']['correlation']
-    assert np.isclose(pearson_corr, -1.0)
-
-def test_regression_analysis(additive_landscape: additive_landscape):
-    """
-    Tests that linear regression can perfectly model a purely additive
-    landscape.
-
-    Parameters
-    ----------
-    additive_landscape : NKFitnessLandscape
-        A purely additive landscape (K=0).
-    Raises
-    ------
-    AssertionError
-        If the R2 score is not close to 1.0.
-    """
-    # For a K=0 landscape, fitness is a linear function of the sequence bits.
-    features = {f'pos_{i}': [s.to_array()[i] for s in additive_landscape.sequences] for i in range(4)}
-    
-    results = regression_analysis(additive_landscape, features)
-    
-    assert np.isclose(results['models']['linear']['test_r2'], 1.0)
-    
-    # A simple linear model should explain all variance, so R² should be 1.0
-    assert np.isclose(results['models']['linear']['test_r2'], 1.0)
 
 def test_hypothesis_testing(additive_landscape: additive_landscape):
     """
@@ -1061,3 +1117,100 @@ def test_variance_energy_honors_user_t(additive_landscape):
     t_forced = 0.123
     res = compute_ruggedness_variance_energy(additive_landscape, t=t_forced)
     assert np.isclose(res['t_used'], t_forced)
+
+def test_coherence_auto_picks_walsh(two_layer_additive):
+    """
+    On a full Hamming cube, basis='auto' should select Walsh; evals should be None.
+    Bands should be returned per epistatic order.
+    """
+    res = cross_spectral_coherence(two_layer_additive, ['default', 'copy'], basis='auto', walsh_aggregate='order')
+    assert 'evals' in res and res['evals'] is None
+    assert 'bands' in res
+
+    # Orders 0..L present
+    L = int(np.log2(len(two_layer_additive.sequences)))
+    for r in range(L + 1):
+        assert f'order_{r}' in res['bands']
+
+
+def test_coherence_walsh_identity_structure(two_layer_additive):
+    """
+    For identical layers on an additive (K=0) landscape, order-0 and order-1 coherence ~1,
+    higher-order coherence ~0.
+    """
+    res = cross_spectral_coherence(two_layer_additive, ['default', 'copy'], basis='walsh', walsh_aggregate='order')
+    L = int(np.log2(len(two_layer_additive.sequences)))
+
+    # Off-diagonal coherence between the two layers
+    c0 = res['bands']['order_0'][0, 1]
+    c1 = res['bands']['order_1'][0, 1]
+    assert c0 == pytest.approx(1.0, abs=1e-12)
+    assert c1 == pytest.approx(1.0, abs=1e-12)
+
+    for r in range(2, L + 1):
+        # No power in higher orders for K=0 -> coherence should average to ~0
+        assert res['bands'][f'order_{r}'][0, 1] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_coherence_walsh_per_mode_shapes(two_layer_additive):
+    """
+    Per-mode coherence list length should equal number of Walsh modes (=2^L),
+    and each item is an (N x N) matrix with N=number of layers.
+    """
+    res = cross_spectral_coherence(two_layer_additive, ['default', 'copy'], basis='walsh', walsh_aggregate='none')
+    K = 1 << int(np.log2(len(two_layer_additive.sequences)))
+    assert len(res['coherence']) == K
+    for mat in res['coherence']:
+        assert mat.shape == (2, 2)
+
+
+def test_coherence_walsh_phase_option(two_layer_additive):
+    """
+    return_phase=True should provide a phase array per mode with the same shape as coherence.
+    """
+    res = cross_spectral_coherence(two_layer_additive, ['default', 'copy'], basis='walsh', walsh_aggregate='none', return_phase=True)
+    assert 'phase' in res
+    assert len(res['phase']) == len(res['coherence'])
+    for ph, coh in zip(res['phase'], res['coherence']):
+        assert ph.shape == coh.shape
+
+
+def test_coherence_gft_default_bands(simple_gft_landscape):
+    """
+    On a non-Hamming graph with two proportional layers, basis='gft' should return
+    eigenvalues and default 'low','mid','high' band aggregation.
+    """
+    res = cross_spectral_coherence(simple_gft_landscape, ['default', 'copy'], basis='gft')
+    assert res['evals'] is not None
+    assert isinstance(res['evals'], np.ndarray) and res['evals'].ndim == 1
+
+    assert 'bands' in res
+    for name in ['low', 'mid', 'high']:
+        assert name in res['bands']
+        assert res['bands'][name].shape == (2, 2)
+
+    band_vals = [res['bands'][b][0, 1] for b in ['low', 'mid', 'high']]
+    assert max(band_vals) > 0.9
+
+
+def test_coherence_gft_per_mode_shapes(simple_gft_landscape):
+    """
+    Per-mode coherence length equals number of retained eigenmodes; each (N x N).
+    """
+    res = cross_spectral_coherence(simple_gft_landscape, ['default', 'copy'], basis='gft', n_eigs=None)
+    K = len(res['coherence'])
+    n = simple_gft_landscape.graph.number_of_nodes()
+    assert K == n
+    for mat in res['coherence']:
+        assert mat.shape == (2, 2)
+
+
+def test_coherence_gft_with_phase(simple_gft_landscape):
+    """
+    Phase returned with GFT path has same per-mode shape as coherence.
+    """
+    res = cross_spectral_coherence(simple_gft_landscape, ['default', 'copy'], basis='gft', return_phase=True)
+    assert 'phase' in res
+    assert len(res['phase']) == len(res['coherence'])
+    for ph, coh in zip(res['phase'], res['coherence']):
+        assert ph.shape == coh.shape

@@ -6,7 +6,6 @@ from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, 
 from ..core.landscape import FitnessLandscape
 from .eigenmode import eigenmode_decomposition
 
-
 def graph_fourier_transform(graph: Union[nx.Graph, FitnessLandscape],
                             signal: np.ndarray = None,
                             k: int = None,

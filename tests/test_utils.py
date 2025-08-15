@@ -6,6 +6,7 @@ from fitness_landscape.core.sequence import generate_sequences
 from fitness_landscape.core.fitness import NumericFitness
 import networkx as nx
 
+
 @pytest.fixture
 def util_landscape():
     """Provides a basic FitnessLandscape for utility testing."""

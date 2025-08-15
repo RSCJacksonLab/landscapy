@@ -33,8 +33,6 @@ from .random_walk import (
 
 from .statistics import (
     analyze_fitness_distribution,
-    correlation_analysis,
-    regression_analysis,
     hypothesis_testing,
     bootstrap_analysis,
     permutation_test
@@ -62,8 +60,6 @@ __all__ = [
     'calculate_ruggedness_autocorrelation_analytical',
     'calculate_ruggedness_autocorrelation_stochastic',
     'analyze_fitness_distribution',
-    'correlation_analysis',
-    'regression_analysis',
     'hypothesis_testing',
     'bootstrap_analysis',
     'permutation_test',

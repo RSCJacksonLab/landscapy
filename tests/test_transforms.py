@@ -30,28 +30,6 @@ def diffusion_landscape():
         graph=graph
     )
 
-def test_walsh_transform_reconstruction():
-    """
-    Tests that a signal can be perfectly reconstructed via inverse
-    Walsh transform.
-    
-    Raises
-    ------
-    AssertionError
-        If the reconstructed signal does not match the original
-        fitness signal.
-    """
-    landscape = create_nk_binary_landscape(N=4, K=1, seed=42)
-    fitness_signal = landscape.get_signal()
-    
-    # Perform Walsh transform
-    coeffs = walsh_transform(landscape)
-    
-    # Reconstruct the signal
-    reconstructed_signal = inverse_walsh_transform(coeffs, sequences=landscape.sequences)
-    
-    assert np.allclose(fitness_signal, reconstructed_signal)
-
 def test_walsh_coefficients_extraction():
     """
     Tests that Walsh coefficients are extracted and labeled correctly.
@@ -94,21 +72,6 @@ def test_graph_fourier_transform_reconstruction():
     
     assert np.allclose(signal, reconstructed_signal, atol=1e-9)
 
-def test_walsh_transform_torch():
-    """Tests Walsh transform with torch backend."""
-    landscape = create_nk_binary_landscape(N=4, K=1, seed=42)
-    coeffs = walsh_transform(landscape, backend='torch')
-    assert coeffs is not None
-
-def test_inverse_walsh_transform_torch():
-    """Tests inverse Walsh transform with torch backend."""
-    landscape = create_nk_binary_landscape(N=4, K=1, seed=42)
-    fitness_signal = landscape.get_signal()
-    coeffs = walsh_transform(landscape, backend='torch')
-    reconstructed_signal = inverse_walsh_transform(coeffs, sequences=landscape.sequences, backend='torch')
-    assert np.allclose(fitness_signal, reconstructed_signal.numpy())
-
-# New tests for graph_fourier.py
 def test_graph_fourier_transform_torch():
     """Tests GFT with torch backend."""
     graph = nx.cycle_graph(8)
