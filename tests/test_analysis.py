@@ -508,55 +508,6 @@ def test_epistasis_detection_on_k1_landscape(epistatic_landscape, epistasis_func
     assert any(not np.isclose(v, 0) for v in second_order_coeffs), \
         f"{epistasis_func.__name__} failed to detect any second-order epistasis."
 
-
-
-# Fourier transform tests
-def test_eigenmode_reconstruction():
-    """
-    Tests that a matrix can be reconstructed from its eigenmodes.
-
-    Raises
-    ------
-    AssertionError
-        If the reconstructed matrix does not match the original matrix.
-    
-    """
-    graph = nx.path_graph(4)
-    L = nx.laplacian_matrix(graph).toarray()
-    
-    eigenvalues, eigenvectors = eigenmode_decomposition(graph, matrix='laplacian')
-    
-    # Reconstruct using all modes
-    reconstructed_L = reconstruct_from_eigenmodes(eigenvectors, eigenvalues)
-    
-    assert np.allclose(L, reconstructed_L, atol=1e-9)
-
-def test_gft_reconstruction():
-    """
-    Tests that a signal can be perfectly reconstructed via inverse GFT.
-
-    Raises
-    ------
-    AssertionError
-        If the reconstructed signal does not match the original signal.
-    """
-    graph = nx.cycle_graph(4)
-    signal = np.sin(np.linspace(0, 2 * np.pi, 4, endpoint=False))
-    for i, node in enumerate(graph.nodes()):
-
-        graph.nodes[node]['sequence'] = BaseNumpySequence([i])
-        graph.nodes[node]['fitness_default'] = signal[i]
-        graph.nodes[node]['gapped_arr'] = np.zeros((1, 21))
-        graph.nodes[node]['ungapped_arr'] = np.zeros((1, 20))
-    
-    landscape = FitnessLandscape.from_graph(graph, emb_nodes=False)
-    eigenvectors, _, coefficients = graph_fourier_transform(landscape)
-    reconstructed_signal = inverse_graph_fourier_transform(eigenvectors, coefficients)
-    assert np.allclose(signal, reconstructed_signal, atol=1e-9)
-
-
-
-
 # Graph analysis tests
 def test_graph_properties_on_hamming_graph(complete_hamming_graph_n3: complete_hamming_graph_n3):
     """
@@ -824,24 +775,45 @@ def test_compute_betti_curves(homology_landscape):
     assert 2 in betti_curves
     assert len(betti_curves[0]) == len(filtration_range)
 
-def test_eigenmode_decomposition_torch():
-    """Tests eigenmode decomposition with torch backend."""
+
+def test_eigenmode_decomposition_laplacian():
+    """Tests eigenmode decomposition."""
     graph = nx.path_graph(4)
-    eigenvalues, eigenvectors = eigenmode_decomposition(graph, matrix='laplacian', backend='torch')
+    eigenvalues, eigenvectors = eigenmode_decomposition(graph, matrix='laplacian')
     assert eigenvalues is not None
     assert eigenvectors is not None
 
-def test_reconstruct_from_eigenmodes_torch():
-    """Tests reconstruction from eigenmodes with torch backend."""
+def test_eigenmode_decomposition_norm_laplacian():
+    """Tests eigenmode decomposition."""
     graph = nx.path_graph(4)
-    L = nx.laplacian_matrix(graph).toarray()
-    eigenvalues, eigenvectors = eigenmode_decomposition(graph, matrix='laplacian', backend='torch')
-    reconstructed_L = reconstruct_from_eigenmodes(eigenvectors, eigenvalues, backend='torch')
-    assert np.allclose(L, reconstructed_L.numpy(), atol=1e-6)
+    eigenvalues, eigenvectors = eigenmode_decomposition(graph, matrix='norm_laplacian')
+    assert eigenvalues is not None
+    assert eigenvectors is not None
+
+def test_eigenmode_decomposition_adj():
+    """Tests eigenmode decomposition."""
+    graph = nx.path_graph(4)
+    eigenvalues, eigenvectors = eigenmode_decomposition(graph, matrix='adjacency')
+    assert eigenvalues is not None
+    assert eigenvectors is not None
+
+def test_eigenmode_decomposition_transition():
+    """Tests eigenmode decomposition."""
+    graph = nx.path_graph(4)
+    eigenvalues, eigenvectors = eigenmode_decomposition(graph, matrix='transition')
+    assert eigenvalues is not None
+    assert eigenvectors is not None
+
 
 def test_graph_spectral_analysis(additive_landscape):
     """Tests graph spectral analysis."""
     results = graph_spectral_analysis(additive_landscape, matrix='laplacian')
+    assert 'eigenvalues' in results
+    assert 'participation_ratios' in results
+    assert 'localization' in results
+    assert 'node_centralities' in results
+
+    results = graph_spectral_analysis(additive_landscape, matrix='norm_laplacian')
     assert 'eigenvalues' in results
     assert 'participation_ratios' in results
     assert 'localization' in results

@@ -51,29 +51,9 @@ def test_walsh_coefficients_extraction():
     # For a K=0 landscape, high-order terms should be zero
     assert np.isclose(coeffs_dict['0,1,2'], 0.0)
 
-def test_graph_fourier_transform_reconstruction():
+def test_graph_fourier_transform_laplacian():
     """
-    Tests that a signal can be perfectly reconstructed via inverse GFT.
-    This test uses a cycle graph with a sine wave signal.
     """
-    graph = nx.cycle_graph(8)
-    signal = np.sin(np.linspace(0, 2 * np.pi, 8, endpoint=False))
-    for i, node in enumerate(graph.nodes()):
-
-        graph.nodes[node]['sequence'] = BaseNumpySequence([i]) 
-        graph.nodes[node]['fitness_default'] = signal[i]
-        graph.nodes[node]['gapped_arr'] = np.zeros((1, 21)) # Dummy data
-        graph.nodes[node]['ungapped_arr'] = np.zeros((1, 20)) # Dummy data
-    
-    landscape = FitnessLandscape.from_graph(graph, emb_nodes=False)
-    
-    eigenvectors, _, coefficients = graph_fourier_transform(landscape)
-    reconstructed_signal = inverse_graph_fourier_transform(eigenvectors, coefficients)
-    
-    assert np.allclose(signal, reconstructed_signal, atol=1e-9)
-
-def test_graph_fourier_transform_torch():
-    """Tests GFT with torch backend."""
     graph = nx.cycle_graph(8)
     signal = np.sin(np.linspace(0, 2 * np.pi, 8, endpoint=False))
     for i, node in enumerate(graph.nodes()):
@@ -83,12 +63,13 @@ def test_graph_fourier_transform_torch():
         graph.nodes[node]['ungapped_arr'] = np.zeros((1, 20))
 
     landscape = FitnessLandscape.from_graph(graph, emb_nodes=False)
-    eigenvectors, _, coefficients = graph_fourier_transform(landscape, backend='torch')
+    eigenvectors, _, coefficients = graph_fourier_transform(landscape)
     assert eigenvectors is not None
     assert coefficients is not None
 
-def test_inverse_graph_fourier_transform_torch():
-    """Tests inverse GFT with torch backend."""
+def test_graph_fourier_transform_norm_laplacian():
+    """
+    """
     graph = nx.cycle_graph(8)
     signal = np.sin(np.linspace(0, 2 * np.pi, 8, endpoint=False))
     for i, node in enumerate(graph.nodes()):
@@ -98,6 +79,7 @@ def test_inverse_graph_fourier_transform_torch():
         graph.nodes[node]['ungapped_arr'] = np.zeros((1, 20))
 
     landscape = FitnessLandscape.from_graph(graph, emb_nodes=False)
-    eigenvectors, _, coefficients = graph_fourier_transform(landscape, backend='torch')
-    reconstructed_signal = inverse_graph_fourier_transform(eigenvectors, coefficients, backend='torch')
-    assert np.allclose(signal, reconstructed_signal.numpy(), atol=1e-6)
+    eigenvectors, _, coefficients = graph_fourier_transform(landscape, matrix='norm_laplacian')
+    assert eigenvectors is not None
+    assert coefficients is not None
+

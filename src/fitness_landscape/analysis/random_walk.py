@@ -4,7 +4,7 @@ from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable
 from ..core.landscape import FitnessLandscape
 from ..core.graph import create_hamming_graph
 from ..core.sequence import sequence_distance
-from ..transforms import graph_fourier_transform, eigenmode_decomposition, inverse_graph_fourier_transform
+from ..transforms import graph_fourier_transform, eigenmode_decomposition
 
 def calculate_ruggedness_autocorrelation_analytical(landscape: FitnessLandscape,
                                                       lag_max: int = None) -> Dict:
