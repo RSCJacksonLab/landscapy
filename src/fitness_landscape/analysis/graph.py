@@ -1,3 +1,4 @@
+from networkx.algorithms.bipartite import matrix
 import numpy as np
 import networkx as nx
 from ..core.landscape import FitnessLandscape
@@ -139,6 +140,7 @@ def calculate_ruggedness_local_optima(landscape: FitnessLandscape,
     }
     
 def graph_spectral_analysis(landscape: FitnessLandscape,
+                            matrix: Literal['laplacian', 'norm_laplacian'] = 'laplacian',
                             k: int = None) -> Dict:
     """
     Analyze the eigenmodes of a graph.
@@ -149,13 +151,16 @@ def graph_spectral_analysis(landscape: FitnessLandscape,
         Graph to analyze.
     k : int or None, optional
         Number of eigenmodes to analyze.
+    matrix : str, default=`laplacian`
+        The matrix to use for spectral analysis. Options are
+        `laplacian` or `norm_laplcian`.
         
     Returns
     -------
     dict
         Eigenspectral analysis results. 
     """
-    eigenvalues, eigenvectors = eigenmode_decomposition(landscape)
+    eigenvalues, eigenvectors = eigenmode_decomposition(landscape, matrix=matrix, k=k)
     
     w = np.asarray(eigenvalues, dtype=float)
     U = np.asarray(eigenvectors, dtype=float)
