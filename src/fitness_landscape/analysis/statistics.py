@@ -74,248 +74,320 @@ def analyze_fitness_distribution(landscape: FitnessLandscape,
         'sample_size': len(fitness_values)
     }
 
-def hypothesis_testing(landscape: FitnessLandscape,
-                       groups: Dict,
-                       **kwargs) -> Dict:
+
+# Wrappers for multi landcape analysis.
+def _coerce_groups(*,
+                   groups: Optional[Dict[str, np.ndarray]] = None,
+                   landscapes: Optional[Mapping[str, FitnessLandscape]] = None,
+                   value_fn: Optional[Callable[[FitnessLandscape], np.ndarray]] = None,
+                   landscape: Optional[FitnessLandscape] = None,
+                   layer_names: Optional[Sequence[str]] = None,
+                   value_fn_layers: Optional[Callable[[FitnessLandscape, str], np.ndarray]] = None) -> Dict[str, np.ndarray]:
     """
-    Perform hypothesis tests to compare fitness between groups.
-    Performs battery of statistical tets on the fitnesses of
-    provided groups. 
-    
+    Normalize input into {group_name: 1D float array}. Exactly one of
+    the following input modes must be provided, groups, landscapes with
+    value_fn or landscape + layer_names + value_fn_layers. Helper
+    function to cleanly collate data. 
+
     Parameters
     ----------
+    groups : Dict
+
+    landscapes : Mapping
+
+    value_fn : Callable
+
     landscape : FitnessLandscape
-        Fitness landscape to analyze.
-    groups : dict
-        Dictionary mapping group names to lists of sequence indices.
-    **kwargs
-        Additional parameters.
-        
+
+    layer_names : Sequence[str]
+
+    value_fn_layers : Callable
+
     Returns
     -------
-    dict
-        Hypothesis testing results.
+    out : Dict
+        Cleaned dictionary of
+        - group name (str) : (, N) shaped array.
     """
-    # Extract fitness values
-    all_fitness = np.array([landscape.get_fitness(seq) for seq in landscape.sequences])
-    
-    # Extract fitness values for each group
-    group_fitness = {}
-    
-    for group_name, indices in groups.items():
-        group_fitness[group_name] = all_fitness[indices]
-    
-    # Initialize results
-    results = {
-        'group_stats': {},
-        'pairwise_tests': {}
-    }
-    
-    # Calculate statistics for each group
-    for group_name, fitness in group_fitness.items():
-        results['group_stats'][group_name] = {
-            'mean': np.mean(fitness),
-            'median': np.median(fitness),
-            'std': np.std(fitness),
-            'min': np.min(fitness),
-            'max': np.max(fitness),
-            'n': len(fitness)
-        }
-    
-    # Perform pairwise tests
-    group_names = list(groups.keys())
-    
-    for i, name1 in enumerate(group_names):
-        results['pairwise_tests'][name1] = {}
-        
-        for j, name2 in enumerate(group_names):
-            if i >= j:
-                continue
-            
-            # Get fitness values
-            fitness1 = group_fitness[name1]
-            fitness2 = group_fitness[name2]
-            
-            # Perform t-test
-            t_stat, t_p = stats.ttest_ind(fitness1, fitness2, equal_var=False)
-            
-            # Perform Mann-Whitney U test
-            u_stat, u_p = stats.mannwhitneyu(fitness1, fitness2)
-            
-            # Perform Kolmogorov-Smirnov test
-            ks_stat, ks_p = stats.ks_2samp(fitness1, fitness2)
-            
-            # Store results
-            results['pairwise_tests'][name1][name2] = {
-                't_test': {
-                    'statistic': t_stat,
-                    'p_value': t_p,
-                    'significant': t_p < 0.05
-                },
-                'mann_whitney': {
-                    'statistic': u_stat,
-                    'p_value': u_p,
-                    'significant': u_p < 0.05
-                },
-                'ks_test': {
-                    'statistic': ks_stat,
-                    'p_value': ks_p,
-                    'significant': ks_p < 0.05
-                }
-            }
-    
-    # Perform ANOVA if there are more than 2 groups
-    if len(groups) > 2:
-        # Create list of groups for ANOVA
-        anova_groups = [fitness for fitness in group_fitness.values()]
-        
-        # Perform one-way ANOVA
-        f_stat, f_p = stats.f_oneway(*anova_groups)
-        
-        results['anova'] = {
-            'statistic': f_stat,
-            'p_value': f_p,
-            'significant': f_p < 0.05
-        }
-    
-    return results
+    mode_flags = [
+        groups is not None,
+        (landscapes is not None) and (value_fn is not None),
+        (landscape is not None) and (layer_names is not None) and (value_fn_layers is not None),
+    ]
+    if sum(bool(f) for f in mode_flags) != 1:
+        raise ValueError(
+            "Provide exactly ONE of: "
+            "(groups) OR (landscapes + value_fn) OR (landscape + layer_names + value_fn_layers)."
+        )
+
+    out: Dict[str, np.ndarray] = {}
+
+    if groups is not None:
+        for name, arr in groups.items():
+            x = np.asarray(arr, dtype=float).ravel()
+            out[name] = x[~np.isnan(x)]
+        return out
+
+    if (landscapes is not None) and (value_fn is not None):
+        for name, L in landscapes.items():
+            vec = np.asarray(value_fn(L), dtype=float).ravel()
+            out[name] = vec[~np.isnan(vec)]
+        return out
+
+    # landscape + layer_names + value_fn_layers
+    for lname in layer_names:
+        vec = np.asarray(value_fn_layers(landscape, lname), dtype=float).ravel()
+        out[lname] = vec[~np.isnan(vec)]
+    return out
 
 
-def bootstrap_analysis(landscape: FitnessLandscape,
-                       statistic_func: Any,
-                       n_bootstrap: int = 1000,
-                       **kwargs) -> Dict:
+def hypothesis_testing(*,
+                       groups: Optional[Dict[str, np.ndarray]] = None,
+                       landscapes: Optional[Mapping[str, FitnessLandscape]] = None,
+                       value_fn: Optional[Callable[[FitnessLandscape], np.ndarray]] = None,
+                       landscape: Optional[FitnessLandscape] = None,
+                       layer_names: Optional[Sequence[str]] = None,
+                       value_fn_layers: Optional[Callable[[FitnessLandscape, str], np.ndarray]] = None,
+                       alpha: float = 0.05,
+                       equal_var: bool = False,
+                       run_tests: Tuple[str, ...] = ("ttest", "mannwhitney", "ks")) -> Dict[str, Any]:
     """
-    Perform bootstrap analysis to estimate confidence intervals using a
-    statistic function.
-    
+    Pairwise hypothesis tests across groups of values. compares groups
+    of numerical values using standard statistical hypothesis tests
+    (t-test, Mann-Whitney U, Kolmogorov-Smirnov). Groups can be
+    provided directly as arrays, derived from multiple landscapes via a
+    user-defined function, or extracted from multiple fitness layers of
+    a single landscape.
+
     Parameters
     ----------
-    landscape : FitnessLandscape
-        Fitness landscape to analyze.
-    statistic_func : callable
-        Function that calculates a statistic from fitness values from a
-        single group.
-    n_bootstrap : int, optional
-        Number of bootstrap samples.
-    **kwargs
-        Additional parameters for statistic_func.
-        
+    groups : Dict[str, np.ndarray], optional
+        Dictionary mapping group names to 1D numerical arrays.
+        Each array is treated as one group's sample values.
+        Mutually exclusive with the other input modes.
+
+    landscapes : Mapping[str, FitnessLandscape], optional
+        Mapping from names to FitnessLandscape objects. Used together
+        with `value_fn` to extract numerical arrays from each landscape.
+
+    value_fn : Callable[[FitnessLandscape], np.ndarray], optional
+        Function that takes a landscape and returns a 1D array of values
+        (e.g. fitness values, spectral coefficients). Must be provided if
+        `landscapes` is used.
+
+    landscape : FitnessLandscape, optional
+        A single landscape containing multiple layers. Used together
+        with `layer_names` and `value_fn_layers` to extract values.
+
+    layer_names : Sequence[str], optional
+        Names of layers to extract from `landscape`.
+
+    value_fn_layers : Callable[[FitnessLandscape, str], np.ndarray], optional
+        Function that takes a landscape and layer name, and returns a
+        1D array of values for that layer.
+
+    alpha : float, default=0.05
+        Significance threshold for all hypothesis tests.
+
+    equal_var : bool, default=False
+        If True, assume equal variance in the independent t-test
+        (`scipy.stats.ttest_ind`). If False, Welch's t-test is used.
+
+    run_tests : Tuple[str], default=("ttest", "mannwhitney", "ks")
+        Tuple of test names to run. Supported values are:
+        - `"ttest"`: independent two-sample t-test
+        - `"mannwhitney"`: Mann-Whitney U test
+        - `"ks"`: two-sample Kolmogorov-Smirnov test
+
     Returns
     -------
-    dict
-        Bootstrap analysis results.
-    """
-    # Extract fitness values
-    fitness_values = np.array([landscape.get_fitness(seq) for seq in landscape.sequences])
-    
-    # Calculate observed statistic
-    observed = statistic_func(fitness_values, **kwargs)
-    
-    # Perform bootstrap
-    bootstrap_samples = []
-    
-    for _ in range(n_bootstrap):
-        # Sample with replacement
-        sample = np.random.choice(fitness_values, size=len(fitness_values), replace=True)
+    out : Dict[str, Any]
+        Dictionary with the following keys:
         
-        # Calculate statistic using the `statistic_func`.
-        stat = statistic_func(sample, **kwargs)
-        bootstrap_samples.append(stat)
-    
-    # Calculate confidence intervals
-    alpha = kwargs.get('alpha', 0.05)
-    lower = np.percentile(bootstrap_samples, alpha * 100 / 2)
-    upper = np.percentile(bootstrap_samples, 100 - alpha * 100 / 2)
-    
-    return {
-        'observed': observed,
-        'bootstrap_mean': np.mean(bootstrap_samples),
-        'bootstrap_std': np.std(bootstrap_samples),
-        'confidence_interval': [lower, upper],
-        'confidence_level': 1 - alpha,
-        'n_bootstrap': n_bootstrap
-    }
+        - `"group_stats"` : Dict[str, Dict]
+            Per-group descriptive statistics, including:
+            `mean`, `median`, `std`, `min`, `max`, `n`.
 
+        - `"pairwise_tests"` : Dict[str, Dict[str, Dict]]
+            Nested dictionary of results for each group pair. Each test
+            reports:
+                - `"statistic"` : float
+                - `"p_value"` : float
+                - `"significant"` : bool (p < alpha)
+    """
+    clean = _coerce_groups(
+        groups=groups,
+        landscapes=landscapes, value_fn=value_fn,
+        landscape=landscape, layer_names=layer_names, value_fn_layers=value_fn_layers,
+    )
 
-def permutation_test(landscape: FitnessLandscape,
-                     groups: Dict,
-                     statistic_func: Any,
+    # per-group stats
+    group_stats = {}
+    for name, x in clean.items():
+        group_stats[name] = {
+            'mean' : float(np.mean(x)) if x.size else np.nan,
+            'median': float(np.median(x)) if x.size else np.nan,
+            'std' : float(np.std(x, ddof=1)) if x.size > 1 else np.nan,
+            'min' : float(np.min(x)) if x.size else np.nan,
+            'max' : float(np.max(x)) if x.size else np.nan,
+            'n' : int(x.size),
+        }
+
+    # pairwise tests
+    pairwise = {}
+    names = list(clean.keys())
+    for a, b in combinations(names, 2):
+        x, y = clean[a], clean[b]
+        out = {}
+
+        if "ttest" in run_tests and x.size > 1 and y.size > 1:
+            t_stat, t_p = stats.ttest_ind(x, y, equal_var=equal_var)
+            out['t_test'] = {'statistic': float(t_stat), 'p_value': float(t_p), 'significant': bool(t_p < alpha)}
+
+        if "mannwhitney" in run_tests and x.size > 0 and y.size > 0:
+            u_stat, u_p = stats.mannwhitneyu(x, y, alternative="two-sided")
+            out['mann_whitney'] = {'statistic': float(u_stat), 'p_value': float(u_p), 'significant': bool(u_p < alpha)}
+
+        if "ks" in run_tests and x.size > 0 and y.size > 0:
+            ks_stat, ks_p = stats.ks_2samp(x, y, alternative="two-sided", mode="auto")
+            out['ks_test'] = {'statistic': float(ks_stat), 'p_value': float(ks_p), 'significant': bool(ks_p < alpha)}
+
+        pairwise.setdefault(a, {})[b] = out
+
+    return {'group_stats': group_stats, 'pairwise_tests': pairwise}
+
+def permutation_test(*,
+                     groups: Optional[Dict[str, np.ndarray]] = None,
+                     landscapes: Optional[Mapping[str, FitnessLandscape]] = None,
+                     value_fn: Optional[Callable[[FitnessLandscape], np.ndarray]] = None,
+                     landscape: Optional[FitnessLandscape] = None,
+                     layer_names: Optional[Sequence[str]] = None,
+                     value_fn_layers: Optional[Callable[[FitnessLandscape, str], np.ndarray]] = None,
+                     statistic_func: Callable[[np.ndarray, np.ndarray], float] = lambda a, b: float(np.mean(a) - np.mean(b)),
                      n_permutations: int = 1000,
-                     **kwargs) -> Dict:
+                     alpha: float = 0.05,
+                     alternative: str = "two-sided") -> Dict[Tuple[str, str], Dict[str, Any]]:
     """
-    Perform permutation test to assess significance between groups of
-    sequences provided as indices.
-    
+    Pairwise permutation tests across groups of values. Compares
+    groups of numerical values by estimating the
+    null distribution of a test statistic under random permutation of group
+    labels. Groups can be provided directly as arrays, derived from multiple
+    landscapes via a user-defined function, or extracted from multiple
+    fitness layers of a single landscape.
+
     Parameters
     ----------
-    landscape : FitnessLandscape
-        Fitness landscape to analyze.
-    groups : dict
-        Dictionary mapping group names to lists of sequence indices.
-    statistic_func : callable
-        Function that calculates a test statistic from two groups.
-    n_permutations : int, optional
-        Number of permutations.
-    **kwargs
-        Additional parameters for statistic_func.
-        
+    groups : Dict[str, np.ndarray], optional
+        Dictionary mapping group names to 1D numerical arrays.
+        Each array is treated as one group's sample values.
+        Mutually exclusive with the other input modes.
+
+    landscapes : Mapping[str, FitnessLandscape], optional
+        Mapping from names to FitnessLandscape objects. Used together
+        with `value_fn` to extract numerical arrays from each landscape.
+
+    value_fn : Callable[[FitnessLandscape], np.ndarray], optional
+        Function that takes a landscape and returns a 1D array of values
+        (e.g. fitness values, spectral coefficients). Must be provided if
+        `landscapes` is used.
+
+    landscape : FitnessLandscape, optional
+        A single landscape containing multiple layers. Used together
+        with `layer_names` and `value_fn_layers` to extract values.
+
+    layer_names : Sequence[str], optional
+        Names of layers to extract from `landscape`.
+
+    value_fn_layers : Callable[[FitnessLandscape, str], np.ndarray], optional
+        Function that takes a landscape and layer name, and returns a
+        1D array of values for that layer.
+
+    
+    n_permutations : int, default=1000
+        Number of random permutations of group labels to perform.
+
+    alpha : float, default=0.05
+        Significance threshold for determining whether observed
+        statistics differ from the permutation null distribution.
+
+    equal_var : bool, default=False
+        Placeholder for compatibility with `hypothesis_testing`.
+        Does not affect permutation tests, unless the provided
+        `statistic_func` explicitly uses it.
+
+    run_tests : Tuple[str], optional
+        Optional names of test variants to run in parallel. 
+        If provided, must correspond to keys in a registry of
+        `statistic_func` implementations.
+
+    alternative : {"two_sided", "greater", "less"}, default="two_sided"
+        Defines the alternative hypothesis for p-value computation:
+        - `"two_sided"` : p-value is proportion of permuted statistics
+          at least as extreme as the observed (absolute) statistic.
+        - `"greater"` : p-value is proportion of permuted statistics
+          greater than or equal to the observed statistic.
+        - `"less"` : p-value is proportion of permuted statistics
+          less than or equal to the observed statistic.
+
     Returns
     -------
-    dict
-        Permutation test results.
+    out : Dict[str, Any]
+        Dictionary with the following keys:
+
+        - `"group_stats"` : Dict[str, Dict]
+            Per-group descriptive statistics, including:
+            `mean`, `median`, `std`, `min`, `max`, `n`.
+
+        - `"pairwise_tests"` : Dict[str, Dict[str, Dict]]
+            Nested dictionary of results for each group pair. Each test
+            reports:
+                - `"observed_statistic"` : float
+                - `"p_value"` : float
+                - `"significant"` : bool (p < alpha)
+                - `"null_distribution"` : np.ndarray of permuted statistics
     """
-    # Extract fitness values
-    all_fitness = np.array([landscape.get_fitness(seq) for seq in landscape.sequences])
-    
-    # Extract fitness values for each group
-    group_names = list(groups.keys())
-    
-    if len(group_names) != 2:
-        raise ValueError("Permutation test requires exactly 2 groups")
-    
-    group1_name, group2_name = group_names
-    group1_fitness = all_fitness[groups[group1_name]]
-    group2_fitness = all_fitness[groups[group2_name]]
-    
-    # Calculate observed statistic
-    observed = statistic_func(group1_fitness, group2_fitness, **kwargs)
-    
-    # Combine groups
-    combined = np.concatenate([group1_fitness, group2_fitness])
-    n1, n2 = len(group1_fitness), len(group2_fitness)
-    
-    # Perform permutation test
-    permutation_samples = []
-    
-    for _ in range(n_permutations):
-        # Shuffle combined data
-        np.random.shuffle(combined)
-        
-        # Split into two groups
-        perm_group1 = combined[:n1]
-        perm_group2 = combined[n1:]
-        
-        # Calculate statistic
-        stat = statistic_func(perm_group1, perm_group2, **kwargs)
-        permutation_samples.append(stat)
-    
-    # Calculate p-value
-    if kwargs.get('alternative', 'two-sided') == 'two-sided':
-        p_value = np.mean(np.abs(permutation_samples) >= np.abs(observed))
-    elif kwargs.get('alternative', 'two-sided') == 'greater':
-        p_value = np.mean(permutation_samples >= observed)
-    else:  # 'less'
-        p_value = np.mean(permutation_samples <= observed)
-    
-    return {
-        'observed': observed,
-        'p_value': p_value,
-        'significant': p_value < kwargs.get('alpha', 0.05),
-        'n_permutations': n_permutations,
-        'group1_name': group1_name,
-        'group2_name': group2_name,
-        'group1_size': n1,
-        'group2_size': n2,
-        'alternative': kwargs.get('alternative', 'two-sided')
-    }
+    clean = _coerce_groups(
+        groups=groups,
+        landscapes=landscapes, value_fn=value_fn,
+        landscape=landscape, layer_names=layer_names, value_fn_layers=value_fn_layers,
+    )
+
+    results: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    names = list(clean.keys())
+
+    rng = np.random.default_rng()
+    for a, b in combinations(names, 2):
+        x, y = clean[a], clean[b]
+        if x.size == 0 or y.size == 0:
+            results[(a, b)] = {
+                'observed': np.nan, 'p_value': np.nan, 'significant': False,
+                'n_permutations': n_permutations, 'alternative': alternative
+            }
+            continue
+
+        observed = float(statistic_func(x, y))
+
+        pooled = np.concatenate([x, y])
+        n1 = x.size
+        perm_stats = np.empty(n_permutations, dtype=float)
+
+        for i in range(n_permutations):
+            rng.shuffle(pooled)
+            perm_stats[i] = statistic_func(pooled[:n1], pooled[n1:])
+
+        if alternative == "two-sided":
+            p = float(np.mean(np.abs(perm_stats) >= abs(observed)))
+        elif alternative == "greater":
+            p = float(np.mean(perm_stats >= observed))
+        else:  # 'less'
+            p = float(np.mean(perm_stats <= observed))
+
+        results[(a, b)] = {
+            'observed': observed,
+            'p_value': p,
+            'significant': bool(p < alpha),
+            'n_permutations': n_permutations,
+            'alternative': alternative,
+        }
+
+    return results
