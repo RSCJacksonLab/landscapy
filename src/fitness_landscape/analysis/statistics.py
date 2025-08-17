@@ -1,6 +1,6 @@
 import numpy as np
 import scipy.stats as stats
-from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable
+from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Mapping, Sequence
 from ..core.landscape import FitnessLandscape
 from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet
 from sklearn.model_selection import train_test_split, cross_val_score
