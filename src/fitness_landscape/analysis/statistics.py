@@ -1,3 +1,4 @@
+from itertools import combinations
 import numpy as np
 import scipy.stats as stats
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Mapping, Sequence
@@ -331,20 +332,13 @@ def permutation_test(*,
 
     Returns
     -------
-    out : Dict[str, Any]
-        Dictionary with the following keys:
-
-        - `"group_stats"` : Dict[str, Dict]
-            Per-group descriptive statistics, including:
-            `mean`, `median`, `std`, `min`, `max`, `n`.
-
-        - `"pairwise_tests"` : Dict[str, Dict[str, Dict]]
-            Nested dictionary of results for each group pair. Each test
-            reports:
-                - `"observed_statistic"` : float
-                - `"p_value"` : float
-                - `"significant"` : bool (p < alpha)
-                - `"null_distribution"` : np.ndarray of permuted statistics
+    results : Dict[Tuple[str, str], Dict[str, Any]]
+        A mapping from (group_name_a, group_name_b) -> result dict with:
+            - "observed": float
+            - "p_value": float
+            - "significant": bool  (p_value < alpha)
+            - "n_permutations": int
+            - "alternative": str
     """
     clean = _coerce_groups(
         groups=groups,
