@@ -8,7 +8,6 @@ from scipy.sparse.csgraph import minimum_spanning_tree
 from .core.sequence import BaseNumpySequence, SoftSequence
 from dataclasses import dataclass
 
-
 from ._const import ALPHABET_21, PROT_20
 from cogent3 import ArrayAlignment, make_aligned_seqs, ArrayAlignment 
 
@@ -185,7 +184,9 @@ def make_latent_geometric_graph_connected(n_latent: int = 120,
 def sample_observed_induced_connected(G_lat: nx.Graph,
                                       node_keep: float = 0.6,
                                       edge_keep: float = 0.6,
-                                      seed: int = None) -> nx.Graph:
+                                      seed: int = None,
+                                      *, 
+                                      return_graph: bool = False,) -> Union[nx.Graph, 'FitessLandscape']:
     """
     Util function to induce a connected subgraph from a latent graph.
 
@@ -205,7 +206,20 @@ def sample_observed_induced_connected(G_lat: nx.Graph,
     G_obs : nx.Graph
         The connected induced graph with edge weights preserved from
         the latent graph. 
-    """
+    """    
+    # Dependency injection is the only option.. 
+    from .core import FitnessLandscape
+    
+    if isinstance(G_lat, nx.Graph):
+        L = None
+        G_lat = G_lat
+
+    # If not graph, must be FitnessLanscape // avoid import as leads to partially init module.        
+    else:
+        L = G_lat
+        G_lat = L.graph
+
+
     if not nx.is_connected(G_lat):
         raise ValueError("G_lat must be connected.")
 
@@ -214,9 +228,9 @@ def sample_observed_induced_connected(G_lat: nx.Graph,
     target = max(2, int(np.ceil(node_keep * n)))
 
     nodes = list(G_lat.nodes())
-    start = int(rng.integers(low=0, high=n))
-    start_node = nodes[start]
+    start_node = nodes[int(rng.integers(low=0, high=n))]
 
+    # BFS-like growth until we hit the target number of nodes
     visited = {start_node}
     frontier = [start_node]
     while len(visited) < target and frontier:
@@ -227,6 +241,8 @@ def sample_observed_induced_connected(G_lat: nx.Graph,
                 frontier.append(v)
             if len(visited) >= target:
                 break
+
+    # If still short, greedily add nearest-by-shortest-path nodes
     if len(visited) < target:
         remaining = [x for x in nodes if x not in visited]
         spd = nx.single_source_dijkstra_path_length(G_lat, start_node, weight='weight')
@@ -239,18 +255,23 @@ def sample_observed_induced_connected(G_lat: nx.Graph,
     sub_nodes = list(visited)
     G_obs_full = G_lat.subgraph(sub_nodes).copy()
 
+    # Ensure every sampled edge has a weight if possible
     for (u, v) in G_obs_full.edges():
         if 'weight' not in G_obs_full[u][v]:
-            pu = np.asarray(G_lat.nodes[u]['pos']); pv = np.asarray(G_lat.nodes[v]['pos'])
-            G_obs_full[u][v]['weight'] = float(np.linalg.norm(pu - pv))
+            pu = G_lat.nodes[u].get('pos', None)
+            pv = G_lat.nodes[v].get('pos', None)
+            if pu is not None and pv is not None:
+                pu = np.asarray(pu); pv = np.asarray(pv)
+                G_obs_full[u][v]['weight'] = float(np.linalg.norm(pu - pv))
 
+    # Keep MST edges to guarantee connectivity, then thin remnant edges
     if G_obs_full.number_of_edges() > 0:
         mst_obs = nx.minimum_spanning_tree(G_obs_full, weight='weight')
     else:
         mst_obs = G_obs_full.copy()
 
     G_obs = mst_obs.copy()
-    mst_edge_set = set(map(lambda e: tuple(sorted(e)), mst_obs.edges()))
+    mst_edge_set = set(tuple(sorted(e)) for e in mst_obs.edges())
     for (u, v) in G_obs_full.edges():
         key = tuple(sorted((u, v)))
         if key in mst_edge_set:
@@ -259,11 +280,51 @@ def sample_observed_induced_connected(G_lat: nx.Graph,
             G_obs.add_edge(u, v, **G_obs_full[u][v])
 
     if not nx.is_connected(G_obs):
-        # fallback: just return MST (connected)
+        # Fallback: MST is connected by construction
         G_obs = mst_obs
 
-    return G_obs
+    # If the caller gave us a Landscape, annotate nodes with layer values and
+    if L is not None:
+        seq_to_idx = {tuple(seq.to_array()): i for i, seq in enumerate(L.sequences)}
+        numeric_layers = []
+        layer_arrays = {}
+        for lname, layer in L.fitness_layers.items():
+            if getattr(layer, "dtype", None) == "numeric":
+                numeric_layers.append(lname)
+                layer_arrays[lname] = layer.to_scalar()
 
+        # Copy/ensure required node attributes
+        for node, data in G_obs.nodes(data=True):
+            # Ensure 'sequence' present (copy from original)
+            if 'sequence' not in data:
+                orig_seq = G_lat.nodes[node].get('sequence', None)
+                if orig_seq is None:
+                    raise ValueError("Subgraph node missing 'sequence'; cannot build FitnessLandscape.")
+                data['sequence'] = orig_seq
+
+            tup = tuple(data['sequence'].to_array())
+            idx = seq_to_idx.get(tup, None)
+            if idx is None:
+                raise ValueError("Subgraph node's sequence not found in parent landscape.")
+
+            # Attach per-layer scalars
+            for lname in numeric_layers:
+                data[f"fitness_{lname}"] = float(layer_arrays[lname][idx])
+
+            # Stub arrays some pipelines expect
+            data.setdefault("gapped_arr", np.zeros((1, 21)))
+            data.setdefault("ungapped_arr", np.zeros((1, 20)))
+
+        if return_graph:
+            return G_obs
+
+        # Build and return the sub-landscape (edges preserved verbatim)
+        G_obs = nx.convert_node_labels_to_integers(G_obs, ordering="sorted")
+        subL = FitnessLandscape.from_graph(G_obs, emb_nodes=False)
+        return subL
+
+    # Bare graph path
+    return G_obs
 
 #TODO: def reorder sequence from one alphabet to new alphabet.
 

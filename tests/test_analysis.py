@@ -1298,3 +1298,88 @@ def test_permutation_test_on_layers(two_layer_additive):
     for key in ["observed", "p_value", "significant", "n_permutations", "alternative"]:
         assert key in out
     assert out["significant"] in (True, False)
+
+def test_subsample_scalar_dirichlet_energy_structure(additive_landscape):
+    """
+    subsample_analysis should handle a scalar-returning analysis_fn and
+    return a 'samples' list and a 'summary' dict with mean/std/ci.
+    """
+    out = subsample_analysis(
+        landscape=additive_landscape,
+        analysis_fn=lambda L: calculate_ruggedness_dirichlet_energy(L)["total_dirichlet_energy"],
+        n_samples=25,
+        subsample_node_prop=0.9,
+        subsample_edge_prop=0.9,
+        seed=123,  # if your subsampler accepts seed; otherwise drop
+    )
+
+    assert "results" in out and isinstance(out["results"], list)
+    assert len(out["results"]) == 25
+    assert all(np.isscalar(x) for x in out["results"])
+
+    assert "summary" in out and isinstance(out["summary"], dict)
+    for k in ["mean", "std", "ci_low", "ci_high", "alpha"]:
+        assert k in out["summary"]
+
+    # Energy should be finite and non-negative
+    assert np.isfinite(out["summary"]["mean"])
+    assert out["summary"]["mean"] >= 0.0
+
+
+def test_subsample_dict_dirichlet_energy_aggregation(additive_landscape):
+    """
+    If analysis_fn returns a dict of numeric metrics, subsample_analysis
+    should report 'per_key' aggregation with per-metric summary stats.
+    """
+    out = subsample_analysis(
+        landscape=additive_landscape,
+        analysis_fn=lambda L: calculate_ruggedness_dirichlet_energy(L, weighted_laplacian=True),
+        n_samples=15,
+        subsample_node_prop=0.8,
+        subsample_edge_prop=0.8,
+        seed=7,
+    )
+
+    assert "per_key" in out and isinstance(out["per_key"], dict)
+    # At minimum we expect total_dirichlet_energy aggregated
+    assert "total_dirichlet_energy" in out["per_key"]
+    per = out["per_key"]["total_dirichlet_energy"]
+    for k in ["mean", "std", "ci_low", "ci_high", "alpha"]:
+        assert k in per
+
+def test_subsample_node_fraction_tracks_keep(additive_landscape):
+    """
+    If we use analysis_fn that returns number of nodes, the average of the
+    subsample should be close to node_keep * N.
+    """
+    N = additive_landscape.graph.number_of_nodes()
+
+    node_keep = 0.5
+    out = subsample_analysis(
+        landscape=additive_landscape,
+        analysis_fn=lambda L: L.graph.number_of_nodes(),
+        n_samples=40,
+        subsample_node_prop=node_keep,
+        subsample_edge_prop=0.9,
+        seed=2024,
+    )
+
+    avg_nodes = out["summary"]["mean"]
+    # Within a reasonable tolerance of node_keep * N
+    assert np.isclose(avg_nodes, node_keep * N, rtol=0.15, atol=1.0)
+
+def test_subsample_local_dirichlet_mean(additive_landscape):
+    """
+    Show that vector outputs can be reduced in the lambda (mean over nodes).
+    """
+    out = subsample_analysis(
+        landscape=additive_landscape,
+        analysis_fn=lambda L: float(np.mean(list(local_dirichlet_energy_contribution(L).values()))),
+        n_samples=20,
+        subsample_node_prop=0.85,
+        subsample_edge_prop=0.9,
+        seed=11,
+    )
+
+    assert "results" in out and len(out["results"]) == 20
+    assert np.isfinite(out["summary"]["mean"])

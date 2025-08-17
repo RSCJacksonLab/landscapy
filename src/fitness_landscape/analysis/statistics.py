@@ -6,6 +6,7 @@ from ..core.landscape import FitnessLandscape
 from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.metrics import mean_squared_error, r2_score
+from ..utils import sample_observed_induced_connected
 
 def analyze_fitness_distribution(landscape: FitnessLandscape,
                                  **kwargs) -> Dict:
@@ -385,3 +386,119 @@ def permutation_test(*,
         }
 
     return results
+
+def subsample_analysis(landscape: FitnessLandscape,
+                       analysis_fn: Callable[FitnessLandscape, Any],
+                       n_samples: int = 100,
+                       subsample_node_prop: float = 0.9,
+                       subsample_edge_prop: float = 0.9,
+                       seed: int = None,
+                       layer_name: Optional[str] = None) -> Dict:
+    """
+    Function to subsample a fitness landscape object into connected
+    component subgraphs and compute an analysis function. Edges are not
+    recomputed on subsampled nodes and all subgraphs used in sampling
+    are subgraphs of the intput fitness landscape. 
+
+    Parameters
+    ----------
+    landscape : FitnessLandscape
+        The fitness landscape to analyze. 
+    
+    analysis_fn : Callable
+        The analysis function to call on the subsampled fitness
+        landscape graphs. 
+    
+    n_samples : int, default=100
+        The number of subsamples to draw. 
+    
+    subsample_node_prop: float, default=0.9
+        The proportion of nodes in `landscape` that are subsampled in
+        each induced subgraph. 
+    
+    subsample_edge_prop: float, default=0.9
+        The proportion of edges in `landscape` that are subsampled in
+        each induced subgraph. 
+    """
+    rng = np.random.default_rng(seed)
+    results: list[Any] = []
+
+    for i in range(n_samples):
+        sub_seed = int(rng.integers(0, 2**63 - 1))
+        subL = sample_observed_induced_connected(
+            landscape,
+            node_keep=subsample_node_prop,
+            edge_keep=subsample_edge_prop,
+            seed=sub_seed,
+            return_graph=False,
+        )
+        if layer_name is not None:
+            # No-op if it's already active; raises if the name is invalid
+            subL.view(layer_name)
+
+        out = analysis_fn(subL)
+        results.append(out)
+
+    # Aggregation helpers
+    def _is_scalar_list(xs: Sequence[Any]) -> bool:
+        try:
+            arr = np.asarray(xs, dtype=float)
+            return arr.ndim == 1 and arr.size == len(xs)
+        except Exception:
+            return False
+
+    def _summarize_arr(arr: np.ndarray, alpha: float = 0.05) -> Dict[str, float]:
+        lo = 100.0 * (alpha / 2.0)
+        hi = 100.0 * (1.0 - alpha / 2.0)
+        return {
+            "mean": float(np.mean(arr)),
+            "std": float(np.std(arr, ddof=1)) if arr.size > 1 else 0.0,
+            "ci_low": float(np.percentile(arr, lo)),
+            "ci_high": float(np.percentile(arr, hi)),
+            "alpha": alpha,
+        }
+
+    # scalar outputs easiest, summarize directly
+    if _is_scalar_list(results):
+        arr = np.asarray(results, dtype=float)
+        return {
+            "results": results,
+            "summary": _summarize_arr(arr, alpha=0.05),
+        }
+
+    # dict-of-numerics outputs with consistent keys, harder per-key summary
+    if all(isinstance(r, dict) for r in results):
+        # find common keys across all dicts
+        keys = set(results[0].keys())
+        for r in results[1:]:
+            keys &= set(r.keys())
+        # keep only numeric keys
+        per_key_samples: Dict[str, list[float]] = {k: [] for k in keys}
+        for r in results:
+            for k in list(per_key_samples.keys()):
+                v = r.get(k, None)
+                try:
+                    per_key_samples[k].append(float(v))
+                except Exception:
+                    # Not numeric → drop this key from aggregation
+                    per_key_samples.pop(k, None)
+
+        per_key_summary: Dict[str, Dict[str, Any]] = {}
+        for k, vals in per_key_samples.items():
+            arr = np.asarray(vals, dtype=float)
+            per_key_summary[k] = {
+                **_summarize_arr(arr, alpha=0.05),
+                "samples": vals,
+            }
+
+        # If nothing numeric return raw results.
+        if not per_key_summary:
+            return {"results": results}
+
+        return {
+            "results": results,
+            "per_key": per_key_summary,
+        }
+
+    # Fallback on heterogeneous or non-numeric outputs and return raw list.
+    return {"results": results}
