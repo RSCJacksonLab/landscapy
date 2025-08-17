@@ -40,6 +40,62 @@ from fitness_landscape.utils import make_latent_geometric_graph_connected, sampl
 from scipy.sparse import issparse
 
 
+
+def _make_landscape_from_values(values, name="default"):
+    """
+    Build a tiny landscape with N=4 (16 nodes) and a single numeric layer
+    from a 1D array `values` of length 16.
+    """
+    assert values.ndim == 1
+    sequences = generate_sequences(length=4, alphabet=[0, 1])
+    fitness_values = [[float(v)] for v in values]
+    fitness_layers = {name: NumericFitness(name=name, values=fitness_values)}
+    return FitnessLandscape.from_sequences(
+        sequences=sequences,
+        fitness_layers=fitness_layers,
+        graph_type="hamming",
+    )
+
+@pytest.fixture
+def two_groups_far_apart():
+    rng = np.random.default_rng(123)
+    a = rng.normal(loc=0.0, scale=1.0, size=200)
+    b = rng.normal(loc=1.5, scale=1.0, size=200)
+    return {"A": a, "B": b}
+
+@pytest.fixture
+def two_groups_equal():
+    rng = np.random.default_rng(456)
+    a = rng.normal(loc=0.5, scale=1.0, size=200)
+    b = rng.normal(loc=0.5, scale=1.0, size=200)
+    return {"A": a, "B": b}
+
+@pytest.fixture
+def two_landscapes_different():
+    rng = np.random.default_rng(7)
+    x = rng.normal(0.0, 1.0, size=16)
+    y = x + 1.2  # strong shift to ensure significance
+    L1 = _make_landscape_from_values(x, name="default")
+    L2 = _make_landscape_from_values(y, name="default")
+    return {"L1": L1, "L2": L2}
+
+@pytest.fixture
+def one_landscape_two_layers():
+    rng = np.random.default_rng(8)
+    base = rng.normal(0.0, 1.0, size=16)
+    alt  = 1.0 + 1.1 * base
+
+    sequences = generate_sequences(length=4, alphabet=[0, 1])
+    layer1 = NumericFitness(name="default", values=[[float(v)] for v in base])
+    layer2 = NumericFitness(name="copy",    values=[[float(v)] for v in alt])
+    L = FitnessLandscape.from_sequences(
+        sequences=sequences,
+        fitness_layers={"default": layer1, "copy": layer2},
+        graph_type="hamming",
+    )
+    return L
+
+
 @pytest.fixture
 def cubic_only_landscape():
     """
@@ -676,81 +732,6 @@ def test_analyze_fitness_distribution(additive_landscape: additive_landscape):
     assert results['normality_test']['is_normal'] == True
     assert results['mean'] == pytest.approx(0.5, abs=0.1)
 
-def test_hypothesis_testing(additive_landscape: additive_landscape):
-    """
-    Tests that hypothesis testing correctly identifies a significant
-    difference between two distinct groups of sequences.
-
-    Parameters
-    ----------
-    additive_landscape : NKFitnessLandscape
-        A purely additive landscape (K=0).
-    Raises
-    ------
-    AssertionError
-        If the t-test does not find a significant difference between
-        the two groups.
-    """
-    group1_indices = [i for i, seq in enumerate(additive_landscape.sequences) if np.sum(seq.to_array().astype(int)) <= 1]
-    group2_indices = [i for i, seq in enumerate(additive_landscape.sequences) if np.sum(seq.to_array().astype(int)) >= 3]
-    
-    groups = {'high_fitness': group1_indices, 'low_fitness': group2_indices}
-    
-    results = hypothesis_testing(additive_landscape, groups)
-    
-    ttest_results = results['pairwise_tests']['high_fitness']['low_fitness']['t_test']
-    assert ttest_results['significant'] == True
-    assert ttest_results['p_value'] < 0.05
-
-def test_bootstrap_analysis(additive_landscape: additive_landscape):
-    """
-    Tests that bootstrap analysis produces a confidence interval that
-    contains the observed statistic.
-
-    Parameters
-    ----------
-    additive_landscape : NKFitnessLandscape
-        A purely additive landscape (K=0).
-    Raises
-    ------
-    AssertionError
-        If the confidence interval does not contain the observed mean.
-    """
-    # Bootstrap the mean of the fitness distribution
-    results = bootstrap_analysis(additive_landscape, statistic_func=np.mean, n_bootstrap=100)
-    
-    observed_mean = results['observed']
-    lower_ci, upper_ci = results['confidence_interval']
-    
-    assert lower_ci <= observed_mean <= upper_ci
-
-def test_permutation_test(additive_landscape: additive_landscape):
-    """
-    Tests that a permutation test confirms the significant difference
-    found by the standard hypothesis test.
-
-    Parameters
-    ----------
-    additive_landscape : NKFitnessLandscape
-        A purely additive landscape (K=0).
-    Raises
-    ------
-    AssertionError
-        If the permutation test does not confirm the significance of
-        the difference between the two groups.
-    """
-    # CORRECTED: Adjusted group definitions for an N=4 landscape.
-    group1_indices = [i for i, seq in enumerate(additive_landscape.sequences) if np.sum(seq.to_array().astype(int)) <= 1]
-    group2_indices = [i for i, seq in enumerate(additive_landscape.sequences) if np.sum(seq.to_array().astype(int)) >= 3]
-    groups = {'high_fitness': group1_indices, 'low_fitness': group2_indices}
-    
-    def diff_in_means(a, b):
-        return np.mean(a) - np.mean(b)
-        
-    results = permutation_test(additive_landscape, groups, statistic_func=diff_in_means, n_permutations=500)
-    
-    assert results['significant'] == True
-    assert results['p_value'] < 0.05
 
 def test_vietoris_rips_complex(homology_landscape):
     """Tests the Vietoris-Rips complex computation."""
@@ -1186,3 +1167,219 @@ def test_coherence_gft_with_phase(simple_gft_landscape):
     assert len(res['phase']) == len(res['coherence'])
     for ph, coh in zip(res['phase'], res['coherence']):
         assert ph.shape == coh.shape
+
+def test_hypothesis_testing_on_groups(two_groups_far_apart):
+    res = hypothesis_testing(groups=two_groups_far_apart)
+    # structure
+    assert "group_stats" in res and "pairwise_tests" in res
+    # significance (t-test, U, KS should all be significant for far apart groups)
+    pair = res["pairwise_tests"]["A"]["B"]
+    assert pair["t_test"]["significant"]
+    assert pair["mann_whitney"]["significant"]
+    assert pair["ks_test"]["significant"]
+
+def test_hypothesis_testing_on_groups_nonsignificant(two_groups_equal):
+    res = hypothesis_testing(groups=two_groups_equal)
+    pair = res["pairwise_tests"]["A"]["B"]
+    # at least t-test should be non-significant
+    assert not pair["t_test"]["significant"]
+
+def test_hypothesis_testing_on_landscapes(two_landscapes_different):
+    # value_fn extracts the active layer's scalar signal
+    def value_fn(L):
+        return L.get_signal().astype(float)
+
+    res = hypothesis_testing(landscapes=two_landscapes_different, value_fn=value_fn)
+    assert "group_stats" in res and "pairwise_tests" in res
+    pair = res["pairwise_tests"]["L1"]["L2"]
+    assert pair["t_test"]["significant"]
+
+def test_hypothesis_testing_on_layers(one_landscape_two_layers):
+    L = one_landscape_two_layers
+
+    def value_fn_layers(landscape, layer_name):
+        # switch active layer and read scalars
+        prev = landscape._active_view_name
+        try:
+            landscape.view(layer_name)
+            return landscape.active_layer.to_scalar().astype(float)
+        finally:
+            if prev is not None and prev in landscape.fitness_layers:
+                landscape.view(prev)
+
+    res = hypothesis_testing(
+        landscape=L,
+        layer_names=["default", "copy"],
+        value_fn_layers=value_fn_layers,
+    )
+    assert "pairwise_tests" in res
+    assert res["pairwise_tests"]["default"]["copy"]["t_test"]["significant"]
+
+def test_hypothesis_testing_raises_on_conflicting_inputs(two_groups_far_apart, two_landscapes_different):
+    # Passing groups and landscapes together should raise
+    with pytest.raises(ValueError):
+        hypothesis_testing(groups=two_groups_far_apart,
+                           landscapes=two_landscapes_different,
+                           value_fn=lambda L: L.get_signal())
+
+
+
+def _value_fn_layers(L: FitnessLandscape, lname: str) -> np.ndarray:
+    return L.get_layer(lname).to_scalar()
+
+def _value_fn_landscape(L: FitnessLandscape) -> np.ndarray:
+    # Use the landscape's active layer (default)
+    return L.active_layer.to_scalar()
+
+# --- Tests ---
+
+def test_permutation_test_on_groups_two_sided():
+    rng = np.random.default_rng(42)
+    g1 = rng.normal(0.0, 1.0, size=200)
+    g2 = rng.normal(0.5, 1.0, size=200)
+
+    res = permutation_test(groups={"A": g1, "B": g2}, n_permutations=1000, alpha=0.05, alternative="two-sided")
+    out = res[("A", "B")]
+
+    assert "observed" in out and "p_value" in out and "significant" in out
+    assert out["p_value"] <= 0.05
+    assert out["significant"] is True
+
+def test_permutation_test_on_groups_directional():
+    rng = np.random.default_rng(123)
+    g1 = rng.normal(0.0, 1.0, size=300)
+    g2 = rng.normal(0.5, 1.0, size=300)
+
+    # statistic_func = mean(g1) - mean(g2), so we expect it to be negative on average.
+    stat = lambda a, b: float(np.mean(a) - np.mean(b))
+
+    # "less": mean(g1)-mean(g2) is often < 0, so p should be small and significant True.
+    res = permutation_test(groups={"A": g1, "B": g2}, statistic_func=stat, n_permutations=1000, alpha=0.05, alternative="less")
+    out = res[("A", "B")]
+
+    assert out["observed"] < 0.0
+    assert out["p_value"] <= 0.05
+    assert out["significant"] is True
+
+def test_permutation_test_nonsignificant():
+    rng = np.random.default_rng(7)
+    g1 = rng.normal(1.0, 1.0, size=250)
+    g2 = rng.normal(1.0, 1.0, size=250)
+
+    res = permutation_test(groups={"A": g1, "B": g2}, n_permutations=800, alpha=0.05, alternative="two-sided")
+    out = res[("A", "B")]
+
+    assert out["p_value"] > 0.05
+    assert out["significant"] is False
+
+def test_permutation_test_on_landscapes(additive_landscape, epistatic_landscape):
+    # Structure check: ensure we return an entry for the pair and the keys exist.
+    landscapes = {
+        "add": additive_landscape,
+        "epi": epistatic_landscape,
+    }
+    res = permutation_test(landscapes=landscapes, value_fn=_value_fn_landscape, n_permutations=100, alpha=0.05)
+    assert ("add", "epi") in res
+    out = res[("add", "epi")]
+    for key in ["observed", "p_value", "significant", "n_permutations", "alternative"]:
+        assert key in out
+
+def test_permutation_test_on_layers(two_layer_additive):
+    # Compare default vs copy layer. Means differ -> often significant.
+    res = permutation_test(
+        landscape=two_layer_additive,
+        layer_names=["default", "copy"],
+        value_fn_layers=_value_fn_layers,
+        n_permutations=500,
+        alpha=0.05,
+        alternative="two-sided",
+    )
+    out = res[("default", "copy")]
+    for key in ["observed", "p_value", "significant", "n_permutations", "alternative"]:
+        assert key in out
+    assert out["significant"] in (True, False)
+
+def test_subsample_scalar_dirichlet_energy_structure(additive_landscape):
+    """
+    subsample_analysis should handle a scalar-returning analysis_fn and
+    return a 'samples' list and a 'summary' dict with mean/std/ci.
+    """
+    out = subsample_analysis(
+        landscape=additive_landscape,
+        analysis_fn=lambda L: calculate_ruggedness_dirichlet_energy(L)["total_dirichlet_energy"],
+        n_samples=25,
+        subsample_node_prop=0.9,
+        subsample_edge_prop=0.9,
+        seed=123,  # if your subsampler accepts seed; otherwise drop
+    )
+
+    assert "results" in out and isinstance(out["results"], list)
+    assert len(out["results"]) == 25
+    assert all(np.isscalar(x) for x in out["results"])
+
+    assert "summary" in out and isinstance(out["summary"], dict)
+    for k in ["mean", "std", "ci_low", "ci_high", "alpha"]:
+        assert k in out["summary"]
+
+    # Energy should be finite and non-negative
+    assert np.isfinite(out["summary"]["mean"])
+    assert out["summary"]["mean"] >= 0.0
+
+
+def test_subsample_dict_dirichlet_energy_aggregation(additive_landscape):
+    """
+    If analysis_fn returns a dict of numeric metrics, subsample_analysis
+    should report 'per_key' aggregation with per-metric summary stats.
+    """
+    out = subsample_analysis(
+        landscape=additive_landscape,
+        analysis_fn=lambda L: calculate_ruggedness_dirichlet_energy(L, weighted_laplacian=True),
+        n_samples=15,
+        subsample_node_prop=0.8,
+        subsample_edge_prop=0.8,
+        seed=7,
+    )
+
+    assert "per_key" in out and isinstance(out["per_key"], dict)
+    # At minimum we expect total_dirichlet_energy aggregated
+    assert "total_dirichlet_energy" in out["per_key"]
+    per = out["per_key"]["total_dirichlet_energy"]
+    for k in ["mean", "std", "ci_low", "ci_high", "alpha"]:
+        assert k in per
+
+def test_subsample_node_fraction_tracks_keep(additive_landscape):
+    """
+    If we use analysis_fn that returns number of nodes, the average of the
+    subsample should be close to node_keep * N.
+    """
+    N = additive_landscape.graph.number_of_nodes()
+
+    node_keep = 0.5
+    out = subsample_analysis(
+        landscape=additive_landscape,
+        analysis_fn=lambda L: L.graph.number_of_nodes(),
+        n_samples=40,
+        subsample_node_prop=node_keep,
+        subsample_edge_prop=0.9,
+        seed=2024,
+    )
+
+    avg_nodes = out["summary"]["mean"]
+    # Within a reasonable tolerance of node_keep * N
+    assert np.isclose(avg_nodes, node_keep * N, rtol=0.15, atol=1.0)
+
+def test_subsample_local_dirichlet_mean(additive_landscape):
+    """
+    Show that vector outputs can be reduced in the lambda (mean over nodes).
+    """
+    out = subsample_analysis(
+        landscape=additive_landscape,
+        analysis_fn=lambda L: float(np.mean(list(local_dirichlet_energy_contribution(L).values()))),
+        n_samples=20,
+        subsample_node_prop=0.85,
+        subsample_edge_prop=0.9,
+        seed=11,
+    )
+
+    assert "results" in out and len(out["results"]) == 20
+    assert np.isfinite(out["summary"]["mean"])
