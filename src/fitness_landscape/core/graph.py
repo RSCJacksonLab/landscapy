@@ -1,7 +1,7 @@
 import numpy as np
 import networkx as nx
 from typing import List, Union, Literal
-from .sequence import BaseNumpySequence, sequence_distance, SoftSequence
+from .sequence import BaseNumpySequence, BinarySequence, sequence_distance, SoftSequence
 from ..phylo.phylogenetic_asr import ASRConstructor
 from ..phylo._sub_matrices import lg
 import gudhi
@@ -14,60 +14,296 @@ from cogent3 import ArrayAlignment
 from .._const import PROT_20
 from ..utils import calculate_gapped_soft_score
 from softalign.soft_alignment import align_soft_sequences
+from scipy.sparse import csr_matrix
 
+
+def _pack_binary(seqs: list[BaseNumpySequence]) -> np.ndarray:
+    """
+    Helper function to convert a list of `BaseNumpySequences` itno an
+    int encoded array
+    """
+    
+    # (n, L)
+    arr = np.stack([s.to_array().astype(np.uint8) for s in seqs], axis=0)  
+    if not np.isin(arr, [0, 1]).all():
+
+        raise ValueError("Binary builder requires sequences with symbols {0,1}.")
+    L = arr.shape[1]
+    if L > 64:
+        raise ValueError("Bit-pack assumes L <= 64.")
+    
+    # bit for each pos
+    powers = (1 << np.arange(L, dtype=np.uint64))
+    
+    return (arr.astype(np.uint64) * powers).sum(axis=1, dtype=np.uint64)
+
+def _build_hamming_csr_binary(sequences: list[BinarySequence]) -> csr_matrix:
+    """
+    Function to build undirected CSR adjacency for a binary Hamming
+    graph using XOR neighbor generation.
+
+    Parameters
+    ----------
+    sequences : List[BinarySequence]
+        The input BinarySequence objects used to construct the
+        Hamming graph. 
+    
+    Returns
+    -------
+    A : sp.csr_matrix
+        Sparse adjacency matrix. 
+    """
+    # Guardrails
+    if len(sequences) == 0:
+        return csr_matrix((0, 0))
+    
+    n = len(sequences)
+    bitstrings = _pack_binary(sequences)
+
+    # infer L from used bits (safe if all positions vary at least once)
+    max_bit = int(max(int(b).bit_length() for b in bitstrings))
+    L = max(1, max_bit)
+
+    index_of = {int(bs): i for i, bs in enumerate(bitstrings)}
+
+    # worst-case capacity: n*L*2 (both directions)
+    cap = n * L * 2
+    rows = np.empty(cap, dtype=np.int32)
+    cols = np.empty(cap, dtype=np.int32)
+    
+    # Lookup bit flipped sequeneces in hash map.
+    k = 0
+    for i, s in enumerate(bitstrings):
+        s_int = int(s)
+        for pos in range(L):
+            t = s_int ^ (1 << pos)
+            j = index_of.get(t)
+            if j is None or i >= j:
+                continue
+            rows[k], cols[k] = i, j
+            k += 1
+            rows[k], cols[k] = j, i
+            k += 1
+
+    rows = rows[:k]; cols = cols[:k]
+    # 1 weighted adjacency for unweighted.
+    data = np.ones(k, dtype=np.float32)
+    A = csr_matrix((data, (rows, cols)), shape=(n, n))
+    return A
+
+def create_hamming_graph_binary(sequences: list[BinarySequence]) -> nx.Graph:
+    """
+    Function to build a undirected Hamming graph using efficiency bit
+    wise (XOR) operations. 
+
+    Parameters
+    ----------
+    sequences : List[BinarySequence]
+        The input BinarySequence objects used to construct the
+        Hamming graph. 
+
+    Returns
+    -------
+    G : nx.Graph
+        The undirected graph that can construct the `FitnessLandscape`
+        class. 
+    """
+    A = _build_hamming_csr_binary(sequences)
+    G = nx.from_scipy_sparse_array(A) 
+    
+    # attach node attributes for `FitnessLandscape` constructor.s
+    for i, seq in enumerate(sequences):
+        G.nodes[i]['sequence'] = seq
+        
+    for u, v in G.edges():
+        G[u][v]['weight'] = 1.0
+        G[u][v]['distance'] = 1
+    
+    return G
+
+def _encode_multiallele(seqs: list[BaseNumpySequence]) -> tuple[np.ndarray, dict[str,int]]:
+    """
+    Helper function to map string symbols in the `BaseNumpySequence`
+    alphabet to contiguous integers. 
+    """
+
+    # collect alphabet in order of first appearance to keep mapping stable
+    seen = {}
+    mats = []
+    for s in seqs:
+        arr = s.to_array()
+        mats.append(arr)
+        for sym in map(str, arr):
+            if sym not in seen:
+                seen[sym] = len(seen)
+    mapping = seen
+    int_mat = np.stack([[mapping[str(x)] for x in s.to_array()] for s in seqs], axis=0).astype(np.int32)
+    return int_mat, mapping  # (n,L)
+
+def _build_hamming_csr_multiallele_masked(sequences: list[BaseNumpySequence]) -> csr_matrix:
+    """
+    Function to build a sparse Hamming adjacency matrix using a
+    radix-encoded (base B for B alleles) masking algorithm.
+
+    Parameters
+    ----------
+    sequences : List[BaseNumpySequences] 
+        List of input sequences. 
+    
+    Returns
+    -------
+    A : sp.csr_matrix
+        The sparse Hamming adjacency matrix. 
+    """
+
+    # Guardrails
+    if len(sequences) == 0:
+        return csr_matrix((0, 0))
+
+    X, _ = _encode_multiallele(sequences)  # (n,L) int32
+    n, L = X.shape
+    base = int(X.max()) + 1
+
+    # base powers for radix encoding
+    powers = (base ** np.arange(L, dtype=np.int64))  # [B^0, B^1, ..., B^(L-1)]
+    
+    # encode full keys
+    key_full = (X * powers).sum(axis=1, dtype=np.int64)
+
+    # storage (rough upper bound): ~ n*L*avg_degree/2*2 ~ n*L for sparse datasets
+    rows = []
+    cols = []
+
+    for p in range(L):
+
+        # masked key: remove digit at p
+        masked = key_full - (X[:, p].astype(np.int64) * powers[p])
+        order = np.argsort(masked, kind='stable')
+        masked_sorted = masked[order]
+        xp = X[:, p][order]
+        # walk runs of identical masked key
+        start = 0
+        while start < n:
+            end = start + 1
+            while end < n and masked_sorted[end] == masked_sorted[start]:
+                end += 1
+            if end - start >= 2:
+                block_idx = order[start:end]
+                block_allele = xp[start:end]
+
+                # group by allele value within the block
+                # unique + inverse index
+                ua, inv = np.unique(block_allele, return_inverse=True)
+                
+                for a_i in range(len(ua)):
+                    src = block_idx[inv == a_i]
+                    for a_j in range(a_i + 1, len(ua)):
+                        dst = block_idx[inv == a_j]
+                        if src.size and dst.size:
+                            s_rep = np.repeat(src, dst.size)
+                            d_tile = np.tile(dst, src.size)
+                            rows.append(s_rep)
+                            cols.append(d_tile)
+                            rows.append(d_tile)   # symmetric
+                            cols.append(s_rep)
+
+            start = end
+
+    if not rows:
+        A = csr_matrix((np.zeros(0, dtype=np.float32), (np.zeros(0, dtype=np.int32), np.zeros(0, dtype=np.int32))),
+                       shape=(n, n))
+        return A
+
+    rows = np.concatenate(rows).astype(np.int32)
+    cols = np.concatenate(cols).astype(np.int32)
+
+    order = np.lexsort((cols, rows))
+    rows, cols = rows[order], cols[order]
+    
+    # remove exact duplicates
+    keep = np.ones_like(rows, dtype=bool)
+    keep[1:] = (rows[1:] != rows[:-1]) | (cols[1:] != cols[:-1])
+    rows, cols = rows[keep], cols[keep]
+    
+    # 1 for unweighted.
+    data = np.ones(rows.size, dtype=np.float32)
+    A = csr_matrix((data, (rows, cols)), shape=(n, n))
+    
+    return A
+
+def create_hamming_graph_multiallele(sequences: list[BaseNumpySequence]) -> nx.Graph:
+    """
+    Function to create a Hamming graph using B-radix encoded sequence
+    masking to identify Hamming neighbors. 
+
+    Parameters
+    ----------
+    sequences : List[BaseNumpySequence]
+        The list of input sequences to construct the graph from. 
+    
+    Returns
+    -------
+    G : nx.Graph
+        The undirected graph with edge and node features accepted by
+        the `FitnessLandscape` from graph constructor.
+    """
+
+    A = _build_hamming_csr_multiallele_masked(sequences)
+    G = nx.from_scipy_sparse_array(A)
+    for i, seq in enumerate(sequences):
+        G.nodes[i]['sequence'] = seq
+        
+    # TODO: Update `weight`, `distance`, `similarity` logic.
+    for u, v in G.edges():
+        G[u][v]['weight'] = 1.0
+        G[u][v]['distance'] = 1
+
+    return G
 
 def create_hamming_graph(sequences: List[BaseNumpySequence],
-                         fitness_values: Union[np.ndarray, List] = None,
-                         weight_by_fitness: bool = False) -> nx.Graph:
+                         _backend: Literal['auto', 'binary_xor', 'masked'] = 'auto') -> nx.Graph:
     """
     Create a Hamming graph from sequences and fitness values. In a
     Hamming graph, nodes represent sequences and edges connect
     sequences that differ by exactly one position (Hamming
     distance = 1).
-    
+
     Parameters
     ----------
     sequences : list of Sequence or array-like
         Sequences to connect.
-    fitness_values : array-like
-        Fitness values corresponding to sequences.
-    weight_by_fitness : bool, default = `False`
-        Whether to weight edges by fitness differences.
-        
+    _backend : str, default=`aut`
+        Backend to compute Hamming neighbors. 
+        -`binary_xor`: applies binary XOR operation to find bit-encoded
+        sequences that differ by precisely 1 bit in an indexed lookup
+        table. Scales in O(n * L). Applies exlusively to the
+        `BinarySequence` class. 
+        - `masked` : applies a position p mask over radix (base B)
+        enocoded sequences to find sequences that are identical outside
+        of position p. Scales in O(L n log n)
+        - `auto` : automatically chooses backend based on the sequence
+        type.
+
     Returns
     -------
     networkx.Graph
         Hamming graph.
     """
-    # Create graph
-    G = nx.Graph()
     
-    # Add nodes with sequence and fitness attributes
-    for i, seq in enumerate(sequences):
-        if not isinstance(seq, BaseNumpySequence):
-            seq = BaseNumpySequence(seq)
-        
-        # Add node with sequence attribute
-        G.add_node(i, sequence=seq)
-        
-    
-    # Add edges between sequences with Hamming distance = 1
-    for i in range(len(sequences)):
-        seq_i = sequences[i]
-        for j in range(i + 1, len(sequences)):
-            seq_j = sequences[j]
-            
-            # Calculate Hamming distance
-            dist = sequence_distance(seq_i, seq_j, metric='hamming')
-            
-            if dist == 1:
-                # Add edge with weight
-                if weight_by_fitness and fitness_values is not None:
-                    weight = abs(float(fitness_values[i]) - float(fitness_values[j]))
-                    G.add_edge(i, j, weight=weight, distance=dist)
-                else:
-                    G.add_edge(i, j, weight=1.0, distance=dist)
-    return G
+    # Safety check all sequences are binary classes.
+    is_binary = all(isinstance(s, BinarySequence) for s in sequences)
+
+    if _backend == "auto":
+        _backend = "binary_xor" if is_binary else "masked"
+
+    if _backend == "binary_xor":
+        if not is_binary:
+            raise ValueError("backend='binary_xor' requires binary sequences {0,1}.")
+        return create_hamming_graph_binary(sequences)
+    elif _backend == "masked":
+        return create_hamming_graph_multiallele(sequences)
+    else:
+        raise ValueError(f"Unknown `_backend`: {_backend}")
 
 def create_knn_graph(sequences: List[BaseNumpySequence],
                      k: int,
@@ -270,10 +506,10 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
 
     t : int, default=`5`
         The Markov transition matrix exponent.
-    
+
     k : int, default=`5`
         Nearest neighbors to scale the rbf gamma parameter.
-    
+
     connectivity_threshold : float, default=`1e-04`
         The threshold the define discrete connectivity.
 
