@@ -342,6 +342,7 @@ def _one_hot_matrix_amino(seqs: List[BaseNumpySequence]) -> np.ndarray:
 def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
                                k: int,
                                tie_policy: Literal['all', 'min_index', 'random'] = 'all',
+                               tiebuffer: int = 128,
                                seed: int = 42) -> nx.Graph:
     """
     Function to create an exact KNN using the scipy `BallTree`
@@ -373,49 +374,53 @@ def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
     """
     
     n = len(sequences)
-    X, _ = _encode_multiallele(sequences)
+    if n == 0:
+        return nx.Graph()
+
+    # integer-coded (n, L)
+    X, _ = _encode_multiallele(sequences)  
     L = X.shape[1]
 
-    nn = NearestNeighbors(n_neighbors=min(k+1, n), algorithm='auto', metric='hamming')
+    nn = NearestNeighbors(algorithm='auto', metric='hamming')
     nn.fit(X)
-    dists, inds = nn.kneighbors(X, n_neighbors=min(k+1, n), return_distance=True)
+    kq = min(k + 1 + tiebuffer, n)
+    dists, inds = nn.kneighbors(X, n_neighbors=kq, return_distance=True)
 
-    rows = []
-    cols = []
-    vals = []
+    rng = np.random.default_rng(seed)
+    rows, cols, vals = [], [], []
 
     for i in range(n):
         ids = inds[i]
-        ds  = dists[i] * L # KNN returns as fraction not total mutations
-        keep = ids != i # drop self loops
-        ids = ids[keep][:k]
-        ds  = ds[keep][:k]
+        # convert fraction to Hamming count
+        ds = (dists[i] * L)  
 
+        # drop self
+        keep = (ids != i)
+        ids = ids[keep]
+        ds  = ds[keep]
+
+        if ids.size == 0:
+            continue
+
+        # stable sort by distance
         order = np.argsort(ds, kind='stable')
         ids, ds = ids[order], ds[order]
 
-        # pick cut distance
-        if ids.size > 0:
-            if ids.size <= k:
-                take = np.arange(ids.size)
-            else:
-                dk = ds[k-1]
-                # candidates at or below kth distance
-                cand = np.nonzero(ds <= dk)[0]
-                if tie_policy == 'all':
-                    take = cand
-                elif tie_policy =='min_index':
-                    take = cand[:k]  # deterministic/stable
-                elif tie_policy == 'random':
-                    rng = np.random.default_rng(seed)
-                    take = rng.choice(cand, size=k, replace=False)
-                else:
-                    raise ValueError(f"Unknown tie_policy: {tie_policy}")
+        if ids.size <= k:
+            take = np.arange(ids.size)
         else:
-            take = np.array([], dtype=int)
+            dk = ds[k-1]
+            cand = np.nonzero(ds <= dk + 1e-9)[0]  # include all ties at kth distance
+            if tie_policy == 'all':
+                take = cand
+            elif tie_policy == 'min_index':
+                take = cand[:k]
+            elif tie_policy == 'random':
+                take = rng.choice(cand, size=min(k, cand.size), replace=False)
+            else:
+                raise ValueError(f"Unknown tie_policy: {tie_policy}")
 
         ids = ids[take]; ds = ds[take]
-
         rows.append(np.full(ids.size, i, dtype=np.int32))
         cols.append(ids.astype(np.int32))
         vals.append(ds.astype(np.float32))
@@ -424,15 +429,14 @@ def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
     J = np.concatenate(cols) if cols else np.array([], dtype=np.int32)
     V = np.concatenate(vals) if vals else np.array([], dtype=np.float32)
 
-    # Construct trasactional COO matrix.
+    # directed k-NN : symmetrize by UNION so degree >= k (and “all” can exceed)
     M = coo_matrix((V, (I, J)), shape=(n, n)).tocsr()
-    
-    # Symmetrize with min distance
-    M_T = M.T
-    # Take union
-    U = M.maximum(M_T)
+    U = M.maximum(M.T)
 
-    return nx.from_scipy_sparse_array(U, edge_attribute='distance')
+    G = nx.from_scipy_sparse_array(U, edge_attribute='distance')
+    for u, v in G.edges():
+        G[u][v]['weight'] = G[u][v]['distance']
+    return G
 
 def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
                             k: int,
@@ -513,7 +517,10 @@ def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
 
     # FAISS index
     if index_type == "flat":
-        index = faiss.IndexFlatIP(d)
+        if metric == "ip":
+            index = faiss.IndexFlatIP(d)
+        else:  # 'l2'
+            index = faiss.IndexFlatL2(d)
     
     elif index_type == "hnsw":
         # Catch error in setting `faiss_metrix`.
@@ -705,6 +712,7 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
         return _create_knn_graph_balltree(sequences,
                                           k, 
                                           tie_policy=tie_policy,
+                                          tiebuffer=tiebuffer,
                                           seed=seed)
     else:
         raise ValueError(f"Unsupported backend {backend!r}. Expected `auto`, `faiss`, or `balltree`.")

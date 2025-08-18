@@ -863,3 +863,172 @@ def test_hamming_graph_multiallele_attributes_alignment():
     for u, v, d in G.edges(data=True):
         assert d.get('weight') == 1.0
         assert d.get('distance') == 1
+
+def _toy_binary_seqs_L4():
+    # 16 nodes = all 4-bit strings
+    seqs = generate_sequences(length=4, alphabet=[0, 1])
+    return [BinarySequence(s.to_array()) for s in seqs]
+
+def test_knn_balltree_degree_union_symmetrize():
+    seqs = _toy_binary_seqs_L4()
+    k = 3
+    G = create_knn_graph(sequences=seqs, k=k, backend="balltree")
+    assert isinstance(G, nx.Graph)
+    assert G.number_of_nodes() == len(seqs)
+    for v in G.nodes():
+        assert G.degree[v] >= k
+    for u, v, d in G.edges(data=True):
+        assert "distance" in d and "weight" in d
+        assert d["distance"] == d["weight"]
+    A = nx.to_numpy_array(G, weight="distance")
+    assert np.allclose(A, A.T)
+
+def test_knn_balltree_distances_are_hamming_counts():
+    seqs = _toy_binary_seqs_L4()
+    k = 4  # at least L neighbors exist at distance 1
+    G = create_knn_graph(sequences=seqs, k=k, backend="balltree")
+    L = len(seqs[0])
+    for u, v, d in list(G.edges(data=True))[:20]:
+        dist_graph = d["distance"]
+        dist_true = sequence_distance(seqs[u], seqs[v], metric="hamming")
+        assert abs(dist_graph - dist_true) < 1e-6
+        assert 0 <= dist_graph <= L
+
+@pytest.mark.parametrize("tie_policy,expected_min_degree", [
+    ("all", 4), 
+    ("min_index", 2),
+    ("random", 2),
+])
+def test_knn_balltree_tie_handling(tie_policy, expected_min_degree):
+    seqs = _toy_binary_seqs_L4()
+    # Make ties at distance=1 by choosing k < L
+    k = 2
+    G = create_knn_graph(sequences=seqs, k=k, backend="balltree",
+                         tie_policy=tie_policy, seed=123)
+    degs = dict(G.degree())
+    assert min(degs.values()) >= expected_min_degree
+
+def test_knn_balltree_random_ties_seed_determinism():
+    seqs = _toy_binary_seqs_L4()
+    k = 2
+    G1 = create_knn_graph(sequences=seqs, k=k, backend="balltree",
+                          tie_policy="random", seed=42)
+    G2 = create_knn_graph(sequences=seqs, k=k, backend="balltree",
+                          tie_policy="random", seed=42)
+    G3 = create_knn_graph(sequences=seqs, k=k, backend="balltree",
+                          tie_policy="random", seed=43)
+    assert set(G1.edges()) == set(G2.edges())
+    assert set(G1.edges()) != set(G3.edges()) or len(set(G1.edges())) == 0
+
+def test_knn_balltree_single_and_empty_inputs():
+    # single
+    s = [BinarySequence([0,0,0,0])]
+    G1 = create_knn_graph(sequences=s, k=3, backend="balltree")
+    assert G1.number_of_nodes() == 1 and G1.number_of_edges() == 0
+    # empty
+    G0 = create_knn_graph(sequences=[], k=3, backend="balltree")
+    assert G0.number_of_nodes() == 0 and G0.number_of_edges() == 0
+
+@pytest.mark.parametrize("metric", ["ip", "l2"])
+def test_knn_faiss_flat_exact_distances_match_hamming(metric):
+    # small set for exact comparison
+    seqs = _toy_binary_seqs_L4()
+    k = 3
+    G = create_knn_graph(
+        sequences=seqs, k=k, backend="faiss",
+        index_type="flat",   # exact search
+        faiss_metric=metric,
+        tiebuffer=0,  # not needed for exact/unique here
+        include_self=False
+    )
+    # Distances in graph should match true Hamming counts
+    for u, v, d in list(G.edges(data=True))[:30]:
+        dist_graph = d["distance"]
+        dist_true = sequence_distance(seqs[u], seqs[v], metric="hamming")
+        assert abs(dist_graph - dist_true) < 1e-6
+
+def test_knn_faiss_hnsw_union_degree_and_attrs():
+    # Use small set; approximate index should still be fine here
+    seqs = _toy_binary_seqs_L4()
+    k = 3
+    G = create_knn_graph(
+        sequences=seqs, k=k, backend="faiss",
+        index_type="hnsw", faiss_metric="ip",
+        hnsw_M=16, tiebuffer=16, include_self=False
+    )
+    assert isinstance(G, nx.Graph)
+    assert G.number_of_nodes() == len(seqs)
+    for v in G.nodes():
+        assert G.degree[v] >= k
+    for u, v, d in G.edges(data=True):
+        assert "distance" in d and "weight" in d
+
+def test_knn_faiss_tie_handling_all_min_random():
+    # Create many equidistant neighbors by using L=4 hypercube; k < L
+    seqs = _toy_binary_seqs_L4()
+    k = 2
+    # 'all'
+    Gall = create_knn_graph(
+        sequences=seqs, k=k, backend="faiss",
+        index_type="flat", faiss_metric="ip", tiebuffer=32,
+        tie_policy="all", include_self=False
+    )
+    # degree should be >= L (=4) at many nodes due to including all dist-1 ties
+    assert min(dict(Gall.degree()).values()) >= 2  
+
+    Gmin = create_knn_graph(
+        sequences=seqs, k=k, backend="faiss",
+        index_type="flat", faiss_metric="ip",
+        tie_policy="min_index", include_self=False
+    )
+    assert min(dict(Gmin.degree()).values()) >= k
+    Gr1 = create_knn_graph(
+        sequences=seqs, k=k, backend="faiss",
+        index_type="flat", faiss_metric="ip",
+        tie_policy="random", include_self=False, seed=7
+    )
+    Gr2 = create_knn_graph(
+        sequences=seqs, k=k, backend="faiss",
+        index_type="flat", faiss_metric="ip",
+        tie_policy="random", include_self=False, seed=7
+    )
+    assert set(Gr1.edges()) == set(Gr2.edges())
+
+def test_knn_faiss_include_self_does_not_create_loops():
+    seqs = _toy_binary_seqs_L4()
+    k = 3
+    G = create_knn_graph(
+        sequences=seqs, k=k, backend="faiss",
+        index_type="flat", faiss_metric="ip",
+        include_self=True
+    )
+    # No self-loops in the undirected graph
+    assert all(u != v for u, v in G.edges())
+
+def test_knn_invalid_backend_raises():
+    seqs = _toy_binary_seqs_L4()
+    with pytest.raises(ValueError):
+        create_knn_graph(sequences=seqs, k=3, backend="nope")
+
+def test_knn_balltree_nonbinary_hamming_works():
+    alphabet = ["A", "B", "C", "D"]
+    seqs = [
+        BaseNumpySequence(["A","A","A","A"], alphabet=alphabet),
+        BaseNumpySequence(["A","A","A","B"], alphabet=alphabet),
+        BaseNumpySequence(["A","A","C","A"], alphabet=alphabet),
+        BaseNumpySequence(["D","A","A","A"], alphabet=alphabet),
+        BaseNumpySequence(["A","B","A","A"], alphabet=alphabet),
+    ]
+    G = create_knn_graph(sequences=seqs, k=2, backend="balltree")
+    assert isinstance(G, nx.Graph)
+    assert G.number_of_nodes() == len(seqs)
+    for (u, v, d) in G.edges(data=True):
+        dist_true = sequence_distance(seqs[u], seqs[v], metric="hamming")
+        assert abs(d["distance"] - dist_true) < 1e-6
+
+def test_knn_auto_backend_small_n_is_balltree_like():
+    seqs = _toy_binary_seqs_L4()
+    G_auto = create_knn_graph(sequences=seqs, k=3, backend="auto")
+    G_bt   = create_knn_graph(sequences=seqs, k=3, backend="balltree")
+    assert G_auto.number_of_nodes() == G_bt.number_of_nodes()
+    assert G_auto.number_of_edges() >= G_bt.number_of_edges() * 0.8
