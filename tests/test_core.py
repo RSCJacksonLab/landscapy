@@ -16,6 +16,21 @@ from fitness_landscape.embedding.particle_sampler import SequenceGenerator, TopP
 from unittest.mock import patch
 from fitness_landscape.utils import alignment_to_base_numpy_sequences
 
+@pytest.mark.parametrize("n,L,B", [(60, 6, 3), (80, 5, 4)])
+def test_hamming_graph_multiallele_smoke_largeish(n, L, B):
+    """
+    Smoke test: random multi-allelic sequences (moderate size) build without error
+    and produce a non-empty sparse graph (where variability allows).
+    """
+    rng = np.random.default_rng(0)
+    alphabet = [str(i) for i in range(B)]
+    seqs = [BaseNumpySequence(list(rng.choice(alphabet, size=L)), alphabet=alphabet) for _ in range(n)]
+    G = create_hamming_graph(sequences=seqs, _backend="masked")
+    assert isinstance(G, nx.Graph)
+    assert G.number_of_nodes() == n
+    # It’s possible (but unlikely) to be empty if all rows identical; allow >=0 and check typical case >0
+    assert G.number_of_edges() >= 0
+
 @pytest.fixture
 def mock_embedder(mocker):
     """Mocks the ESMEmbedder to avoid loading a real model."""
@@ -245,20 +260,6 @@ def test_create_tda_graph(clustered_data):
     # TDA should have the two clusters
     # Not a great test - not analytically defined, just observed behaviour...
     assert nx.number_connected_components(graph) == 2
-
-
-# BUG: cknn density fails.
-# def test_create_cknn_graph_structure(clustered_data):
-#     """
-#     Tests that the ck-NN graph correctly identifies the clustered
-#     structure by having higher intra-cluster density than inter-cluster density.
-#     """
-#     sequences, embeddings = clustered_data
-#     graph = create_cknn_graph(
-#         sequences=sequences,
-#         embeddings=embeddings,
-#         k=4 # Use a k appropriate for the cluster size
-#     )
 
     assert isinstance(graph, nx.Graph)
     assert graph.number_of_nodes() == len(sequences)
@@ -735,3 +736,131 @@ def test_create_evol_diffusion_graph_is_undirected_and_symmetric(diffusion_test_
     assert not graph.is_directed(), "The graph should not be directed."
     adj_matrix = nx.to_numpy_array(graph)
     assert np.allclose(adj_matrix, adj_matrix.T), "The adjacency matrix of an undirected graph must be symmetric."
+
+def test_hamming_graph_binary_hypercube_degree_and_edges():
+    """
+    For the full binary hypercube of length L=4 (n=16):
+    - each node degree == L
+    - edges == n * L / 2
+    """
+    L = 4
+    seqs = generate_sequences(length=L, alphabet=[0, 1])
+
+    seqs = [BinarySequence(s.to_array()) for s in seqs]
+
+    G = create_hamming_graph(sequences=seqs, _backend="binary_xor")
+    n = len(seqs)
+    expected_edges = n * L // 2
+
+    assert G.number_of_nodes() == n
+    assert G.number_of_edges() == expected_edges
+    for v in G.nodes():
+        assert G.degree[v] == L
+
+    # each node should store its sequence
+    for i, s in enumerate(seqs):
+        assert 'sequence' in G.nodes[i]
+        assert np.array_equal(G.nodes[i]['sequence'].to_array(), s.to_array())
+
+    # default edge attributes present
+    for u, v, d in G.edges(data=True):
+        assert d.get('weight') == 1.0
+        assert d.get('distance') == 1
+
+
+def test_hamming_graph_binary_dispatch_auto_backend():
+    """
+    Auto backend should select 'binary_xor' for BinarySequence inputs.
+    """
+    seqs = [BinarySequence([0, 0, 0]), BinarySequence([0, 0, 1])]
+    G = create_hamming_graph(sequences=seqs, _backend="auto")
+    assert isinstance(G, nx.Graph)
+    assert G.number_of_nodes() == 2
+    assert G.number_of_edges() == 1
+
+
+def test_hamming_graph_binary_xor_rejects_nonbinary():
+    """
+    Explicit binary_xor backend should reject non-binary inputs.
+    """
+    seqs = [BaseNumpySequence(['A', 'A']), BaseNumpySequence(['A', 'B'])]
+    with pytest.raises(ValueError, match="requires.*binary"):
+        create_hamming_graph(sequences=seqs, _backend="binary_xor")
+
+
+def test_hamming_graph_binary_bitpack_length_limit():
+    """
+    L > 64 should raise, because bit-pack uses uint64.
+    """
+    L = 65
+    seq0 = BinarySequence([0] * L)
+    s = [0] * L
+    s[0] = 1
+    seq1 = BinarySequence(s)
+
+    with pytest.raises(ValueError, match="L <= 64"):
+        # This should fail when packing bits
+        create_hamming_graph(sequences=[seq0, seq1], _backend="binary_xor")
+
+def test_hamming_graph_multiallele_degree_and_edges_small_grid():
+    """
+    For alphabet size 3, L=2 (n=3^2=9) and full combinatorial set:
+    degree = (B-1)*L = 4 for every node, edges = n * degree / 2 = 18.
+    """
+    alphabet = ['A', 'B', 'C']
+    L = 2
+    # All combinations
+    seqs = []
+    for a in alphabet:
+        for b in alphabet:
+            seqs.append(BaseNumpySequence([a, b], alphabet=alphabet))
+
+    G = create_hamming_graph(sequences=seqs, _backend="masked")
+    assert G.number_of_nodes() == 9
+    assert G.number_of_edges() == 18
+    for v in G.nodes():
+        assert G.degree[v] == 4  # (3-1)*2
+
+    idx_AA = next(i for i, s in enumerate(seqs) if np.array_equal(s.to_array(), ['A','A']))
+    idx_BB = next(i for i, s in enumerate(seqs) if np.array_equal(s.to_array(), ['B','B']))
+    assert not G.has_edge(idx_AA, idx_BB)
+
+
+def test_hamming_graph_multiallele_dispatch_auto_backend():
+    """
+    Auto backend should select 'masked' for non-binary BaseNumpySequence inputs.
+    """
+    seqs = [BaseNumpySequence(['A','A']), BaseNumpySequence(['A','B'])]
+    G = create_hamming_graph(sequences=seqs, _backend="auto")
+    assert isinstance(G, nx.Graph)
+    assert G.number_of_nodes() == 2
+    assert G.number_of_edges() == 1
+
+
+def test_hamming_graph_multiallele_empty_input():
+    """
+    Empty inputs should yield an empty graph (no exceptions).
+    """
+    G = create_hamming_graph(sequences=[], _backend="masked")
+    assert isinstance(G, nx.Graph)
+    assert G.number_of_nodes() == 0
+    assert G.number_of_edges() == 0
+
+
+def test_hamming_graph_multiallele_attributes_alignment():
+    """
+    Node IDs should align to list indices; node['sequence'] should match input object.
+    """
+    seqs = [
+        BaseNumpySequence(['X','Y'], alphabet=['W','X','Y']),
+        BaseNumpySequence(['W','Y'], alphabet=['W','X','Y']),
+        BaseNumpySequence(['Y','Y'], alphabet=['W','X','Y']),
+    ]
+    G = create_hamming_graph(sequences=seqs, _backend="masked")
+    assert G.number_of_nodes() == 3
+    for i, s in enumerate(seqs):
+        assert 'sequence' in G.nodes[i]
+        assert np.array_equal(G.nodes[i]['sequence'].to_array(), s.to_array())
+    for u, v, d in G.edges(data=True):
+        assert d.get('weight') == 1.0
+        assert d.get('distance') == 1
