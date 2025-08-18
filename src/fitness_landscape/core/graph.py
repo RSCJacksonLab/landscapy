@@ -305,6 +305,7 @@ def create_hamming_graph(sequences: List[BaseNumpySequence],
     else:
         raise ValueError(f"Unknown `_backend`: {_backend}")
 
+# TODO: optimize code - sclaes in O(n^2) with all-v-all comp.
 def create_knn_graph(sequences: List[BaseNumpySequence],
                      k: int,
                      metric: Literal['hamming'] = 'hamming', 
