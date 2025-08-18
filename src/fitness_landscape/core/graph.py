@@ -1,4 +1,3 @@
-from os import listdrives
 import numpy as np
 import networkx as nx
 from typing import List, Union, Literal
@@ -310,7 +309,7 @@ def create_hamming_graph(sequences: List[BaseNumpySequence],
     else:
         raise ValueError(f"Unknown `_backend`: {_backend}")
 
-# TODO: optimize code - sclaes in O(n^2) with all-v-all comp.
+
 def _one_hot_matrix_amino(seqs: List[BaseNumpySequence]) -> np.ndarray:
     """
     Helper function to to convert a list of BaseNumpySequence objects
@@ -341,7 +340,9 @@ def _one_hot_matrix_amino(seqs: List[BaseNumpySequence]) -> np.ndarray:
     return X
 
 def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
-                               k: int) -> nx.Graph:
+                               k: int,
+                               tie_policy: Literal['all', 'min_index', 'random'] = 'all',
+                               seed: int = 42) -> nx.Graph:
     """
     Function to create an exact KNN using the scipy `BallTree`
     algorithm.
@@ -353,6 +354,18 @@ def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
     k : int
         The number of neighbours to connect each sequence to. 
     
+    tie_policy : str, default=`all`
+        The tie policy for when there are more than k equidistant
+        neighbors found. Options are:
+        - `all` : all neighbors are kept and the graph becomes
+        irregular.
+        - `min_index` : The "first" connection is kept, the others are
+        arbitrarily removed. The graph remains k regular. 
+        - `random` : equidistant edges are kept at random.
+    
+    seed : int, default=42
+        The random state seed.
+
     Returns
     -------
     nx.Graph
@@ -360,7 +373,7 @@ def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
     """
     
     n = len(sequences)
-    X = np.stack([s.to_array() for s in sequences], axis=0).astype(str)
+    X, _ = _encode_multiallele(sequences)
     L = X.shape[1]
 
     nn = NearestNeighbors(n_neighbors=min(k+1, n), algorithm='auto', metric='hamming')
@@ -377,6 +390,32 @@ def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
         keep = ids != i # drop self loops
         ids = ids[keep][:k]
         ds  = ds[keep][:k]
+
+        order = np.argsort(ds, kind='stable')
+        ids, ds = ids[order], ds[order]
+
+        # pick cut distance
+        if ids.size > 0:
+            if ids.size <= k:
+                take = np.arange(ids.size)
+            else:
+                dk = ds[k-1]
+                # candidates at or below kth distance
+                cand = np.nonzero(ds <= dk)[0]
+                if tie_policy == 'all':
+                    take = cand
+                elif tie_policy =='min_index':
+                    take = cand[:k]  # deterministic/stable
+                elif tie_policy == 'random':
+                    rng = np.random.default_rng(seed)
+                    take = rng.choice(cand, size=k, replace=False)
+                else:
+                    raise ValueError(f"Unknown tie_policy: {tie_policy}")
+        else:
+            take = np.array([], dtype=int)
+
+        ids = ids[take]; ds = ds[take]
+
         rows.append(np.full(ids.size, i, dtype=np.int32))
         cols.append(ids.astype(np.int32))
         vals.append(ds.astype(np.float32))
@@ -390,7 +429,8 @@ def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
     
     # Symmetrize with min distance
     M_T = M.T
-    U = M.minimum(M_T)
+    # Take union
+    U = M.maximum(M_T)
 
     return nx.from_scipy_sparse_array(U, edge_attribute='distance')
 
@@ -401,7 +441,10 @@ def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
                             metric: Literal['ip', 'l2'] = 'ip',
                             include_self: bool = False,
                             use_gpu: bool = False,
-                            hnsw_M: int = 32) -> nx.Graph:
+                            hnsw_M: int = 32,
+                            tiebuffer : int = 128,
+                            tie_policy: Literal['all', 'min_index', 'random'] = 'all',
+                            seed: int = 42) -> nx.Graph:
     """
     Function to create an approximate nearest neighbour graph using
     FAISS indexing for efficient neighbour searching. 
@@ -434,6 +477,21 @@ def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
     
     hsnw_M : int, default = 32
         The hnsw dimesnion.
+    
+    tiebuffer : int, default=128
+        The number of hits kept in buffer to eliminate ties.
+    
+    tie_policy : str, default=`all`
+        The tie policy for when there are more than k equidistant
+        neighbors found. Options are:
+        - `all` : all neighbors are kept and the graph becomes
+        irregular.
+        - `min_index` : The "first" connection is kept, the others are
+        arbitrarily removed. The graph remains k regular. 
+        - `random` : equidistant edges are kept at random.
+    
+    seed : int, default=42
+        The random state seed.
 
     Returns
     -------
@@ -484,31 +542,74 @@ def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
         index = faiss.index_cpu_to_gpu(res, 0, index)
 
     index.add(X)
+    
+    # Include consideration for self edges and a tiebuffer.
+    kq = k + (0 if include_self else 1) + tiebuffer
+    D, I = index.search(X, kq)
 
-    # search returns top inner products (matches), not distances
-    kq = k + (0 if include_self else 1)
-    sims, nbrs = index.search(X, kq)  # sims[i, j] = <x_i, x_{nbr}>
+    # Convert metric distances to Hamming distances.
+    if metric == "ip":
+        dpos_all = (L - D).astype(np.float32)
+    else: 
+        dpos_all = (0.5 * D).astype(np.float32)
 
     G = nx.Graph()
     for i, s in enumerate(sequences):
         G.add_node(i, sequence=s)
 
     for i in range(n):
-        for jj in range(nbrs.shape[1]):
-            j = int(nbrs[i, jj])
-            if j < 0: 
+        ids = I[i]
+        ds  = dpos_all[i]
+
+        # filter invalids / -1 and optionally self
+        valid = ids >= 0
+        if not include_self:
+            valid &= (ids != i)
+        ids = ids[valid]
+        ds  = ds[valid]
+
+        if ids.size == 0:
+            continue
+
+        # stable sort by distance
+        order = np.argsort(ds, kind="stable")
+        ids, ds = ids[order], ds[order]
+
+        # choose top-k with tie handling
+        if ids.size <= k:
+            take = np.arange(ids.size)
+        else:
+            dk = ds[k-1]
+            cand = np.nonzero(ds <= dk)[0]
+            if tie_policy in ("min_index"):
+                take = cand[:k]
+            elif tie_policy == "all":
+                take = cand
+            elif tie_policy == "random":
+                if cand.size > k:
+                    rng = np.random.default_rng(seed)
+                    take = rng.choice(cand, size=k, replace=False)
+                else:
+                    take = cand
+            else:
+                raise ValueError(f"Unknown tie_policy: {tie_policy}")
+
+        sel_ids = ids[take].astype(int)
+        sel_ds  = ds[take].astype(float)
+
+        # add edges; if an edge exists from the other direction, keep the min distance
+        for j, dij in zip(sel_ids, sel_ds):
+            if i == j:
                 continue
-            if not include_self and j == i:
-                continue
+            if G.has_edge(i, j):
+                # keep the tighter (min) distance
+                prev = G[i][j].get("distance", dij)
+                if dij < prev:
+                    G[i][j]["distance"] = dij
+                    G[i][j]["weight"]   = dij
+            else:
+                G.add_edge(i, j, distance=dij, weight=dij)
 
-            matches = float(sims[i, jj])
-
-            # convert to Hamming over positions
-            hamming_pos = float(L - matches) # each mismatch contributes 1
-
-            # TODO: update edge attr logic for `weight`, `sim`.            
-            if not G.has_edge(i, j):
-                G.add_edge(i, j, weight=hamming_pos, distance=hamming_pos)
     return G
 
 def create_knn_graph(sequences: List[BaseNumpySequence],
@@ -519,7 +620,10 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
                      faiss_metric: Literal['ip', 'l2'] = 'ip',
                      include_self: bool = False,
                      use_gpu: bool = False,
-                     hnsw_M: int = 32) -> nx.Graph:
+                     hnsw_M: int = 32,
+                     tiebuffer: int = 128,
+                     tie_policy: Literal['all', 'min_index', 'random'] = 'all',
+                     seed : int = None) -> nx.Graph:
     """
     Function to create a k-nearest neighbor network graph from
     sequences, using an efficient backend algorithm. 
@@ -561,6 +665,20 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
     hnsw_M : int, default=32
         The hnsw dimension size.
     
+    tiebuffer : int, default=128
+        The number of hits kept in buffer to eliminate ties.
+    
+    tie_policy : str, default=`all`
+        The tie policy for when there are more than k equidistant
+        neighbors found. Options are:
+        - `all` : all neighbors are kept and the graph becomes
+        irregular.
+        - `min_index` : The "first" connection is kept, the others are
+        arbitrarily removed. The graph remains k regular. 
+        - `random` : equidistant edges are kept at random.
+    
+    seed : int, default=42
+        The random state seed. 
     Returns
     -------
     nx.Graph    
@@ -579,9 +697,15 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
             include_self=include_self,
             use_gpu=use_gpu,
             hnsw_M=hnsw_M,
+            tiebuffer=tiebuffer,
+            tie_policy=tie_policy,
+            seed=seed
         )
     elif backend == 'balltree':
-        return _create_knn_graph_balltree(sequences, k)
+        return _create_knn_graph_balltree(sequences,
+                                          k, 
+                                          tie_policy=tie_policy,
+                                          seed=seed)
     else:
         raise ValueError(f"Unsupported backend {backend!r}. Expected `auto`, `faiss`, or `balltree`.")
 

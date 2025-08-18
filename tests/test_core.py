@@ -478,12 +478,11 @@ def test_soft_sequence_resample():
     resampled_seq = soft_seq.resample()
     assert isinstance(resampled_seq, SoftSequence)
 
-def test_landscape_from_sequences_embeddings(clustered_data):
+def test_landscape_from_sequences(clustered_data):
     """Tests landscape creation with embeddings."""
     sequences, embeddings = clustered_data
-    landscape = FitnessLandscape.from_sequences(sequences, graph_type='knn', embeddings=embeddings, k=3)
+    landscape = FitnessLandscape.from_sequences(sequences, graph_type='knn', k=3)
     assert landscape.graph is not None
-    assert landscape.embeddings is not None
 
 def test_landscape_detach_last_layer(basic_landscape):
     """Tests detaching the last fitness layer."""

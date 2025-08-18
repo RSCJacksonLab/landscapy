@@ -83,7 +83,7 @@ class FitnessLandscape:
         This method orchestrates the computation of embeddings (if needed)
         and the construction of the graph based on the specified type.
         """
-        embedding_based_graphs = {'knn', 'tda', 'diffusion'}
+        embedding_based_graphs = {'tda', 'diffusion'}
 
         # Secure Embeddings.
         if graph_type in embedding_based_graphs:
