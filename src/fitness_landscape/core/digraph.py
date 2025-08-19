@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Union, Dict, List
+from typing import Union, Dict, List, Literal
 import numpy as np
 import networkx as nx
 from cogent3 import load_aligned_seqs, ArrayAlignment, PhyloNode, load_tree, get_app
@@ -14,6 +14,7 @@ from ..phylo._sub_matrices import nq_pfam
 from sklearn.neighbors import NearestNeighbors
 from ..phylo.phylogenetic_asr import ASRConstructor
 from ..utils import calculate_gapped_soft_score
+from .graph import _find_knn_balltree, _find_knn_faiss, _encode_multiallele
 from ..embedding.particle_sampler import (
     EvolutionParticleSampler,
     SequenceGenerator,
@@ -62,9 +63,16 @@ def create_phylo_digraph(sequences: Union[Path, ArrayAlignment],
 
 #TODO: Add emergence time masking.
 def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
-                                             embeddings: np.ndarray,
+                                             embeddings: np.ndarray = None,
                                              replacement_matrix: np.ndarray = nq_pfam,
                                              k: int = 50,
+                                             tiebuffer: int = 0,
+                                             backend: Literal['auto', 'faiss', 'balltree'] = 'auto',
+                                             index_type: Literal['hnsw', 'flat', 'ivf'] = 'hnsw',
+                                             faiss_metric: Literal['ip', 'l2'] = 'ip',
+                                             include_self: bool = False,
+                                             use_gpu: bool = False,
+                                             hnsw_M: int = 32,
                                              t: int = 5,
                                              tau: float = 1.0,
                                              connectivity_threshold: float = 1e-4,
@@ -83,6 +91,38 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
     
     k : int, default=50
         The number of neighbours to use for kNN pre-filtering.
+
+    backend : str, default=`auto`
+        The computational backend to use. Options are:
+        -`faiss` : use a FAISS-based (sublinear) scalling (but
+        approximate) backend to find neighbors. 
+        - `balltree` : use the BallTree exact solver, which scales
+        poorly with large dimension size. 
+        - `auto` : Automatic backend based on dataset size.
+    
+    index_type : str, default=`hnsw`
+        The FAISS indexing algorithm to use. Options are:
+        - `hnsw` : hierarchical navigatible small worlds. Effective on
+        large n. Approximate.
+        - `flat` : Exact flat indexing.
+        - `ivf` : inverted file indexing algorithm. Effective on very
+        large n. Approximate.
+    
+    faiss_metric : str, default=`ip`
+        The faiss metric. Options are:
+        - `ip` : the inner produt.
+        - `l2` : the L2 norm. 
+        Use of `ip` guarantees distances are returned / stored as
+        Hamming distances. 
+    
+    use_gpu : bool, default=`False`
+        Boolean to use GPU on flat indexing. 
+    
+    hnsw_M : int, default=32
+        The hnsw dimension size.
+    
+    tiebuffer : int, default=128
+        The number of hits kept in buffer to eliminate ties.
     
     t : int, default=5
         The number of diffusion steps taken.
@@ -103,6 +143,10 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
     n_sequences = len(sequences)
     if n_sequences == 0:
         return nx.DiGraph()
+    
+    # Secure OHE embeddings if not provided otherwise.
+    if embeddings is None:
+        embeddings, _ = _encode_multiallele(sequences)
 
     # Find kNN in embedding space to identify candidate pairs
     # Should scale in O(N*k)
@@ -111,9 +155,33 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
     if k > n_sequences - 1:
         k = n_sequences - 1
 
-    nn = NearestNeighbors(n_neighbors=k, algorithm='ball_tree')
-    nn.fit(embeddings)
-    _, neighbor_indices = nn.kneighbors(embeddings)
+    # Use balltree algorithm (will fail as shape of embeddings >>>)
+    if backend == 'balltree':
+        _, neighbor_indices = _find_knn_balltree(embeddings, k, tiebuffer)
+    
+    # Use FAISS algorithm (approx or exact).
+    elif backend == 'faiss':
+        _, neighbor_indices = _find_knn_faiss(embeddings,
+                                       k,
+                                       index_type=index_type,
+                                       metric=faiss_metric,
+                                       use_gpu=use_gpu,
+                                       hnsw_M=hnsw_M,
+                                       tiebuffer=tiebuffer) 
+                                    
+    # Select backend algorithm based on size of embeddings.
+    elif backend == 'auto':
+        
+        if embeddings.shape[0] < 5000:
+            _, neighbor_indices = _find_knn_balltree(embeddings, k, tiebuffer)
+        else:
+            _, neighbor_indices = _find_knn_faiss(embeddings,
+                                           k,
+                                           index_type=index_type,
+                                           metric=faiss_metric,
+                                           use_gpu=use_gpu,
+                                           hnsw_M=hnsw_M,
+                                           tiebuffer=tiebuffer) 
     
     pairs_to_align = []
     for i in range(n_sequences):

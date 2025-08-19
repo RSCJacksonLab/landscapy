@@ -452,7 +452,7 @@ class FitnessSuperscape:
         posterior_prob_cutoff : float, default=0.1
             The cutoff for posterior probabilities in the latent
             landscape.
-        **sampler_kwargs : Any
+        **sampler_kwargs
             Keyword arguments for the RJMCMCAligner sampler.
 
         Returns
