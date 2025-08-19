@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Union, Dict, List
+from typing import Union, Dict, List, Literal
 import numpy as np
 import networkx as nx
 from cogent3 import load_aligned_seqs, ArrayAlignment, PhyloNode, load_tree, get_app
@@ -14,7 +14,7 @@ from ..phylo._sub_matrices import nq_pfam
 from sklearn.neighbors import NearestNeighbors
 from ..phylo.phylogenetic_asr import ASRConstructor
 from ..utils import calculate_gapped_soft_score
-from .graph import _find_knn_balltree, _find_knn_faiss
+from .graph import _find_knn_balltree, _find_knn_faiss, _encode_multiallele
 from ..embedding.particle_sampler import (
     EvolutionParticleSampler,
     SequenceGenerator,
@@ -63,7 +63,7 @@ def create_phylo_digraph(sequences: Union[Path, ArrayAlignment],
 
 #TODO: Add emergence time masking.
 def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
-                                             embeddings: np.ndarray,
+                                             embeddings: np.ndarray = None,
                                              replacement_matrix: np.ndarray = nq_pfam,
                                              k: int = 50,
                                              tiebuffer: int = 0,
@@ -143,6 +143,10 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
     n_sequences = len(sequences)
     if n_sequences == 0:
         return nx.DiGraph()
+    
+    # Secure OHE embeddings if not provided otherwise.
+    if embeddings is None:
+        embeddings, _ = _encode_multiallele(sequences)
 
     # Find kNN in embedding space to identify candidate pairs
     # Should scale in O(N*k)
@@ -150,8 +154,6 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
     # Update value of k if too large.
     if k > n_sequences - 1:
         k = n_sequences - 1
-
-
 
     # Use balltree algorithm (will fail as shape of embeddings >>>)
     if backend == 'balltree':
@@ -168,7 +170,8 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
                                        tiebuffer=tiebuffer) 
                                     
     # Select backend algorithm based on size of embeddings.
-    elif backend == 'auto:
+    elif backend == 'auto':
+        
         if embeddings.shape[0] < 5000:
             _, neighbor_indices = _find_knn_balltree(embeddings, k, tiebuffer)
         else:

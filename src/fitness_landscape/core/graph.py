@@ -374,6 +374,7 @@ def _find_knn_faiss(X: np.ndarray,
                     metric: Literal['ip', 'l2'] = 'ip',
                     use_gpu: bool = False,
                     hnsw_M: int = 32,
+                    include_self: bool = False,
                     tiebuffer : int = 0) -> Tuple[np.ndarray, np.ndarray]:
     """
     Helper function to find nearest neighbors by FAISS backend.
@@ -406,6 +407,9 @@ def _find_knn_faiss(X: np.ndarray,
     
     hsnw_M : int, default = 32
         The hnsw dimesnion.
+    
+    include_self : bool, default=`False`
+        Boolean to include self edges.
     
     tiebuffer : int, default=128
         The number of hits kept in buffer to eliminate ties.
@@ -464,6 +468,7 @@ def _find_knn_faiss(X: np.ndarray,
     # Include consideration for self edges and a tiebuffer.
     kq = k + (0 if include_self else 1) + tiebuffer
     dists, inds = index.search(X, kq)
+    return dists, inds
 
 
 def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
@@ -1009,7 +1014,7 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
                                        tiebuffer=tiebuffer) 
                                     
     # Select backend algorithm based on size of embeddings.
-    elif backend == 'auto:
+    elif backend == 'auto':
         if embeddings.shape[0] < 5000:
             distances, _ = _find_knn_balltree(embeddings, k, tiebuffer)
         else:
@@ -1195,7 +1200,7 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                                        tiebuffer=tiebuffer) 
                                     
     # Select backend algorithm based on size of embeddings.
-    elif backend == 'auto:
+    elif backend == 'auto':
         if embeddings.shape[0] < 5000:
             _, neighbor_indices = _find_knn_balltree(embeddings, k, tiebuffer)
         else:
