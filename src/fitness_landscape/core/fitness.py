@@ -1,8 +1,9 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Literal, List, Any
+from typing import Dict, Literal, List, Any, Tuple, Union
 import torch
 import numpy as np
 from scipy import stats
+
 
 # Fitness oeprates as a `layer` over the fitness landscape object.
 class BaseFitnessLayer(ABC):
@@ -21,7 +22,6 @@ class BaseFitnessLayer(ABC):
         
         self.name = name
         self.metadata = metadata or {}
-
 
     @property
     @abstractmethod
@@ -53,9 +53,21 @@ class BaseFitnessLayer(ABC):
         Retrieves the native fitness value(s) for a single sequence.
         """
         pass
+    
+    def _validate_length(self,
+                         expected: int, *,
+                         name: str = "") -> None:
+        n = len(self)
+        if n != expected:
+            lab = f" for layer '{self.name}'" if getattr(self, 'name', None) else ""
+            raise ValueError(f"Layer length mismatch{lab}: got {n}, expected {expected}. {name}")
 
     def __repr__(self):
         return f"<{self.__class__.__name__} name='{self.name}'>"
+    
+    @abstractmethod
+    def __len__(self):
+        pass
 
     
 class NumericFitness(BaseFitnessLayer):
@@ -151,6 +163,9 @@ class NumericFitness(BaseFitnessLayer):
             the specified sequence.
         """
         return self._replicates[sequence_index]
+    
+    def __len__(self):
+        return len(self._replicates)
 
 
 class CategoricalFitness(BaseFitnessLayer):
@@ -261,7 +276,8 @@ class CategoricalFitness(BaseFitnessLayer):
         """
         return self._values[sequence_index]
     
-
+    def __len__(self):
+        return len(self._values)
 
 class ProbabilisticCategoricalFitness(BaseFitnessLayer):
     """
@@ -361,6 +377,9 @@ class ProbabilisticCategoricalFitness(BaseFitnessLayer):
         most_likely_categories = [self.categories[i] for i in most_likely_indices]
         # Map the most likely categories to their ranks
         return np.array([_rank_map[cat] for cat in most_likely_categories])
+    
+    def __len__(self):
+        return int(self.probabilities.shape[0])
 
 
 

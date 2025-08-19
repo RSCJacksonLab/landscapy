@@ -93,10 +93,12 @@ class FitnessSuperscape:
         self.meta_trace_NL = hierarchical_aligner.meta_nl_trace
         self.meta_trace_edges = hierarchical_aligner.meta_edges_trace
         
+        # Canonical node order.
+        self._node_orders = [list(L.graph.nodes()) for L in self.landscapes]
         self.back_reference = [
             (k, node_id)
-            for k, landscape in enumerate(self.landscapes)
-            for node_id in landscape.graph.nodes()
+            for k, order in enumerate(self._node_orders)
+            for node_id in order
         ]
         
     def construct_latent_landscape(self) :
@@ -120,11 +122,14 @@ class FitnessSuperscape:
             current_row += num_nodes_in_graph
 
         # Collect all ungapped arrays from the nodes
-        all_ungapped_arrs = [
-            node_data['ungapped_arr']
-            for landscape in self.landscapes
-            for _, node_data in landscape.graph.nodes(data=True)
-        ]
+        all_ungapped_arrs = []
+        for k, L in enumerate(self.landscapes):
+            order = self._node_orders[k]
+            for node_id in order:
+                data = L.graph.nodes[node_id]
+                if 'ungapped_arr' not in data:
+                    raise ValueError(f"Node {node_id!r} missing 'ungapped_arr' for superscape.")
+                all_ungapped_arrs.append(data['ungapped_arr'])
 
         # Collect distribution of sequence lengths for ambiguous soft sequences.
         all_lengths = [len(seq) for landscape in self.landscapes for seq in landscape.sequences]

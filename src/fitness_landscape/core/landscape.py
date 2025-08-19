@@ -3,7 +3,7 @@ import networkx as nx
 import torch
 from torch_geometric.data import Data
 from torch_geometric.utils import from_networkx
-from typing import List, Union, Dict, Any, Iterable, Literal,  Protocol, runtime_checkable, Hashable, Union
+from typing import List, Union, Dict, Any, Iterable, Literal,  Protocol, runtime_checkable, Hashable, Union, Tuple, Mapping
 from dataclasses import dataclass
 from .sequence import BaseNumpySequence, make_sequence
 from .graph import create_diffusion_emb_graph, create_hamming_graph, create_tda_graph, create_knn_graph, _encode_multiallele, create_phylo_graph
@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .._const import PROT_20
 
+SeqKey = Union['BaseNumpySequence', str, Tuple]
 
 class FitnessLandscape:
     """
@@ -54,9 +55,15 @@ class FitnessLandscape:
         self._emb_arr_key = emb_arr_key
 
         # Finalize Setup and Annotate Graph
+        # Safe canonical node ordering.
+        self._node_order = list(graph.nodes())  
+        self._seq_to_nodes = self._build_seq_multimap()  # duplicate-safe
+        self._nodes_by_index = {i: n for i, n in enumerate(self._node_order)}  # 0..N-1 -> node key
         self._annotate_graph_nodes_with_fitness()
         if self.embeddings is not None:
             self._annotate_graph_nodes_with_embeddings()
+        self._records = self._build_sequence_index() 
+        self._enforce_unique_sequences()
 
         self._records = {tuple(seq.to_array()): i for i, seq in enumerate(self.sequences)}
         
@@ -67,6 +74,57 @@ class FitnessLandscape:
             )
         else:
             self._active_view_name = None
+
+    def _build_seq_multimap(self) -> Dict[Tuple, List]:
+        """
+        Helper function to map sequence array tuple. Safe for
+        duplicates. 
+
+        Returns
+        -------
+        mm : Dict
+            The sequnce array to node value mapping.
+        """
+        mm: dict[tuple, list] = {}
+        for n, data in self.graph.nodes(data=True):
+            arr = tuple(data['sequence'].to_array())
+            mm.setdefault(arr, []).append(n)
+        return mm
+    
+    def _build_sequence_index(self) -> Dict[Tuple, int]:
+        """
+        Keep first occurrence index for fast get_fitness.
+        """
+        idx = {}
+        for i, seq in enumerate(self.sequences):
+            key = tuple(seq.to_array())
+            if key not in idx:
+                idx[key] = i
+        return idx
+    
+    def _index_map(self) -> Dict[Tuple, list[int]]:
+        """
+        Map sequence-array tuple -> [indices in self.sequences]
+        (duplicate-safe).
+        """
+        m: dict[Tuple, list[int]] = {}
+        for i, s in enumerate(self.sequences):
+            key = tuple(s.to_array())
+            m.setdefault(key, []).append(i)
+        return m
+    
+    def _normalize_seq_key(self, k: SeqKey) -> Tuple:
+        """
+        Normalize a sequence-like key to a tuple of symbols (hashable).
+        """
+        if hasattr(k, "to_array"):
+            return tuple(k.to_array())
+        if isinstance(k, str):
+            dtype = self.sequences[0].to_array().dtype
+            return tuple(np.array(list(k)).astype(dtype))
+        if isinstance(k, (tuple, list, np.ndarray)):
+            return tuple(list(k))
+        raise TypeError(f"Unsupported sequence key type: {type(k)}")
 
     @classmethod
     def from_sequences(cls,
@@ -227,20 +285,23 @@ class FitnessLandscape:
         annotated networkx graph.
         """
 
+        node_list = list(graph.nodes())
         sequences = []
         raw_layer_data = defaultdict(list)
-        node_order = list(graph.nodes())
 
-        for node in node_order:
+        for node in node_list:
             data = graph.nodes[node]
             if 'sequence' not in data:
                 raise ValueError(f"Node {node} is missing 'sequence' attribute.")
             sequences.append(data['sequence'])
-            
-            for key, value in data.items():
-                if key.startswith('fitness_'):
-                    layer_name = key.replace('fitness_', '', 1)
-                    raw_layer_data[layer_name].append(value)
+            for k, v in data.items():
+                if k.startswith('fitness_'):
+                    raw_layer_data[k[8:]].append(v)
+
+        # length validation
+        for name, values in raw_layer_data.items():
+            if len(values) != len(node_list):
+                raise ValueError(f"Layer '{name}' length {len(values)} != node count {len(node_list)}.")
         
         fitness_layers = {}
         for name, values in raw_layer_data.items():
@@ -271,26 +332,39 @@ class FitnessLandscape:
         if not self.graph or not self.fitness_layers:
             return
             
-        seq_to_node_map = {tuple(data['sequence'].to_array()): node_idx
-                           for node_idx, data in self.graph.nodes(data=True)}
+        for name, layer in self.fitness_layers.items():
+            # Raise error if sequences are missing labels
+            layer._validate_length(len(self.sequences), name=f"during annotation ({name})")
 
         for i, seq in enumerate(self.sequences):
-            node_idx = seq_to_node_map.get(tuple(seq.to_array()))
-            if node_idx is None: continue
+            key = tuple(seq.to_array())
+            nodes = self._seq_to_nodes.get(key, [])
+            if not nodes:
+                # Skip quietly, or raise error?
+                continue
+            
+            for node in nodes:
+                for name, layer in self.fitness_layers.items():
+                    self.graph.nodes[node][f"fitness_{name}"] = layer.get_value(i)
 
-            for name, layer in self.fitness_layers.items():
-                attribute_name = f"fitness_{name}"
-                self.graph.nodes[node_idx][attribute_name] = layer.get_value(i)
-
+    def _enforce_unique_sequences(self):
+        """
+        Helper function to enforce only unique sequences.
+        """
+        dupes = [k for k, v in self._seq_to_nodes.items() if len(v) > 1]
+        if dupes:
+            raise ValueError(f"Duplicate sequences detected: {len(dupes)} keys")
+    
     def _annotate_graph_nodes_with_embeddings(self):
         """
         Helper to attach the stored embeddings to the graph nodes.
         """
         if self.graph is None or self.embeddings is None:
             return
-        
-        node_to_idx = {node: i for i, node in enumerate(self.graph.nodes())}
-        attrs = {node: {self._emb_arr_key: self.embeddings[idx]} for node, idx in node_to_idx.items()}
+        if self.embeddings.shape[0] != len(self._node_order):
+            return
+        attrs = {node: {self._emb_arr_key: self.embeddings[i]}
+                for i, node in enumerate(self._node_order)}
         nx.set_node_attributes(self.graph, attrs)
 
     # Validation method.
@@ -389,47 +463,214 @@ class FitnessLandscape:
             raise KeyError(f"Fitness layer '{name}' not found.")
         self._active_view_name = name
         return self.fitness_layers[name]
+    
+    def add(self,
+            **kwargs):
+        """
+        Convenience function to expedite fitness layer construction via
+        the `attach` method.
+        """
+        if 'layer' in kwargs and kwargs['layer'] is not None:
+            raise ValueError("`.add` builds from values; use `.attach(layer=...)` to attach a ready layer.")
+        return self.attach(**kwargs)
 
     def attach(self,
-               layer: BaseFitnessLayer) -> None:
+            layer: BaseFitnessLayer | None = None,
+            *,
+            name: str = None,
+            values = None,
+            dtype: Literal['numeric','categorical'] = None,
+            categories: list[str] = None,
+            map_by: Literal['index','sequence'] = 'index',
+            on_duplicates: Literal['error','first','all','aggregate'] = 'error',
+            allow_missing: bool = False) -> None:
         """
-        Attaches a new fitness layer to the landscape. Fitness value
-        indices must match the sequence indices.
-        
-        Parameters
-        ----------
-        layer : BaseFitnessLayer
-            The initialised fitness layer to attach.    
-            
+        Attach a new fitness layer.
+
+        Two modes:
+        1) attach(layer=BaseFitnessLayer(...))  # current behavior
+        2) attach(name=..., values=..., dtype=..., map_by='sequence'|'index', ...)
+
+        - If map_by='sequence', `values` must be either a dict {SeqKey -> value}
+        or an iterable of (SeqKey, value). Values follow layer dtype:
+            numeric: list[float] (replicates) or float
+            categorical: str
+            probabilistic: np.ndarray over categories
+        - on_duplicates controls behavior when the same sequence appears multiple
+        times in self.sequences:
+            'error'     : raise
+            'first'     : write to the first index only
+            'all'       : write to all matching indices
+            'aggregate' : numeric only — merge replicate lists across all matches
+        - allow_missing lets you ignore keys that don’t exist in self.sequences.
         """
-        # Validate the incoming layer
-        if len(layer.to_scalar()) != len(self.sequences):
-            raise ValueError(
-                f"Cannot attach layer '{layer.name}': its length ({len(layer.to_scalar())}) "
-                f"does not match the number of sequences in the landscape ({len(self.sequences)})."
-            )
-        
-        layer_name = layer.name
-        if layer_name in self.fitness_layers:
-            raise ValueError(f"A layer with the name '{layer_name}' already exists.")
 
-        # Add the layer to the dictionary
-        self.fitness_layers[layer_name] = layer
-        
-        # If a graph exists, annotate its nodes
-        if self.graph:
-            seq_to_node_map = {tuple(data['sequence'].to_array()): node_idx
-                               for node_idx, data in self.graph.nodes(data=True)}
+        if layer is not None:
+            if any(x is not None for x in (name, values, dtype, categories)):
+                raise ValueError("Provide either `layer` or (name, values, dtype...), not both.")
+            if len(layer.to_scalar()) != len(self.sequences):
+                raise ValueError(
+                    f"Cannot attach layer '{layer.name}': its length ({len(layer.to_scalar())}) "
+                    f"does not match the number of sequences ({len(self.sequences)})."
+                )
+            layer_name = layer.name
+            if layer_name in self.fitness_layers:
+                raise ValueError(f"A layer with the name '{layer_name}' already exists.")
+            self.fitness_layers[layer_name] = layer
+            # annotate graph
+            if self.graph:
+                seq_to_node_map = {tuple(data['sequence'].to_array()): node_idx
+                                for node_idx, data in self.graph.nodes(data=True)}
+                for i, seq in enumerate(self.sequences):
+                    node_idx = seq_to_node_map.get(tuple(seq.to_array()))
+                    if node_idx is not None:
+                        self.graph.nodes[node_idx][f"fitness_{layer_name}"] = layer.get_value(i)
+            if self._active_view_name is None:
+                self._active_view_name = layer_name
+            return
+
+        # Construct from values
+        if name is None or values is None or dtype is None:
+            raise ValueError("When not passing `layer`, you must provide name, values, and dtype.")
+
+        n = len(self.sequences)
+
+        # Resolve mapping by index
+        if map_by == 'index':
+            # Expect values to be a list aligned to sequences length
+            if len(values) != n:
+                raise ValueError(f"`values` length {len(values)} != number of sequences {n}")
+            # Normalize to concrete layer
+            if dtype == 'numeric':
+                norm = [[v] if not isinstance(v, (list, tuple, np.ndarray)) else list(v) for v in values]
+                new_layer = NumericFitness(name=name, values=norm)
+            elif dtype == 'categorical':
+                if categories is None:
+                    categories = sorted(list(set(values)))
+                new_layer = CategoricalFitness(name=name, values=list(values), categories=categories)
+            else:
+                raise ValueError("For probabilistic categories, use dtype='categorical' with `values`=probabilities and pass categories, or attach a ProbabilisticCategoricalFitness layer explicitly.")
             
-            for i, seq in enumerate(self.sequences):
-                node_idx = seq_to_node_map.get(tuple(seq.to_array()))
-                if node_idx is not None:
-                    attribute_name = f"fitness_{layer_name}"
-                    self.graph.nodes[node_idx][attribute_name] = layer.get_value(i)
+            # Delegate to regular layer attachment.
+            return self.attach(new_layer)
 
-        # If this is the first layer being added, set it as the active view
-        if self._active_view_name is None:
-            self._active_view_name = layer_name
+        # Resolve mapping by sequence key
+        if map_by != 'sequence':
+            raise ValueError(f"Unknown map_by: {map_by}")
+
+        # Normalize `values` into a dict {Tuple(seq) -> value}
+        if isinstance(values, Mapping):
+            items = list(values.items())
+        else:
+
+            items = list(values)
+
+        key_to_val = {self._normalize_seq_key(k): v for k, v in items}
+
+        # Create a per-index container
+        if dtype == 'numeric':
+            idx_values: list[list[float]] = [[] for _ in range(n)]
+        elif dtype == 'categorical':
+            idx_values: list[Any] = [None] * n
+        else:
+            raise ValueError("dtype must be `numeric` or `categorical` here; pass a ready layer object otherwise.")
+
+        # Build index map for duplicates.
+        idx_map = self._index_map()
+
+        # Private helper.
+        def _apply_numeric(idx_list: list[int],
+                           v):
+            
+            reps = v if isinstance(v, (list, tuple, np.ndarray)) else [float(v)]
+            
+            if on_duplicates == 'error' and len(idx_list) > 1:
+                raise ValueError("Duplicate sequences found; set `on_duplicates` to `first`, `all`, or `aggregate`.")
+            
+            # Collect only first
+            if on_duplicates == 'first':
+                idx_values[idx_list[0]] = list(reps)
+            
+            # Collect all
+            elif on_duplicates == 'all':
+                for i in idx_list:
+                    idx_values[i] = list(reps)
+            
+            # merge replicate lists across all matches
+            elif on_duplicates == 'aggregate':
+            
+                merged = []
+                for i in idx_list:
+                    merged.extend(reps)
+                for i in idx_list:
+                    idx_values[i] = list(merged)
+            else:
+                raise ValueError(f"Unknown `on_duplicates` option: {on_duplicates}")
+
+        # Private helper.
+        def _apply_categorical(idx_list: list[int],
+                               v):
+            
+            if on_duplicates == 'error' and len(idx_list) > 1:
+                raise ValueError("Duplicate sequences found; set on_duplicates to 'first' or 'all'.")
+            
+            if on_duplicates == 'first':
+                idx_values[idx_list[0]] = v
+            
+            elif on_duplicates == 'all':
+                for i in idx_list:
+                    idx_values[i] = v
+            
+            elif on_duplicates == 'aggregate':
+                raise ValueError("on_duplicates='aggregate' is not supported for categorical.")
+            
+            else:
+                raise ValueError(f"Unknown on_duplicates: {on_duplicates}")
+
+        # Fill index containers
+        seen = set()
+        for key, v in key_to_val.items():
+            idxs = idx_map.get(key, [])
+            if not idxs:
+                if allow_missing:
+                    continue
+                raise KeyError(f"Sequence {key} not found in landscape.")
+            
+            seen.add(key)
+            
+            if dtype == 'numeric':
+                _apply_numeric(idxs, v)
+            
+            else:
+                _apply_categorical(idxs, v)
+
+        # If unfilled indices:
+        if dtype == 'numeric':
+            missing = [i for i, r in enumerate(idx_values) if len(r) == 0]
+        
+        else:
+            missing = [i for i, r in enumerate(idx_values) if r is None]
+        
+        if missing and not allow_missing:
+            raise ValueError(f"{len(missing)} sequences were not assigned a value. Use `allow_missing=True` to skip.")
+
+        # Build the concrete layer
+        if dtype == 'numeric':
+            # For any unassigned (allow_missing=True), give NaN replicate so shape is valid
+            idx_values = [r if r else [np.nan] for r in idx_values]
+            new_layer = NumericFitness(name=name, values=idx_values)
+        else:
+            if categories is None:
+                categories = sorted(list({v for v in idx_values if v is not None}))
+            # Replace None with a placeholder category if allow_missing
+            if allow_missing:
+                if "__MISSING__" not in categories:
+                    categories = categories + ["__MISSING__"]
+                idx_values = [v if v is not None else "__MISSING__" for v in idx_values]
+            new_layer = CategoricalFitness(name=name, values=idx_values, categories=categories)
+
+        # Delegate to regular constructor.
+        return self.attach(new_layer)
 
     def detach(self,
                layer_name: str):
@@ -448,9 +689,11 @@ class FitnessLandscape:
         # If a graph exists, remove the corresponding node attributes
         if self.graph:
             attribute_name = f"fitness_{layer_name}"
-            for node_idx in self.graph.nodes():
-                if attribute_name in self.graph.nodes[node_idx]:
-                    del self.graph.nodes[node_idx][attribute_name]
+            
+            for i, seq in enumerate(self.sequences):
+                key = tuple(seq.to_array())
+                for node in self._seq_to_nodes.get(key, []):
+                    del self.graph.nodes[node][attribute_name]
 
         # If the detached layer was the active one, update the active view
         if self._active_view_name == layer_name:
@@ -458,7 +701,7 @@ class FitnessLandscape:
                 # Set the new active layer to the first available one
                 self._active_view_name = next(iter(self.fitness_layers.keys()))
             else:
-                # No layers left
+                # No layers lefts
                 self._active_view_name = None
 
     @property
