@@ -1029,11 +1029,17 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
     
     # The scale for each point is the distance to its k-th neighbor
     sigma = distances[:, k_for_scale]
-    median_sigma_sq = np.median(sigma[sigma > 0])**2
+    pos = sigma[sigma > 0]
 
-    if median_sigma_sq == 0:
+    if pos.size == 0:
         median_sigma_sq = 1.0
-        
+    else:
+        median_sigma_sq = float(np.median(pos))**2
+        if not np.isfinite(median_sigma_sq) or median_sigma_sq <= 0:
+            median_sigma_sq = 1.0
+
+    gamma = 1.0 / (2 * median_sigma_sq)
+
     gamma = 1.0 / (2 * median_sigma_sq)
     kernel_matrix = rbf_kernel(embeddings, gamma=gamma)
     

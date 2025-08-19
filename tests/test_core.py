@@ -3,6 +3,7 @@ import pytest
 import networkx as nx
 from fitness_landscape.core.sequence import *
 from fitness_landscape.core.graph import *
+from fitness_landscape.core.graph import _encode_multiallele 
 from fitness_landscape.core.digraph import *
 from fitness_landscape.core.landscape import FitnessLandscape, DirectedFitnessLandscape
 from fitness_landscape.core.fitness import NumericFitness, CategoricalFitness
@@ -1032,3 +1033,137 @@ def test_knn_auto_backend_small_n_is_balltree_like():
     G_bt   = create_knn_graph(sequences=seqs, k=3, backend="balltree")
     assert G_auto.number_of_nodes() == G_bt.number_of_nodes()
     assert G_auto.number_of_edges() >= G_bt.number_of_edges() * 0.8
+
+def test_encode_multiallele_stable_mapping():
+    # First appearance order should define mapping deterministically
+    seqs = [
+        BaseNumpySequence(['X','Y']),
+        BaseNumpySequence(['Y','Z']),
+        BaseNumpySequence(['Z','X']),
+    ]
+    X1, map1 = _encode_multiallele(seqs)
+    X2, map2 = _encode_multiallele(seqs)  # repeat
+    assert map1 == map2
+    assert X1.dtype == np.int32 and X2.dtype == np.int32
+    assert X1.shape == (3, 2)
+
+def test_hamming_multiallele_all_identical_sequences_yields_no_edges():
+    seqs = [BaseNumpySequence(['A','A'], alphabet=['A','B']) for _ in range(5)]
+    G = create_hamming_graph(sequences=seqs, _backend="masked")
+    assert G.number_of_nodes() == 5
+    assert G.number_of_edges() == 0
+
+def test_knn_balltree_all_ties_reaches_degree_at_least_L_on_hypercube():
+    seqs = _toy_binary_seqs_L4()  # L = 4
+    G = create_knn_graph(sequences=seqs, k=2, backend="balltree", tie_policy="all")
+    L = len(seqs[0])
+    assert min(dict(G.degree()).values()) >= L  # union with all ties
+
+def test_knn_balltree_all_ties_reaches_degree_at_least_L_on_hypercube():
+    seqs = _toy_binary_seqs_L4()  # L = 4
+    G = create_knn_graph(sequences=seqs, k=2, backend="balltree", tie_policy="all")
+    L = len(seqs[0])
+    assert min(dict(G.degree()).values()) >= L  # union with all ties
+
+def test_diffusion_emb_graph_auto_backend_small_n_balltree_path(clustered_data):
+    seqs, embs = clustered_data[:]
+    # small n triggers BallTree path in 'auto'
+    G = create_diffusion_emb_graph(sequences=seqs, embeddings=embs, backend="auto", k=3, t=3)
+    assert isinstance(G, nx.Graph)
+    assert G.number_of_nodes() == len(seqs)
+
+def test_diffusion_emb_graph_k_ge_n_handles_sigma_zero_safely():
+    # k >= n-1 then k_for_scale adjusted and median_sigma_sq fallback
+    seqs = [BinarySequence([0,0,0]), BinarySequence([0,0,1]), BinarySequence([0,1,1])]
+    embs = np.array([[0.,0.],[0.,0.],[0.,0.]])  # degenerate distances
+    G = create_diffusion_emb_graph(sequences=seqs, embeddings=embs, k=10, t=2)
+    assert isinstance(G, nx.Graph)  # no crash
+
+def test_evol_diffusion_graph_falls_back_to_hamming_knn_when_no_embeddings(diffusion_test_data):
+    seqs, _ = diffusion_test_data
+    G = create_evol_diffusion_graph(sequences=seqs, embeddings=None, k=1, t=2)
+    assert isinstance(G, nx.Graph)
+    A = nx.to_numpy_array(G)
+    assert np.allclose(A, A.T)
+
+def test_evol_diffusion_graph_rejects_non_PROT20():
+    seqs = [BaseNumpySequence(['A','B'], alphabet=['A','B'])]
+    with pytest.raises(ValueError, match="PROT_20"):
+        create_evol_diffusion_graph(sequences=seqs, embeddings=None)
+
+def test_evol_diffusion_graph_soft_sequences_ok():
+    # 2 pos, 3 aa alphabet from PROT_20 slice for simplicity
+    alphabet = PROT_20
+    post1 = np.zeros((2, len(alphabet))); post1[:, alphabet.index('A')] = 1.0
+    post2 = np.zeros((2, len(alphabet))); post2[:, alphabet.index('R')] = 1.0
+    s1 = SoftSequence(post1, alphabet=alphabet)
+    s2 = SoftSequence(post2, alphabet=alphabet)
+    G = create_evol_diffusion_graph(sequences=[s1, s2], embeddings=None, k=1, t=1)
+    assert isinstance(G, nx.Graph)
+    assert G.number_of_nodes() == 2
+
+def test_tda_graph_reweight_simplex_edges_sets_attribute(clustered_data):
+    seqs, embs = clustered_data
+    G = create_tda_graph(sequences=seqs, embeddings=embs, reweight_simplex_edges=True)
+    # If there are any triangles, edges should have 'simplicial_weight' ≥ 1
+    if G.number_of_edges() > 0:
+        assert all('simplicial_weight' in d for *_, d in G.edges(data=True))
+
+@pytest.mark.parametrize("graph_type", ["hamming", "knn", "tda", "diffusion"])
+def test_landscape_from_sequences_attach_embeddings_toggle(graph_type, clustered_data):
+    if graph_type in {"tda", "diffusion"}:
+        seqs, embs = clustered_data
+        ctor_kwargs = {}
+    else:
+        seqs = generate_sequences(length=3, alphabet=[0,1])
+        embs = None
+        ctor_kwargs = {"k": 3} if graph_type == "knn" else {}
+
+    fl = FitnessLandscape.from_sequences(
+        sequences=seqs,
+        fitness_layers={},
+        graph_type=graph_type,
+        embeddings=embs,
+        attach_embeddings=True,
+        **ctor_kwargs
+    )
+    if graph_type in {"tda", "diffusion"}:
+        assert fl.embeddings is not None
+    else:
+        assert fl.embeddings is None
+
+def test_landscape_from_sequences_phylo_mismatched_embeddings_raises(phylo_test_data):
+    # Provide wrong sized embeddings to hit the validation error path
+    sequences = alignment_to_base_numpy_sequences(load_aligned_seqs(phylo_test_data, moltype="protein"))
+    bad_embs = np.random.randn(len(sequences) - 1, 8)
+    with pytest.raises(ValueError, match="expected embeddings shape"):
+        FitnessLandscape.from_sequences(
+            sequences=phylo_test_data,
+            graph_type='phylogenetic',
+            embeddings=bad_embs,
+            _compute_phylo_embeddings=False
+        )
+
+def test_landscape_view_and_get_layer_errors(basic_landscape):
+    with pytest.raises(KeyError, match="not found"):
+        basic_landscape.view('does_not_exist')
+    with pytest.raises(KeyError, match="not found"):
+        basic_landscape.get_layer('does_not_exist', allow_active_default=False)
+
+def test_landscape_attach_duplicate_layer_name_raises(basic_landscape):
+    dup = NumericFitness(name='default', values=[[0.0] for _ in range(len(basic_landscape))])
+    with pytest.raises(ValueError, match="already exists"):
+        basic_landscape.attach(dup)
+
+def test_to_graph_tensor_without_embeddings_uses_ohe_shape():
+    seqs = generate_sequences(length=3, alphabet=[0,1])
+    fl = FitnessLandscape.from_sequences(seqs, fitness_layers={}, graph_type='hamming', attach_embeddings=False)
+    data = fl.to_graph_tensor()
+    n = len(seqs); L = len(seqs[0]); A = len(seqs[0].alphabet)
+    assert data.x.shape == (n, L * A)
+
+def test_to_sequence_tensors_unknown_sequence_raises(basic_landscape):
+    with pytest.raises(ValueError, match="not found"):
+        basic_landscape.to_sequence_tensors(sequence="9999")  # invalid for binary L=3
+
+
