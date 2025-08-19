@@ -15,6 +15,7 @@ import inspect
 from collections import defaultdict
 from cogent3 import ArrayAlignment, load_aligned_seqs
 from pathlib import Path
+import warnings
 
 from .._const import PROT_20
 
@@ -64,8 +65,6 @@ class FitnessLandscape:
             self._annotate_graph_nodes_with_embeddings()
         self._records = self._build_sequence_index() 
         self._enforce_unique_sequences()
-
-        self._records = {tuple(seq.to_array()): i for i, seq in enumerate(self.sequences)}
         
         if self.fitness_layers:
             self._active_view_name = (
@@ -353,7 +352,8 @@ class FitnessLandscape:
         """
         dupes = [k for k, v in self._seq_to_nodes.items() if len(v) > 1]
         if dupes:
-            raise ValueError(f"Duplicate sequences detected: {len(dupes)} keys")
+            warnings.warn(f"Duplicate sequences detected for {len(dupes)} keys; "
+                      f"downstream `attach()` policies will handle them.")
     
     def _annotate_graph_nodes_with_embeddings(self):
         """
@@ -362,7 +362,7 @@ class FitnessLandscape:
         if self.graph is None or self.embeddings is None:
             return
         if self.embeddings.shape[0] != len(self._node_order):
-            return
+            raise ValueError("Embeddings rows != number of graph nodes; cannot annotate safely.")
         attrs = {node: {self._emb_arr_key: self.embeddings[i]}
                 for i, node in enumerate(self._node_order)}
         nx.set_node_attributes(self.graph, attrs)
@@ -416,7 +416,7 @@ class FitnessLandscape:
                            for node, data in self.graph.nodes(data=True)}
 
         for i, seq in enumerate(sequences):
-            node_idx = seq_to_node_map.get(seq)
+            node_idx = seq_to_node_map.get(tuple(seq.to_array()))
             if node_idx is None:
 
                 continue
@@ -689,11 +689,11 @@ class FitnessLandscape:
         # If a graph exists, remove the corresponding node attributes
         if self.graph:
             attribute_name = f"fitness_{layer_name}"
-            
-            for i, seq in enumerate(self.sequences):
-                key = tuple(seq.to_array())
-                for node in self._seq_to_nodes.get(key, []):
-                    del self.graph.nodes[node][attribute_name]
+
+        for i, seq in enumerate(self.sequences):
+            key = tuple(seq.to_array())
+            for node in self._seq_to_nodes.get(key, []):
+                self.graph.nodes[node].pop(attribute_name, None)
 
         # If the detached layer was the active one, update the active view
         if self._active_view_name == layer_name:
@@ -1019,7 +1019,7 @@ class DirectedFitnessLandscape(FitnessLandscape):
                    graph=digraph,
                    fitness_layers=fitness_layers,
                    embeddings=final_embeddings,
-                   emb_arr_key=kwargs.get('emb_arr_key', 'emb_arr')
+                   emb_arr_key=emb_arr_key 
                    )
 
     @classmethod
