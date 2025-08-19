@@ -563,6 +563,11 @@ def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
     U = M.maximum(M.T)
 
     G = nx.from_scipy_sparse_array(U, edge_attribute='distance')
+    
+    G.add_nodes_from(range(n))
+    for i in range(n):
+        G.nodes[i]['sequence'] = sequences[i]
+    
     for u, v in G.edges():
         G[u][v]['weight'] = G[u][v]['distance']
     return G
