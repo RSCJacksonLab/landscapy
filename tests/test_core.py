@@ -1166,4 +1166,235 @@ def test_to_sequence_tensors_unknown_sequence_raises(basic_landscape):
     with pytest.raises(ValueError, match="not found"):
         basic_landscape.to_sequence_tensors(sequence="9999")  # invalid for binary L=3
 
+def _make_dupe_seqs():
+    # Two identical sequences ("000"), plus "001"
+    return [BinarySequence([0, 0, 0]),
+            BinarySequence([0, 0, 0]),
+            BinarySequence([0, 0, 1])]
 
+
+def _make_simple_landscape_with_dupes():
+    seqs = _make_dupe_seqs()
+    # Build a tiny hamming graph via factory – lets the class annotate nodes, etc.
+    fl = FitnessLandscape.from_sequences(
+        sequences=seqs,
+        fitness_layers={},           # start empty
+        graph_type="hamming"
+    )
+    return fl
+
+
+def _make_simple_landscape_no_dupes():
+    seqs = [BinarySequence([0, 0, 0]),
+            BinarySequence([0, 0, 1]),
+            BinarySequence([0, 1, 1])]
+    fl = FitnessLandscape.from_sequences(
+        sequences=seqs,
+        fitness_layers={},
+        graph_type="hamming"
+    )
+    return fl
+
+def test_attach_by_sequence_numeric_first_all_and_missing():
+    fl = _make_simple_landscape_with_dupes()
+    # Map values by sequence string; dtype inferred downstream via dtype='numeric'
+    values_map = {
+        "000": [1.0, 2.0],
+        "001": 3.0,
+    }
+
+    fl.attach(
+        name="num_first",
+        values=values_map,
+        dtype="numeric",
+        map_by="sequence",
+        on_duplicates="first",
+        allow_missing=True,
+    )
+    t_first = fl.view("num_first").get_tensor().numpy()
+    # shape (3, max_reps=2)
+    assert t_first.shape == (3, 2)
+    # first "000"
+    np.testing.assert_allclose(t_first[0], [1.0, 2.0], equal_nan=False)
+    # second "000" got "__missing__" -> padded with NaN replicate list
+    assert np.isnan(t_first[1]).all()
+    # "001"
+    np.testing.assert_allclose(t_first[2], [3.0, np.nan], equal_nan=True)
+
+    fl.attach(
+        name="num_all",
+        values=values_map,
+        dtype="numeric",
+        map_by="sequence",
+        on_duplicates="all",
+        allow_missing=False,
+    )
+    t_all = fl.view("num_all").get_tensor().numpy()
+    np.testing.assert_allclose(t_all[0], [1.0, 2.0], equal_nan=False)
+    np.testing.assert_allclose(t_all[1], [1.0, 2.0], equal_nan=False)
+    np.testing.assert_allclose(t_all[2], [3.0, np.nan], equal_nan=True)
+
+
+def test_attach_by_sequence_numeric_error_on_dupes():
+    fl = _make_simple_landscape_with_dupes()
+    with pytest.raises(ValueError):
+        fl.attach(
+            name="num_err",
+            values={"000": 1.0, "001": 2.0},
+            dtype="numeric",
+            map_by="sequence",
+            on_duplicates="error",
+        )
+
+def test_attach_by_sequence_categorical_first_all_and_missing_placeholder():
+    fl = _make_simple_landscape_with_dupes()
+    values_map = {
+        "000": "A",
+        "001": "B",
+    }
+    categories = ["A", "B", "__MISSING__"]
+
+    # on_duplicates='first' with allow_missing=True -> second "000" becomes "__MISSING__"
+    fl.attach(
+        name="cat_first",
+        values=values_map,
+        dtype="categorical",
+        categories=categories,
+        map_by="sequence",
+        on_duplicates="first",
+        allow_missing=True,
+    )
+    cat_layer = fl.view("cat_first")
+    # tensor one-hot should exist and have correct num categories
+    t = cat_layer.get_tensor().numpy()
+    assert t.shape == (3, 3)
+    # decode back: argmax
+    idx = t.argmax(axis=1)
+    decoded = [categories[i] for i in idx]
+    assert decoded == ["A", "__MISSING__", "B"]
+
+    # on_duplicates='all' w/out allow_missing -> both "000" become "A"
+    fl.attach(
+        name="cat_all",
+        values=values_map,
+        dtype="categorical",
+        categories=["A", "B"],
+        map_by="sequence",
+        on_duplicates="all",
+        allow_missing=False,
+    )
+    t2 = fl.view("cat_all").get_tensor().numpy()
+    idx2 = t2.argmax(axis=1)
+    decoded2 = [["A", "B"][i] for i in idx2]
+    assert decoded2 == ["A", "A", "B"]
+
+
+def test_attach_by_index_numeric_and_categorical_ok():
+    fl = _make_simple_landscape_no_dupes()
+    # numeric by index, different replicate lengths
+    fl.attach(
+        name="n_idx",
+        values=[[1.0, 2.0], [3.0], [4.0, 5.0, 6.0]],
+        dtype="numeric",
+        map_by="index",
+    )
+    t = fl.view("n_idx").get_tensor()
+    assert isinstance(t, torch.Tensor)
+    # padded to max replicate length = 3
+    assert t.shape == (3, 3)
+    np.testing.assert_allclose(t[0].numpy(), [1.0, 2.0, np.nan], equal_nan=True)
+    np.testing.assert_allclose(t[1].numpy(), [3.0, np.nan, np.nan], equal_nan=True)
+
+    # categorical by index
+    fl.attach(
+        name="c_idx",
+        values=["low", "high", "med"],
+        dtype="categorical",
+        map_by="index",
+        categories=["low", "med", "high"],
+    )
+    c = fl.view("c_idx").get_tensor()
+    assert c.shape == (3, 3)
+    # check argmax class indices: low(0), high(2), med(1)
+    idx = c.argmax(dim=1).tolist()
+    assert idx == [0, 2, 1]
+
+
+def test_attach_by_index_length_mismatch_raises():
+    fl = _make_simple_landscape_no_dupes()
+    with pytest.raises(ValueError):
+        fl.attach(
+            name="bad_len",
+            values=[1.0, 2.0],    # len 2, but we have 3 sequences
+            dtype="numeric",
+            map_by="index",
+        )
+
+
+def test_detach_removes_graph_attrs_safely():
+    fl = _make_simple_landscape_no_dupes()
+    # attach a simple categorical layer by index
+    fl.attach(
+        name="will_detach",
+        values=["x", "y", "z"],
+        dtype="categorical",
+        map_by="index",
+        categories=["x", "y", "z"],
+    )
+    # confirm attrs present on nodes
+    for _, data in fl.graph.nodes(data=True):
+        assert "fitness_will_detach" in data
+
+    # now detach; should not KeyError even if some nodes miss the key
+    fl.detach("will_detach")
+    for _, data in fl.graph.nodes(data=True):
+        assert "fitness_will_detach" not in data
+    # active view automatically moves to another layer or None
+    assert fl.active_layer_name in (None, *fl.fitness_layers.keys())
+
+def test_get_fitness_legacy_and_signal_follow_active_layer():
+    fl = _make_simple_landscape_no_dupes()
+    # attach two layers; check active layer semantics
+    fl.attach(
+        name="score1",
+        values=[1.0, 2.0, 3.0],
+        dtype="numeric",
+        map_by="index",
+    )
+    fl.attach(
+        name="score2",
+        values=[10.0, 20.0, 30.0],
+        dtype="numeric",
+        map_by="index",
+    )
+    # .view sets active
+    fl.view("score2")
+    s = fl.get_signal()
+    np.testing.assert_allclose(s, [10.0, 20.0, 30.0])
+    # get_fitness on a particular sequence
+    val = fl.get_fitness(fl.sequences[1])
+    assert val == 20.0
+
+def test_to_sequence_tensors_index_and_sequence_lookup():
+    fl = _make_simple_landscape_no_dupes()
+    fl.attach(
+        name="score",
+        values=[0.1, 0.2, 0.3],
+        dtype="numeric",
+        map_by="index",
+    )
+
+    # by index
+    out_idx = fl.to_sequence_tensors(sequence_idx=[0, 2])
+    assert len(out_idx) == 2
+    assert "sequence_tensor" in out_idx[0]
+    assert "fitness_tensors" in out_idx[0]
+    assert torch.is_tensor(out_idx[0]["sequence_tensor"])
+
+    # by sequence string (BinarySequence alphabet is [0,1])
+    out_seq = fl.to_sequence_tensors(sequence=["001"])
+    assert len(out_seq) == 1
+    # value at index of "001" is 0.2
+    score_tensor = out_seq[0]["fitness_tensors"]["score"]
+    assert torch.is_tensor(score_tensor)
+    assert torch.allclose(score_tensor[~torch.isnan(score_tensor)], torch.tensor([0.2]))
