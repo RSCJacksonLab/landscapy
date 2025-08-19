@@ -1,6 +1,6 @@
 import numpy as np
 import networkx as nx
-from typing import List, Union, Literal
+from typing import List, Union, Literal, Tuple
 from .sequence import BaseNumpySequence, BinarySequence, sequence_distance, SoftSequence
 from ..phylo.phylogenetic_asr import ASRConstructor
 from ..phylo._sub_matrices import lg
@@ -339,6 +339,133 @@ def _one_hot_matrix_amino(seqs: List[BaseNumpySequence]) -> np.ndarray:
             X[r, p*W + amap[str(sym)]] = 1.0
     return X
 
+def _find_knn_balltree(X : np.ndarray,
+                       k : int,
+                       tiebuffer : int = 0) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Helper function to find nearest neighbors by BallTree.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        The encoded sequence array. 
+    
+    k : int 
+        The number of neighbours to find.
+        
+    tiebuffer : int, defaut=1
+        The tiebuffer for equidistant neighbors above k. 
+    
+    Returns
+    -------
+    dists, inds : np.ndarray
+        Tuple of distances and indices.
+    """
+    n = X.shape[0]
+    nn = NearestNeighbors(algorithm='auto', metric='hamming')
+    nn.fit(X)
+    kq = min(k + 1 + tiebuffer, n)
+    dists, inds = nn.kneighbors(X, n_neighbors=kq, return_distance=True)
+    return dists, inds
+
+def _find_knn_faiss(X: np.ndarray,
+                    k: int,
+                    index_type: Literal['hnsw', 'flat', 'ivf'] = "hnsw",
+                    metric: Literal['ip', 'l2'] = 'ip',
+                    use_gpu: bool = False,
+                    hnsw_M: int = 32,
+                    tiebuffer : int = 0) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Helper function to find nearest neighbors by FAISS backend.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        The encoded sequence array. 
+    
+    k : int 
+        The number of neighbours to find.
+
+    index_type : str, default=`hnsw`
+        The faiss index type. Options are:
+        - flat (exact) for small n. 
+        - hnsw (approximate) for large n. 
+        - ivf (approximate) for very large n.
+    
+    metric : str, default=`ip`
+        The faiss metric to use specificall for hnsw. Options are:
+        - `ip` : Inner product
+        - `l2` : L2 norm 
+    
+    include_self : bool, default=`False`
+        Boolean to include self in the neighbor list.
+    
+    use_gpu : bool, default=`False`
+        Boolean to use FAISS GPU acceleration (application only to the
+        flat index).
+    
+    hsnw_M : int, default = 32
+        The hnsw dimesnion.
+    
+    tiebuffer : int, default=128
+        The number of hits kept in buffer to eliminate ties.
+    
+    Returns
+    -------
+    dists, inds : np.ndarray
+        Tuple of distances and indices.
+
+    """
+    n, d = X.shape
+
+    # Set the FAISS metric so easy conversion back to hamming distance.
+    if metric == "ip":
+        faiss_metric = faiss.METRIC_INNER_PRODUCT
+    elif metric == "l2":
+        faiss_metric = faiss.METRIC_L2
+    else:
+        raise ValueError(f"Expected `faiss_metric` to be in [`ip`, `l2`, found {faiss_metric}]")
+
+    # FAISS index
+    if index_type == "flat":
+        if metric == "ip":
+            index = faiss.IndexFlatIP(d)
+        else:  # 'l2'
+            index = faiss.IndexFlatL2(d)
+    
+    elif index_type == "hnsw":
+        # Catch error in setting `faiss_metrix`.
+        try:
+            index = faiss.IndexHNSWFlat(d, hnsw_M, faiss_metric)
+        except TypeError:
+            # Fallback: default is L2
+            index = faiss.IndexHNSWFlat(d, hnsw_M)
+            if metric != "l2":
+                raise RuntimeError(
+                    "IndexHNSWFlat in this FAISS build uses L2 only; set metric='l2' "
+                    "or switch to 'flat'/'ivf' with METRIC_INNER_PRODUCT."
+                )
+            
+    elif index_type == "ivf":
+        nlist = max(256, int(np.sqrt(n)))
+        quant = faiss.IndexFlatIP(d)
+        index = faiss.IndexIVFFlat(quant, d, nlist, faiss.METRIC_INNER_PRODUCT)
+        index.train(X)
+        index.nprobe = min(64, nlist)
+    else:
+        raise ValueError(f"Expected `index_type` to be in [`flat`, `hnsw`, `ivf`], found {index_type}")
+
+    if use_gpu:
+        res = faiss.StandardGpuResources()
+        index = faiss.index_cpu_to_gpu(res, 0, index)
+
+    index.add(X)
+    
+    # Include consideration for self edges and a tiebuffer.
+    kq = k + (0 if include_self else 1) + tiebuffer
+    dists, inds = index.search(X, kq)
+
+
 def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
                                k: int,
                                tie_policy: Literal['all', 'min_index', 'random'] = 'all',
@@ -381,10 +508,7 @@ def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
     X, _ = _encode_multiallele(sequences)  
     L = X.shape[1]
 
-    nn = NearestNeighbors(algorithm='auto', metric='hamming')
-    nn.fit(X)
-    kq = min(k + 1 + tiebuffer, n)
-    dists, inds = nn.kneighbors(X, n_neighbors=kq, return_distance=True)
+    dists, inds = _find_knn_balltree(X, k=k, tiebuffer=tiebuffer)
 
     rng = np.random.default_rng(seed)
     rows, cols, vals = [], [], []
@@ -507,52 +631,7 @@ def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
     n, d = X.shape
     L = len(sequences[0])
 
-    # Set the FAISS metric so easy conversion back to hamming distance.
-    if metric == "ip":
-        faiss_metric = faiss.METRIC_INNER_PRODUCT
-    elif metric == "l2":
-        faiss_metric = faiss.METRIC_L2
-    else:
-        raise ValueError(f"Expected `faiss_metric` to be in [`ip`, `l2`, found {faiss_metric}]")
-
-    # FAISS index
-    if index_type == "flat":
-        if metric == "ip":
-            index = faiss.IndexFlatIP(d)
-        else:  # 'l2'
-            index = faiss.IndexFlatL2(d)
-    
-    elif index_type == "hnsw":
-        # Catch error in setting `faiss_metrix`.
-        try:
-            index = faiss.IndexHNSWFlat(d, hnsw_M, faiss_metric)
-        except TypeError:
-            # Fallback: default is L2
-            index = faiss.IndexHNSWFlat(d, hnsw_M)
-            if metric != "l2":
-                raise RuntimeError(
-                    "IndexHNSWFlat in this FAISS build uses L2 only; set metric='l2' "
-                    "or switch to 'flat'/'ivf' with METRIC_INNER_PRODUCT."
-                )
-            
-    elif index_type == "ivf":
-        nlist = max(256, int(np.sqrt(n)))
-        quant = faiss.IndexFlatIP(d)
-        index = faiss.IndexIVFFlat(quant, d, nlist, faiss.METRIC_INNER_PRODUCT)
-        index.train(X)
-        index.nprobe = min(64, nlist)
-    else:
-        raise ValueError(f"Expected `index_type` to be in [`flat`, `hnsw`, `ivf`], found {index_type}")
-
-    if use_gpu:
-        res = faiss.StandardGpuResources()
-        index = faiss.index_cpu_to_gpu(res, 0, index)
-
-    index.add(X)
-    
-    # Include consideration for self edges and a tiebuffer.
-    kq = k + (0 if include_self else 1) + tiebuffer
-    D, I = index.search(X, kq)
+    D, I = _find_knn_faiss(X, k=k, index_type=index_type, metric=metric, use_gpu=use_gpu, hnsw_M=hnsw_M, tiebuffer=tiebuffer)
 
     # Convert metric distances to Hamming distances.
     if metric == "ip":
@@ -835,14 +914,23 @@ def _reweight_graph_by_simplices(G: nx.Graph,
 
 
 def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
-                           embeddings: np.ndarray,
-                           t: int = 5,
-                           k: int = 5,
-                           connectivity_threshold: float = 1e-4,
-                           **kwargs) -> nx.Graph:
+                               embeddings: np.ndarray = None,
+                               k: int = 128,
+                               tiebuffer: int = 0,
+                               backend: Literal['auto', 'faiss', 'balltree'] = 'auto',
+                               index_type: Literal['hnsw', 'flat', 'ivf'] = 'hnsw',
+                               faiss_metric: Literal['ip', 'l2'] = 'ip',
+                               include_self: bool = False,
+                               use_gpu: bool = False,
+                               hnsw_M: int = 32,
+                               t: int = 5,
+                               connectivity_threshold: float = 1e-4,
+                               **kwargs) -> nx.Graph:
     """
     Function to construct a graph based on expected diffusion
-    behaviour in a high-dimensional embedding space. 
+    behaviour in a high-dimensional embedding space. Uses sparse
+    operations neighbor finding with either BallTree or FAISS-based
+    algorithms to accelerate the computation for very large graphs.
 
     Parameters
     ----------
@@ -858,6 +946,38 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
     k : int, default=`5`
         Nearest neighbors to scale the rbf gamma parameter.
 
+    backend : str, default=`auto`
+        The computational backend to use. Options are:
+        -`faiss` : use a FAISS-based (sublinear) scalling (but
+        approximate) backend to find neighbors. 
+        - `balltree` : use the BallTree exact solver, which scales
+        poorly with large dimension size. 
+        - `auto` : Automatic backend based on dataset size.
+    
+    index_type : str, default=`hnsw`
+        The FAISS indexing algorithm to use. Options are:
+        - `hnsw` : hierarchical navigatible small worlds. Effective on
+        large n. Approximate.
+        - `flat` : Exact flat indexing.
+        - `ivf` : inverted file indexing algorithm. Effective on very
+        large n. Approximate.
+    
+    faiss_metric : str, default=`ip`
+        The faiss metric. Options are:
+        - `ip` : the inner produt.
+        - `l2` : the L2 norm. 
+        Use of `ip` guarantees distances are returned / stored as
+        Hamming distances. 
+    
+    use_gpu : bool, default=`False`
+        Boolean to use GPU on flat indexing. 
+    
+    hnsw_M : int, default=32
+        The hnsw dimension size.
+    
+    tiebuffer : int, default=128
+        The number of hits kept in buffer to eliminate ties.
+
     connectivity_threshold : float, default=`1e-04`
         The threshold the define discrete connectivity.
 
@@ -867,13 +987,40 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         The constructed graph with `BaseNumpySequence` features stored
         under `sequence`.
     """
+    if embeddings is None:
+        embeddings, _ = _encode_multiallele(sequences)
+    
     k_for_scale = k
     if embeddings.shape[0] <= k_for_scale:
         k_for_scale = embeddings.shape[0] - 1
+    
+    # Use balltree algorithm (will fail as shape of embeddings >>>)
+    if backend == 'balltree':
+        distances, _ = _find_knn_balltree(embeddings, k, tiebuffer)
+    
+    # Use FAISS algorithm (approx or exact).
+    elif backend == 'faiss':
+        distances, _ = _find_knn_faiss(embeddings,
+                                       k,
+                                       index_type=index_type,
+                                       metric=faiss_metric,
+                                       use_gpu=use_gpu,
+                                       hnsw_M=hnsw_M,
+                                       tiebuffer=tiebuffer) 
+                                    
+    # Select backend algorithm based on size of embeddings.
+    elif backend == 'auto:
+        if embeddings.shape[0] < 5000:
+            distances, _ = _find_knn_balltree(embeddings, k, tiebuffer)
+        else:
+            distances, _ = _find_knn_faiss(embeddings,
+                                           k,
+                                           index_type=index_type,
+                                           metric=faiss_metric,
+                                           use_gpu=use_gpu,
+                                           hnsw_M=hnsw_M,
+                                           tiebuffer=tiebuffer) 
 
-    nn = NearestNeighbors(n_neighbors=k_for_scale + 1)
-    nn.fit(embeddings)
-    distances, _ = nn.kneighbors(embeddings)
     
     # The scale for each point is the distance to its k-th neighbor
     sigma = distances[:, k_for_scale]
@@ -944,6 +1091,13 @@ def create_phylo_graph(sequences: Union[Path, ArrayAlignment],
 def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                                              embeddings: np.ndarray,
                                              replacement_matrix: np.ndarray = lg,
+                                             tiebuffer: int = 0,
+                                             backend: Literal['auto', 'faiss', 'balltree'] = 'auto',
+                                             index_type: Literal['hnsw', 'flat', 'ivf'] = 'hnsw',
+                                             faiss_metric: Literal['ip', 'l2'] = 'ip',
+                                             include_self: bool = False,
+                                             use_gpu: bool = False,
+                                             hnsw_M: int = 32,
                                              k: int = 50,
                                              t: int = 5,
                                              tau: float = 1.0,
@@ -967,6 +1121,38 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     
     k : int, default=50
         The number of neighbours to use for kNN pre-filtering.
+
+    backend : str, default=`auto`
+        The computational backend to use. Options are:
+        -`faiss` : use a FAISS-based (sublinear) scalling (but
+        approximate) backend to find neighbors. 
+        - `balltree` : use the BallTree exact solver, which scales
+        poorly with large dimension size. 
+        - `auto` : Automatic backend based on dataset size.
+    
+    index_type : str, default=`hnsw`
+        The FAISS indexing algorithm to use. Options are:
+        - `hnsw` : hierarchical navigatible small worlds. Effective on
+        large n. Approximate.
+        - `flat` : Exact flat indexing.
+        - `ivf` : inverted file indexing algorithm. Effective on very
+        large n. Approximate.
+    
+    faiss_metric : str, default=`ip`
+        The faiss metric. Options are:
+        - `ip` : the inner produt.
+        - `l2` : the L2 norm. 
+        Use of `ip` guarantees distances are returned / stored as
+        Hamming distances. 
+    
+    use_gpu : bool, default=`False`
+        Boolean to use GPU on flat indexing. 
+    
+    hnsw_M : int, default=32
+        The hnsw dimension size.
+    
+    tiebuffer : int, default=128
+        The number of hits kept in buffer to eliminate ties.
     
     t : int, default=5
         The number of diffusion steps taken.
@@ -979,7 +1165,9 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     nx.Graph
         The constructed graph.
     """
-    
+    if embeddings is None:
+        embeddings, _ = _encode_multiallele(sequences)
+        
      # Type check alphabet first
     for seq in sequences:
         if seq.alphabet != PROT_20:
@@ -992,9 +1180,32 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     if k > n_sequences - 1:
         k = n_sequences - 1
 
-    nn = NearestNeighbors(n_neighbors=k, algorithm='ball_tree')
-    nn.fit(embeddings)
-    _, neighbor_indices = nn.kneighbors(embeddings)
+        # Use balltree algorithm (will fail as shape of embeddings >>>)
+    if backend == 'balltree':
+        _, neighbor_indices = _find_knn_balltree(embeddings, k, tiebuffer)
+    
+    # Use FAISS algorithm (approx or exact).
+    elif backend == 'faiss':
+        _, neighbor_indices = _find_knn_faiss(embeddings,
+                                       k,
+                                       index_type=index_type,
+                                       metric=faiss_metric,
+                                       use_gpu=use_gpu,
+                                       hnsw_M=hnsw_M,
+                                       tiebuffer=tiebuffer) 
+                                    
+    # Select backend algorithm based on size of embeddings.
+    elif backend == 'auto:
+        if embeddings.shape[0] < 5000:
+            _, neighbor_indices = _find_knn_balltree(embeddings, k, tiebuffer)
+        else:
+            _, neighbor_indices = _find_knn_faiss(embeddings,
+                                           k,
+                                           index_type=index_type,
+                                           metric=faiss_metric,
+                                           use_gpu=use_gpu,
+                                           hnsw_M=hnsw_M,
+                                           tiebuffer=tiebuffer) 
 
     pairs_to_align = set()
     for i in range(n_sequences):
