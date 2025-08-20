@@ -266,3 +266,164 @@ def test_elementary_landscapes_are_orthogonal():
     
     dot_product = np.dot(signal1, signal4)
     assert np.isclose(dot_product, 0.0)
+
+def _prod(ns):
+    p = 1
+    for x in ns:
+        p *= int(x)
+    return p
+
+
+def test_gnk_dict_alphabet_simple():
+    """
+    Per-site alphabet with no base_sequence: ensure sequence count = product of site sizes
+    and each position uses only its site's alphabet.
+    """
+    per_site = {
+        0: ['A', 'B'],
+        1: ['A', 'B', 'C'],
+        2: ['B', 'C'],
+    }
+    N = 3  # number of variable sites; variable_sites defaults to [0,1,2]
+    landscape = create_gnk_landscape(N=N, K=1, alphabet=per_site, seed=123)
+
+    expected = _prod(len(per_site[i]) for i in range(N))
+    assert len(landscape.sequences) == expected
+    assert isinstance(landscape.sequences[0], BaseNumpySequence)
+    assert len(landscape.get_signal()) == expected
+
+    # Validate symbols per position
+    for seq in landscape.sequences:
+        arr = seq.to_array()
+        assert len(arr) == N
+        for i in range(N):
+            assert arr[i] in per_site[i]
+
+
+def test_gnk_dict_alphabet_with_base_sequence_and_variable_sites():
+    """
+    Per-site alphabet + base_sequence + variable_sites.
+    Non-variable positions must remain fixed; variable ones must draw from their site alph.
+    """
+    base_seq = list("ABCDE")  # length 5
+    variable_sites = [1, 3, 4]  # global indices
+    per_site = {
+        1: ['X', 'Y'],
+        3: ['G', 'H', 'I'],
+        4: ['M', 'N'],
+    }
+    # Make sure base sequence characters at variable sites are allowed
+    base_seq[1] = per_site[1][0]
+    base_seq[3] = per_site[3][0]
+    base_seq[4] = per_site[4][0]
+
+    N = len(variable_sites)
+    landscape = create_gnk_landscape(
+        N=N,
+        K=1,
+        alphabet=per_site,
+        base_sequence=base_seq,
+        variable_sites=variable_sites,
+        seed=7,
+    )
+
+    expected = _prod(len(per_site[i]) for i in variable_sites)
+    assert len(landscape.sequences) == expected
+    assert isinstance(landscape.sequences[0], BaseNumpySequence)
+    assert len(landscape.get_signal()) == expected
+
+    # Validate fixed vs variable positions
+    for seq in landscape.sequences:
+        arr = list(seq.to_array())
+        # non-variable positions should match base_seq
+        for pos in range(len(base_seq)):
+            if pos not in variable_sites:
+                assert arr[pos] == base_seq[pos]
+        # variable positions must be from their per-site alphabets
+        for pos in variable_sites:
+            assert arr[pos] in per_site[pos]
+
+
+def test_gnk_dict_alphabet_with_adjacency_matrix_changes_signal():
+    """
+    With a per-site alphabet, an explicit adjacency matrix should alter the signal
+    compared to a different adjacency structure (same seed).
+    """
+    base_seq = list("ABCDE")  # length 5
+    variable_sites = [0, 2, 4]
+    per_site = {
+        0: ['A', 'B'],
+        2: ['C', 'D', 'E'],
+        4: ['M', 'N'],
+    }
+    # ensure base is valid at variable sites
+    base_seq[0] = per_site[0][0]
+    base_seq[2] = per_site[2][0]
+    base_seq[4] = per_site[4][0]
+
+    N = len(variable_sites)
+    adj_mat_1 = np.array([
+        [0, 1, 0],
+        [1, 0, 1],
+        [0, 1, 0],
+    ])
+    adj_mat_2 = np.array([
+        [0, 1, 1],
+        [1, 0, 0],
+        [1, 0, 0],
+    ])
+
+    L1 = create_gnk_landscape(
+        N=N, alphabet=per_site, base_sequence=base_seq, variable_sites=variable_sites,
+        adj_mat=adj_mat_1, seed=42
+    )
+    L2 = create_gnk_landscape(
+        N=N, alphabet=per_site, base_sequence=base_seq, variable_sites=variable_sites,
+        adj_mat=adj_mat_2, seed=42
+    )
+    # Same combinatorics
+    expected = _prod(len(per_site[i]) for i in variable_sites)
+    assert len(L1.sequences) == expected == len(L2.sequences)
+    # But different fitness signals due to different adjacency
+    assert not np.array_equal(L1.get_signal(), L2.get_signal())
+
+
+def test_gnk_dict_alphabet_k0_is_additive_per_site():
+    """
+    K=0 should be additive with per-site normalization (Ai-1).
+    Check additivity for a pair of single mutations vs the double mutation.
+    """
+    per_site = {
+        0: ['A', 'B'], # size 2
+        1: ['X', 'Y'], # size 2
+        2: ['C', 'D', 'E'],  # size 3 (different base size)
+    }
+    N = 3
+    landscape = create_gnk_landscape(N=N, K=0, alphabet=per_site, seed=99)
+
+    ref = BaseNumpySequence(['A', 'X', 'C'])
+    ref_fit = landscape.get_fitness(ref)
+
+    mut0 = BaseNumpySequence(['B', 'X', 'C'])
+    mut1 = BaseNumpySequence(['A', 'Y', 'C'])
+    mut01 = BaseNumpySequence(['B', 'Y', 'C'])
+
+    eff0 = landscape.get_fitness(mut0) - ref_fit
+    eff1 = landscape.get_fitness(mut1) - ref_fit
+    expected = ref_fit + eff0 + eff1
+    actual = landscape.get_fitness(mut01)
+
+    assert np.isclose(expected, actual, atol=1e-8)
+
+
+def test_gnk_dict_alphabet_missing_site_raises():
+    """
+    If a dict alphabet is missing a variable site, we expect a ValueError.
+    """
+    per_site_incomplete = {
+        0: ['A', 'B'],
+        2: ['C', 'D'],
+        # 1 missing
+    }
+    with pytest.raises(ValueError):
+        create_gnk_landscape(N=3, K=1, alphabet=per_site_incomplete, seed=1)
