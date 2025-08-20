@@ -496,6 +496,103 @@ class MultialleleSequence(BaseNumpySequence):
                          alphabet=alphabet,
                          moltype=None)
 
+    @classmethod
+    def from_bits(cls,
+                  bits: _SeqLike[int] | np.ndarray,
+                  *,
+                  sequence_id: str | None = None) -> "BinarySequence":
+        """
+        Build from a 0/1 iterable/array.
+        
+        Parameters
+        ----------
+        bits : _SeqLike[int] or np.ndarray
+            The bits to construct the sequence from. 
+        
+        sequence_id : str, default=`None`
+            The (optional) sequence ID. If `None`, the sequence is used
+            as the id. 
+        
+        Returns
+        -------
+        BaseNumpySequence
+            The constructed BaseNumpySequence object.  
+        """
+        arr = np.asarray(bits, dtype=int).ravel()
+        return cls(arr)
+
+    @classmethod
+    def from_integer_bits(cls,
+                          value: int,
+                          *,
+                          length: int,
+                          msb_first: bool = True,
+                          sequence_id: str | None = None) -> "BinarySequence":
+        """
+        Build from an integer's bit pattern clipped/padded to length.
+
+        Parameters
+        ----------
+        value : int
+            The integer value to use
+        
+        length : int
+            The length to truncate the bits to. 
+        
+        msb_first : bool, default=`True`
+            Boolean to mask the first bit. 
+        
+        sequence_id : str, default=`None`
+            The (optional) sequence ID. If `None`, the sequence is used
+            as the id. 
+        Returns
+        -------
+        BaseNumpySequence
+            The constructed BaseNumpySequence object.  
+        """
+        if value < 0:
+            raise ValueError("value must be non-negative")
+        bits = np.array(list(np.binary_repr(value, width=length)), dtype=int)
+        if not msb_first:
+            bits = bits[::-1]
+        return cls(bits)
+
+    @classmethod
+    def random(cls,
+               length: int,
+               *,
+               p_one: float = 0.5,
+               seed: int = None,
+               sequence_id: str | None = None) -> "BinarySequence":
+        
+        """
+        Construct random sequenceo of bits. 
+
+        Parameters
+        ----------
+        length : int
+            The length of the sequence. 
+        
+        p_one : float, default=0.5
+            The probability of a value being clamped to `1`.
+        
+        seed : int, default=`None`
+            The random state initialisation seed. 
+        
+        sequence_id : str, default=`None`
+            The (optional) sequence ID. If `None`, the sequence is used
+            as the id. 
+
+        Returns
+        -------
+        BaseNumpySequence
+            The constructed BaseNumpySequence object.  
+        """
+        rng = np.random.default_rng(seed)
+        arr = rng.random(length) < p_one
+        return cls(arr.astype(int))
+
+
 class SoftSequence(BaseNumpySequence):
     """
     A posterior-probability “soft” sequence.
@@ -578,6 +675,42 @@ class SoftSequence(BaseNumpySequence):
                             alphabet=self.alphabet,
                             hard_rule="sample",
                             rng=self._rng)
+
+    @classmethod
+    def from_posteriors(cls,
+                        aa_posterior: np.ndarray,
+                        *,
+                        alphabet: Iterable = PROT_20,
+                        gap_posterior: np.ndarray | None = None,
+                        hard_rule: Literal["argmax", "sample"] = "argmax",
+                        rng: np.random.Generator | None = None) -> "SoftSequence":
+        """
+        Alias around __init__ for clarity / parity with other classes.
+
+        Parameters
+        ----------
+        posterior : np.ndarray
+            Shape (L, A). Rows are sites, columns are alphabet symbols.
+        
+        alphabet : Iterable, default=`PROT_20`
+            The ordered alphabet corresponding to columns of `posterior`.
+        
+        hard_rule : {'argmax', 'sample'}, default 'argmax'
+            How to derive the proxy hard sequence used by existing code.
+        
+        rng : np.random.Generator, optional
+            RNG used when `hard_rule='sample'`.
+        
+        Returns
+        -------
+        SoftSequence
+            The constructed soft sequence.
+        """
+        return cls(aa_posterior,
+                   alphabet=alphabet,
+                   gap_posterior=gap_posterior,
+                   hard_rule=hard_rule,
+                   rng=rng)
 
     @staticmethod
     def compute_conditional_gap_dist(aa_post_dist: np.ndarray,       
