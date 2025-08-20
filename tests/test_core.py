@@ -16,6 +16,7 @@ from fitness_landscape.phylo._sub_matrices import nq_pfam
 from fitness_landscape.embedding.particle_sampler import SequenceGenerator, TopPSampler
 from unittest.mock import patch
 from fitness_landscape.utils import alignment_to_base_numpy_sequences
+from cogent3 import get_moltype
 
 @pytest.mark.parametrize("n,L,B", [(60, 6, 3), (80, 5, 4)])
 def test_hamming_graph_multiallele_smoke_largeish(n, L, B):
@@ -1398,3 +1399,140 @@ def test_to_sequence_tensors_index_and_sequence_lookup():
     score_tensor = out_seq[0]["fitness_tensors"]["score"]
     assert torch.is_tensor(score_tensor)
     assert torch.allclose(score_tensor[~torch.isnan(score_tensor)], torch.tensor([0.2]))
+
+
+def test_base_from_string_and_iterable_defaults():
+    s = BaseNumpySequence.from_string("ACDE")
+    assert isinstance(s, BaseNumpySequence)
+    assert s.to_str() == "ACDE"
+    # Default alphabet is PROT_20
+    assert s.alphabet == list(PROT_20)
+
+    t = BaseNumpySequence.from_iterable(list("WQER"), alphabet=list("WQER"))
+    assert t.to_str() == "WQER"
+    assert t.alphabet == list("WQER")
+
+
+def test_base_from_cogent3_preserves_moltype_and_alphabet():
+    prot = get_moltype("protein")
+    c3 = prot.make_seq("ACDEFG")
+    s = BaseNumpySequence.from_cogent3(c3)
+    assert s.to_str() == "ACDEFG"
+    # Alphabet should come from cogent3 moltype
+    assert set(s.alphabet) >= set(list("ACDEFG"))  # superset check (protein alphabet)
+
+
+def test_from_one_hot_with_and_without_alphabet_roundtrip():
+    one_hot = np.array([
+        [1, 0, 0],
+        [0, 1, 0],
+        [0, 0, 1],
+    ])
+    # With explicit alphabet
+    seq = BaseNumpySequence.from_one_hot(one_hot, alphabet=["A", "C", "D"])
+    assert seq.to_str() == "ACD"
+    # Round-trip to one-hot shape
+    oh = seq.to_one_hot(mapping={"A":0, "C":1, "D":2})
+    assert oh.shape == one_hot.shape
+    assert np.all((oh == one_hot))
+
+    seq_num = BaseNumpySequence.from_one_hot(one_hot)
+    # Should have length 3 and correct argmax positions
+    assert len(seq_num) == 3
+    # Rebuilding its own one-hot should match shape
+    oh2 = seq_num.to_one_hot(mapping={str(i): i for i in range(3)})
+    assert oh2.shape == (3, 3)
+
+
+def test_from_integer_with_explicit_alphabet():
+    idxs = [0, 2, 1, 2]
+    alphabet = ["A", "B", "C"]
+    s = BaseNumpySequence.from_integer(idxs, alphabet=alphabet)
+    assert s.to_str() == "ACBC"
+    assert s.alphabet == alphabet
+
+
+def test_make_sequence_infers_binary_and_base_numpy():
+    b = make_sequence([0, 1, 1, 0])  # infer binary
+    assert isinstance(b, BinarySequence)
+    assert b.to_array().tolist() == [0, 1, 1, 0]
+
+    p = make_sequence("ACD", alphabet=list("ACDE"))
+    assert isinstance(p, BaseNumpySequence)
+    assert p.to_str() == "ACD"
+
+
+def test_binary_sequence_constructors_and_random():
+    b1 = BinarySequence.from_bits([1, 0, 1])
+    assert isinstance(b1, BinarySequence)
+    assert b1.to_array().tolist() == [1, 0, 1]
+
+    b2 = BinarySequence.from_integer_bits(13, length=6)  # 001101 (MSB-first)
+    assert isinstance(b2, BinarySequence)
+    assert len(b2) == 6
+
+    b3 = BinarySequence.random(10, p_one=0.25, seed=123)
+    assert isinstance(b3, BinarySequence)
+    assert len(b3) == 10
+    # Reproducible
+    b4 = BinarySequence.random(10, p_one=0.25, seed=123)
+    assert np.array_equal(b3.to_array(), b4.to_array())
+
+
+def test_multiallele_sequence_random_and_from_string():
+    m1 = MultialleleSequence.random(5, alphabet=["A", "B", "C"])
+    assert isinstance(m1, MultialleleSequence)
+    assert len(m1) == 5
+    assert set(m1.alphabet) == {"A", "B", "C"}
+
+    m2 = MultialleleSequence.from_string("ABC", alphabet=["A", "B", "C"])
+    assert m2.to_str() == "ABC"
+
+
+def test_softsequence_from_posteriors_argmax_and_sample():
+    aa_post = np.array([[0.1, 0.9],
+                        [0.7, 0.3],
+                        [0.4, 0.6]])
+    s_arg = SoftSequence.from_posteriors(aa_post, alphabet=["X", "Y"], hard_rule="argmax")
+    assert s_arg.to_str() == "YXY"
+
+    s_samp = SoftSequence.from_posteriors(aa_post, alphabet=["X", "Y"], hard_rule="sample", seed=7)
+    # deterministic due to seed
+    assert isinstance(s_samp, SoftSequence)
+    assert len(s_samp) == 3
+    # resample uses same seed stored in instance
+    again = s_samp.resample()
+    assert isinstance(again, SoftSequence)
+    assert len(again) == 3
+
+
+def test_as_sequences_mixed_inputs_and_binary_detection():
+    items = ["ACD", "0101", np.array(list("AAA")), [0, 1, 0, 0]]
+    seqs = as_sequences(items, alphabet=list("ACDE"))
+    assert isinstance(seqs[0], BaseNumpySequence)
+    assert isinstance(seqs[1], BinarySequence)
+    assert isinstance(seqs[2], BaseNumpySequence)
+    assert isinstance(seqs[3], BinarySequence)
+    assert seqs[0].to_str() == "ACD"
+    assert seqs[1].to_array().tolist() == [0, 1, 0, 1]
+
+
+def test_generate_sequences_and_distance():
+    seqs = generate_sequences(length=3, alphabet=["A", "B"])
+    assert len(seqs) == 8
+    assert all(isinstance(s, BaseNumpySequence) for s in seqs)
+
+    d_h = sequence_distance(seqs[0], seqs[-1], metric="hamming")
+    assert isinstance(d_h, (float, int))
+    d_e = sequence_distance(np.array([0, 0]), np.array([1, 1]), metric="euclidean")
+    assert pytest.approx(d_e) == np.sqrt(2)
+
+
+def test_read_from_fasta_roundtrip(tmp_path):
+    fasta = tmp_path / "toy.fasta"
+    fasta.write_text(">seq1\nACDE\n>seq2\nWQER\n")
+    seqs = read_from_fasta(fasta, moltype="protein")
+    assert len(seqs) == 2
+    assert seqs[0].to_str() == "ACDE"
+    assert seqs[1].to_str() == "WQER"
+    assert set("ACDEWQER").issubset(set(seqs[0].alphabet))

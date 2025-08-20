@@ -418,7 +418,7 @@ class BaseNumpySequence:
         if alphabet is not None:
             alphabet = list(alphabet)
         else:
-            alphabet = list(range(max(idx)))
+            alphabet = list(range(max(idx)+1))
 
         if np.any((idx < 0) | (idx >= len(alphabet))):
             raise ValueError("integer indices out of range for given alphabet")
@@ -433,7 +433,7 @@ class BaseNumpySequence:
                length: int,
                *,
                alphabet: Iterable = PROT_20, 
-               seed: int, default = None,
+               seed: int = None,
                sequence_id: str | None = None) -> "BaseNumpySequence":
         """
         Uniform random sequence of given length and alphabet.
@@ -480,21 +480,6 @@ class BinarySequence(BaseNumpySequence):
             raise ValueError("BinarySequence accepts only 0/1 symbols")
         
         super().__init__(arr, alphabet=['0', '1'], moltype=None)
-
-class MultialleleSequence(BaseNumpySequence):
-    """
-    A sequence with multiple alleles at each position.
-    """
-
-    def __init__(self,
-                 sequence: _SeqConvertible,
-                 alphabet: Iterable):
-        arr = _to_numpy(sequence)
-        if not set(arr).issubset(set(alphabet)):
-            raise ValueError("MultialleleSequence accepts only symbols from the alphabet")
-        super().__init__(arr,
-                         alphabet=alphabet,
-                         moltype=None)
 
     @classmethod
     def from_bits(cls,
@@ -591,6 +576,42 @@ class MultialleleSequence(BaseNumpySequence):
         rng = np.random.default_rng(seed)
         arr = rng.random(length) < p_one
         return cls(arr.astype(int))
+
+
+class MultialleleSequence(BaseNumpySequence):
+    """
+    A sequence with multiple alleles at each position.
+    """
+
+    def __init__(self,
+                 sequence: _SeqConvertible,
+                 alphabet: Iterable):
+        arr = _to_numpy(sequence)
+        if not set(arr).issubset(set(alphabet)):
+            raise ValueError("MultialleleSequence accepts only symbols from the alphabet")
+        super().__init__(arr,
+                         alphabet=alphabet,
+                         moltype=None)
+        
+    @classmethod
+    def random(cls,
+               length: int,
+               *,
+               alphabet: Iterable,
+               seed: int | None = None,
+               sequence_id: str | None = None) -> "MultialleleSequence":
+        rng = np.random.default_rng(seed)
+        A = list(alphabet)
+        arr = np.array(rng.choice(A, size=length), dtype=object)
+        return cls(arr, alphabet=A)
+
+    @classmethod
+    def from_string(cls,
+                    s: str,
+                    *,
+                    alphabet: Iterable,
+                    sequence_id: str | None = None) -> "MultialleleSequence":
+        return cls(list(s), alphabet=alphabet)
 
 
 class SoftSequence(BaseNumpySequence):
@@ -815,19 +836,15 @@ def as_sequences(items: Iterable[Union[str, _SeqLike, np.ndarray, BaseNumpySeque
         List of constructed `BaseNumpySequence` objects.
     """
     out: list[BaseNumpySequence] = []
-    for i, x in enumerate(items):
-        
-        # strings route via from_string for speed 
+    for x in items:
         if isinstance(x, str) and not binary:
-            
-            # decide binary from content quickly
             if set(x).issubset({'0', '1'}):
                 out.append(BinarySequence.from_bits([int(ch) for ch in x]))
             else:
                 out.append(BaseNumpySequence.from_string(x, alphabet=alphabet, moltype=moltype))
         else:
-            out.append(make_sequence(x, binary=binary, alphabet=alphabet, moltype=moltype))
-    
+            inferred_flag = True if binary is True else None
+            out.append(make_sequence(x, binary=inferred_flag, alphabet=alphabet, moltype=moltype))
     return out
 
 
@@ -918,11 +935,11 @@ def read_from_fasta(filepath: Path,
     # Use cogent3 to load the sequences from the FASTA file
     seq_collection = load_unaligned_seqs(filepath, moltype=moltype)
 
-    # Convert the cogent3 sequences to BaseNumpySequence objects
+    moltype_obj = get_moltype(moltype)
+    alph = list(moltype_obj.alphabet)
+
     numpy_sequences = []
     for seq in seq_collection.iter_seqs():
-        # The make_sequence function can handle the cogent3 sequence object directly
-        numpy_seq = make_sequence(seq, moltype=moltype)
+        numpy_seq = make_sequence(seq, moltype=moltype, alphabet=alph)
         numpy_sequences.append(numpy_seq)
-
     return numpy_sequences
