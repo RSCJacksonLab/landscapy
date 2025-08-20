@@ -134,11 +134,11 @@ class BaseNumpySequence:
             positions: Union[int, Iterable[int], None] = None,
             *,
             values: Union[Iterable, None] = None,
-            rng: Union[np.random.Generator, None] = None) -> "BaseNumpySequence":
+            seed: int = None) -> "BaseNumpySequence":
         """
         Create a mutated copy of the sequence.
         """
-        rng = rng or np.random.default_rng()
+        rng = np.random.default_rng(seed)
         new_np = self._np.copy()
 
         if positions is None:
@@ -605,8 +605,8 @@ class SoftSequence(BaseNumpySequence):
         The ordered alphabet corresponding to columns of `posterior`.
     hard_rule : {'argmax', 'sample'}, default 'argmax'
         How to derive the proxy hard sequence used by existing code.
-    rng : np.random.Generator, optional
-        RNG used when `hard_rule='sample'`.
+    seed : int
+        The random initialisation seed. 
     """
     def __init__(self,
                  aa_posterior: np.ndarray,
@@ -614,10 +614,11 @@ class SoftSequence(BaseNumpySequence):
                  alphabet: Iterable,
                  hard_rule: str = "argmax",
                  gap_posterior: np.ndarray = None,
-                 rng: np.random.Generator | None = None):
+                 seed: int = None):
 
         self.alphabet = list(alphabet) # The core, ungapped alphabet
-        self._rng = rng or np.random.default_rng()
+        self._rng = np.random.default_rng(seed)
+        self._seed = seed
         
         # Determine the alphabet to be used for the hard sequence proxy
         hard_sequence_alphabet = self.alphabet
@@ -674,7 +675,7 @@ class SoftSequence(BaseNumpySequence):
         return SoftSequence(self.posterior,
                             alphabet=self.alphabet,
                             hard_rule="sample",
-                            rng=self._rng)
+                            seed=self._seed)
 
     @classmethod
     def from_posteriors(cls,
@@ -683,7 +684,7 @@ class SoftSequence(BaseNumpySequence):
                         alphabet: Iterable = PROT_20,
                         gap_posterior: np.ndarray | None = None,
                         hard_rule: Literal["argmax", "sample"] = "argmax",
-                        rng: np.random.Generator | None = None) -> "SoftSequence":
+                        seed: int = None) -> "SoftSequence":
         """
         Alias around __init__ for clarity / parity with other classes.
 
@@ -698,8 +699,8 @@ class SoftSequence(BaseNumpySequence):
         hard_rule : {'argmax', 'sample'}, default 'argmax'
             How to derive the proxy hard sequence used by existing code.
         
-        rng : np.random.Generator, optional
-            RNG used when `hard_rule='sample'`.
+        seed : int, default=`None`
+            The seed for random state initialisation.
         
         Returns
         -------
@@ -710,7 +711,7 @@ class SoftSequence(BaseNumpySequence):
                    alphabet=alphabet,
                    gap_posterior=gap_posterior,
                    hard_rule=hard_rule,
-                   rng=rng)
+                   seed=seed)
 
     @staticmethod
     def compute_conditional_gap_dist(aa_post_dist: np.ndarray,       
