@@ -745,7 +745,6 @@ class SoftSequence(BaseNumpySequence):
         cond[:, num_alleles]  = d[:, 0]
         return cond
 
-
 def make_sequence(sequence: _SeqConvertible,
                   *,
                   binary: bool | None = None,
@@ -785,6 +784,51 @@ def make_sequence(sequence: _SeqConvertible,
         return BinarySequence(seq_np)
     
     return BaseNumpySequence(seq_np, sequence_id=seq_id, alphabet=alphabet, moltype=moltype)
+
+# Batch factory functions
+def as_sequences(items: Iterable[Union[str, _SeqLike, np.ndarray, BaseNumpySequence, _C3Sequence]],
+                 *,
+                 binary: bool = False,
+                 alphabet: Iterable | None = PROT_20,
+                 moltype: str | None = None) -> List[BaseNumpySequence]:
+    """
+    Coerce a heterogeneous iterable of inputs into BaseNumpySequence
+    (or BinarySequence). Respects existing `make_sequence` behavior.
+
+    Parameters
+    ----------
+    items : Iterable
+        Iterable of heterogenous (or homogenous) input types.
+    
+    binary : bool, default=`False`
+        Boolean for whether sequences are binary.
+    
+    alphabet : iterable, default=`PROT_20`
+        The sequence alphabet.
+    
+    moltype : str, default=`None`
+        The (optional) moltype.
+    
+    Returns
+    -------
+    List[BaseNumpySequence]
+        List of constructed `BaseNumpySequence` objects.
+    """
+    out: list[BaseNumpySequence] = []
+    for i, x in enumerate(items):
+        
+        # strings route via from_string for speed 
+        if isinstance(x, str) and not binary:
+            
+            # decide binary from content quickly
+            if set(x).issubset({'0', '1'}):
+                out.append(BinarySequence.from_bits([int(ch) for ch in x]))
+            else:
+                out.append(BaseNumpySequence.from_string(x, alphabet=alphabet, moltype=moltype))
+        else:
+            out.append(make_sequence(x, binary=binary, alphabet=alphabet, moltype=moltype))
+    
+    return out
 
 
 def sequence_distance(seq1: Union[BaseNumpySequence, np.ndarray],
