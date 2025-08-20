@@ -20,9 +20,21 @@ from .fitness import (
 from .graph import (
     create_hamming_graph,
     create_knn_graph,
-    create_tda_graph
+    create_tda_graph,
+    create_diffusion_emb_graph,
+    create_evol_diffusion_graph,
+    create_phylo_graph
 )
 
+from .digraph import (
+    create_evol_diffusion_digraph,
+    create_particle_filter_digraph,
+    create_phylo_digraph,
+)
+
+from .superscape import (
+    FitnessSuperscape
+)
 
 __all__ = [
     'BaseNumpySequence',
@@ -32,11 +44,17 @@ __all__ = [
     'sequence_distance',
     'FitnessLandscape',
     'DirectedFitnessLandscape',
-    'ASRLandscapeConstructor',
-    'create_hamming_graph',
-    'create_knn_graph',
     'NumericFitness',
     'CategoricalFitness',
     'ProbabilisticCategoricalFitness',
-    'create_tda_graph'
+    'create_hamming_graph',
+    'create_knn_graph',
+    'create_tda_graph',
+    'create_diffusion_emb_graph',
+    'create_evol_diffusion_graph',
+    'create_phylo_graph',
+    'create_evol_diffusion_digraph',
+    'create_particle_filter_digraph',
+    'create_phylo_digraph',
+    'FitnessSuperscape',
 ]
