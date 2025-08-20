@@ -2,6 +2,8 @@ from . import core
 from . import transforms
 from . import analysis
 from . import models
+from . import graph_matching
+from . import phylo
 
 from .core import (
     FitnessLandscape,
@@ -14,13 +16,11 @@ from .core import (
     create_knn_graph,
     NumericFitness,
     CategoricalFitness,
-    ProbabilisticCategoricalFitness
-
+    ProbabilisticCategoricalFitness,
+    FitnessSuperscape
 )
 
-from .utils import cosine_similarity_matrix
-
-__version__ = '0.5.0'
+__version__ = '0.9.0'
 
 __all__ = [
     'core',
@@ -38,4 +38,5 @@ __all__ = [
     'NumericFitness',
     'CategoricalFitness',
     'ProbabilisticCategoricalFitness'
+    'FitnessSuperscape'
 ]

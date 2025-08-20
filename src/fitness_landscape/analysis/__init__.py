@@ -11,6 +11,21 @@ from .dirichlet_energy import (
     calculate_ruggedness_dirichlet_energy,
     local_dirichlet_energy_contribution)
 
+from .bottleneck import (
+    local_cheeger_sweep,
+    calculate_local_bottleneck,
+    first_dirichlet_eigenpair,
+    rank_throat_edges
+)
+
+from .coupling import (
+    cross_spectral_coherence
+)
+
+from .diffusion_scale import (
+    compute_ruggedness_diffusion_scale,
+    compute_ruggedness_variance_energy
+)
 
 from .epistasis import (
     calculate_epistasis_walsh,
@@ -34,7 +49,8 @@ from .random_walk import (
 from .statistics import (
     analyze_fitness_distribution,
     hypothesis_testing,
-    permutation_test
+    permutation_test,
+    
 )
 
 from .persistent_homology import (
@@ -61,5 +77,13 @@ __all__ = [
     'analyze_fitness_distribution',
     'hypothesis_testing',
     'permutation_test',
-    'compute_persistent_homology'
+    'permutation_test,',
+    'compute_persistent_homology',
+    'local_cheeger_sweep',
+    'calculate_local_bottleneck',
+    'first_dirichlet_eigenpair',
+    'rank_throat_edges',
+    'cross_spectral_coherence',
+    'compute_ruggedness_diffusion_scale',
+    'compute_ruggedness_variance_energy'
 ]
