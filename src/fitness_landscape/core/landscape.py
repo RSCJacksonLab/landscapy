@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from .sequence import BaseNumpySequence, make_sequence
 from .graph import create_diffusion_emb_graph, create_hamming_graph, create_tda_graph, create_knn_graph, _encode_multiallele, create_phylo_graph
 from .digraph import create_phylo_digraph, create_evol_diffusion_digraph, create_particle_filter_digraph
-from .fitness import NumericFitness, CategoricalFitness, BaseFitnessLayer
+from .fitness import NumericFitness, CategoricalFitness, BaseFitnessLayer, ProbabilisticCategoricalFitness
 from abc import ABC, abstractmethod
 from ..utils import _compute_embeddings_from_sequences, alignment_to_base_numpy_sequences
 import inspect

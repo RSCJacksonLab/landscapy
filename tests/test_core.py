@@ -5,7 +5,7 @@ from fitness_landscape.core.sequence import *
 from fitness_landscape.core.graph import *
 from fitness_landscape.core.graph import _encode_multiallele 
 from fitness_landscape.core.digraph import *
-from fitness_landscape.core.landscape import FitnessLandscape, DirectedFitnessLandscape
+from fitness_landscape.core.landscape import FitnessLandscape, DirectedFitnessLandscape, to_csv_landscape, read_csv_landscape
 from fitness_landscape.core.fitness import (
     NumericFitness,
     CategoricalFitness,
@@ -15,6 +15,7 @@ from fitness_landscape.core.fitness import (
 )
 from fitness_landscape.core.superscape import FitnessSuperscape
 import torch
+import pandas as pd
 from torch_geometric.data import Data
 from fitness_landscape.core.fitness import NumericFitness, CategoricalFitness, ProbabilisticCategoricalFitness
 from pathlib import Path
@@ -1706,3 +1707,133 @@ def test_as_fitness_layers_mixed_mapping():
     assert out["rep"].get_tensor().shape[0] == 3
     assert out["label"].get_tensor().shape == (3, 2)
     assert out["post"].get_tensor().shape == (3, 2)
+
+def _toy_seqs():
+    # short, small alphabet to keep graphs trivial
+    return [make_sequence(s) for s in ["ACD", "ACE", "ACF", "BCD"]]
+
+
+def test_build_hamming_basic_and_annotation():
+    seqs = _toy_seqs()
+    # attach one numeric layer to ensure annotation happens
+    fit = NumericFitness.from_scalars("fitness", [0.1, 0.2, 0.3, 0.4])
+    L = FitnessLandscape.build(
+        sequences=seqs,
+        graph="hamming",
+        fitness_layers={"fitness": fit},
+        attach_embeddings=False,  # hamming does not require embeddings
+    )
+    assert isinstance(L.graph, nx.Graph)
+    assert len(L) == len(seqs)
+    # nodes should have fitness annotations
+    for _, data in L.graph.nodes(data=True):
+        assert "sequence" in data
+        assert "fitness_fitness" in data
+
+
+def test_build_with_existing_graph_object():
+    seqs = _toy_seqs()
+    G = create_hamming_graph(seqs)
+    # pre-make a categorical layer
+    lab = CategoricalFitness.from_values("label", ["A", "B", "A", "B"])
+    L = FitnessLandscape.build(
+        sequences=seqs,
+        graph=G,
+        fitness_layers={"label": lab},
+        attach_embeddings=False,
+    )
+    assert L.graph is G
+    # categorical layer annotated on nodes
+    for _, data in L.graph.nodes(data=True):
+        assert "label" in L.fitness_layers
+        assert "fitness_label" in data
+
+
+def test_build_embedding_graph_auto_ohe_and_x_tensor_shape():
+    seqs = _toy_seqs()
+    L = FitnessLandscape.build(
+        sequences=seqs,
+        graph="tda", 
+        embedding_domain="ohe",
+        attach_embeddings=True,
+        n_components=1
+    )
+    # Embeddings should be computed/attached
+    assert L.embeddings is not None
+    assert isinstance(L.embeddings, np.ndarray)
+    # Export to PyG tensor; x should be present
+    pyg = L.to_graph_tensor()
+    assert hasattr(pyg, "x")
+    assert pyg.num_nodes == len(seqs)
+    assert pyg.x.shape[0] == len(seqs)
+
+def test_view_and_get_layer_selection_and_errors():
+    seqs = _toy_seqs()
+    layers = {
+        "fit": NumericFitness.from_scalars("fit", [0.0, 1.0, 2.0, 3.0]),
+        "cls": CategoricalFitness.from_values("cls", ["X", "Y", "X", "Y"]),
+    }
+    L = FitnessLandscape.build(seqs, graph="hamming", fitness_layers=layers)
+    # view() sets active layer
+    L.view("cls")
+    assert L.active_layer_name == "cls"
+    assert L.active_layer.dtype == "categorical"
+    # get_layer finds by key and by name equivalently
+    assert L.get_layer("fit") is layers["fit"]
+    # unknown raises a helpful KeyError
+    try:
+        L.get_layer("does_not_exist")
+    except KeyError as e:
+        assert "Layer 'does_not_exist' not found" in str(e)
+
+
+def test_read_csv_landscape_and_to_csv_roundtrip(tmp_path):
+    df = pd.DataFrame(
+        {
+            "sequence": ["ACD", "ACE", "ACF", "BCD"],
+            "fitness": [0.1, 0.2, 0.3, 0.4],
+            "fitness.rep1": [0.1, 0.3, 0.5, 0.7],
+            "fitness.rep2": [0.2, np.nan, 0.6, 0.9],
+            "label": ["A", "B", "A", "B"],
+            "label=A": [0.7, 0.2, 0.8, 0.1],
+            "label=B": [0.3, 0.8, 0.2, 0.9],
+        }
+    )
+    p = tmp_path / "toy_landscape.csv"
+    df.to_csv(p, index=False)
+
+    L = read_csv_landscape(
+        p,
+        sequence_col="sequence",
+        numeric_layers=["fitness"],
+        replicate_prefixes={"rep": ["fitness.rep1", "fitness.rep2"]},
+        categorical_layers=["label"],
+        probabilistic_specs={"post": ["label=A", "label=B"]},
+        graph="hamming",
+        attach_embeddings=False,
+    )
+
+    # layers exist with correct types
+    assert isinstance(L.fitness_layers["fitness"], NumericFitness)
+    assert isinstance(L.fitness_layers["rep"], NumericFitness)
+    assert isinstance(L.fitness_layers["label"], CategoricalFitness)
+    assert isinstance(L.fitness_layers["post"], ProbabilisticCategoricalFitness)
+
+    # replicate tensor has shape (N, max_reps==2) with padding
+    t_rep = L.fitness_layers["rep"].get_tensor().numpy()
+    assert t_rep.shape == (4, 2)
+    # probabilistic rows sum to approx 1
+    P = L.fitness_layers["post"].get_tensor().numpy()
+    np.testing.assert_allclose(P.sum(axis=1), 1.0, atol=1e-6)
+
+    # Write out again (numeric + categorical get exported)
+    out = tmp_path / "roundtrip.csv"
+    to_csv_landscape(L, out, sequence_col="sequence", include_layers=True)
+    df2 = pd.read_csv(out)
+
+    # Expected columns: sequence + fitness + rep + label
+    assert set(["sequence", "fitness", "label"]).issubset(set(df2.columns))
+    assert len(df2) == 4
+    # values are preserved for scalar numeric + categorical
+    np.testing.assert_allclose(df2["fitness"].to_numpy(), df["fitness"].to_numpy())
+    assert df2["label"].tolist() == df["label"].tolist()
