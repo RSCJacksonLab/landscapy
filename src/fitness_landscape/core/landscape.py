@@ -502,7 +502,7 @@ class FitnessLandscape:
             'first'     : write to the first index only
             'all'       : write to all matching indices
             'aggregate' : numeric only — merge replicate lists across all matches
-        - allow_missing lets you ignore keys that don’t exist in self.sequences.
+        - allow_missing lets you ignore keys that don't exist in self.sequences.
         """
 
         if layer is not None:
