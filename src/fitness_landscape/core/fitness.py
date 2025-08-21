@@ -952,5 +952,129 @@ class BaseFitnessWrapper(BaseFitnessLayer):
     def to_scalar(self, **kwargs):
         return self._wrapped_layer.to_scalar(**kwargs)
     
+# Batch factory functions
+
+FitnessLike = Union[
+    BaseFitnessLayer,
+    List[float],                 # numeric scalars
+    List[List[float]],           # numeric replicates
+    np.ndarray, torch.Tensor,    # numeric (vector/matrix) or categorical (one-hot / probs)
+]
+
+def make_fitness_layer(name: str,
+                       obj: FitnessLike,
+                       *,
+                       dtype: Literal["numeric", "categorical", "auto"] = "auto",
+                       categories: List[str] | None = None,
+                       metadata: Dict | None = None) -> BaseFitnessLayer:
+    """
+    Factory function to coerce an object into a BaseFitnessLayer.
+
+    Parameters
+    ----------
+    name : str
+        The name of the fitness layer.
+    
+    obj : FitnessLike  
+        The object to coerce into a fitness layer. Can be:
+        - BaseFitnessLayer instance
+        - 1-D numeric list or array (scalars)
+        - 2-D numeric list or array (matrix)
+        - 2-D probabilities with categories provided
+        - 2-D one-hot encoded with categories
+        - List of lists of floats (replicates)
+
+    dtype : str, default=`"auto"`
+        The expected data type of the fitness layer. Options are:
+        - "numeric": Coerce to NumericFitness.
+        - "categorical": Coerce to CategoricalFitness or ProbabilisticCategoricalFitness.
+        - "auto": Infer based on the input structure.
+
+    categories : List[str], optional
+        A list of unique categories for categorical layers. Required if
+        `dtype` is "categorical" or "auto" and the input is 2-D.
+
+    metadata : Dict, optional
+        Additional metadata associated with the fitness layer.
+
+    Returns
+    -------
+    BaseFitnessLayer
+        An instance of a fitness layer class based on the input object.
+    """
+    if isinstance(obj, BaseFitnessLayer):
+        return obj
+
+    # Torch / numpy unify
+    is_tensor = isinstance(obj, torch.Tensor)
+    arr = obj.detach().cpu().numpy() if is_tensor else np.asarray(obj, dtype=object)
+
+    # Replicate lists (ragged) are object dtype or list of lists
+    if isinstance(obj, list) and obj and isinstance(obj[0], (list, tuple, np.ndarray)):
+        return NumericFitness.from_replicates(name, obj, metadata=metadata)
+
+    # 1-D numeric
+    if arr.ndim == 1 and np.issubdtype(np.array(arr).dtype, np.number):
+        return NumericFitness.from_scalars(name, arr.astype(float), metadata=metadata)
+
+    # 2-D numeric
+    if arr.ndim == 2 and np.issubdtype(np.array(arr, dtype=float).dtype, np.number):
+        if dtype == "categorical":
+            if categories is None:
+                raise ValueError("categories required for categorical 2-D inputs")
+            # Heuristic: rows sum ~1 then probabilities; rows are one-hot integers then one-hot
+            row_sum = arr.astype(float).sum(axis=1)
+            if np.allclose(row_sum, 1.0, atol=1e-6):
+                return ProbabilisticCategoricalFitness.from_probabilities(name, arr.astype(float), categories=categories, metadata=metadata)
+            # integer one-hot?
+            if set(np.unique(arr)).issubset({0, 1}):
+                return CategoricalFitness.from_one_hot(name, arr.astype(float), categories=categories, metadata=metadata)
+            raise ValueError("Ambiguous 2-D categorical tensor; provide probabilities or one-hot")
+        if dtype in ("numeric", "auto"):
+            return NumericFitness.from_tensor(name, arr.astype(float), metadata=metadata)
+
+    raise TypeError(f"Cannot infer fitness layer from object of type {type(obj)} with dtype='{dtype}'")
+
+def as_fitness_layers(layers: Mapping[str, FitnessLike],
+                      *,
+                      categories: Mapping[str, List[str]] | None = None,
+                      metadata: Mapping[str, Dict] | None = None) -> Dict[str, BaseFitnessLayer]:
+    """
+    Factory function to convert a mapping of layer names to
+    FitnessLike objects into a mapping of layer names to
+    BaseFitnessLayer instances.
+
+    Parameters
+    ----------
+    layers : Mapping[str, FitnessLike]
+        A mapping of layer names to objects that can be coerced into
+        fitness layers. Each object can be a BaseFitnessLayer instance,
+        a numeric list, a 2-D numeric array, or a categorical tensor.
+
+    categories : Mapping[str, List[str]], optional
+        A mapping of layer names to lists of unique categories for
+        categorical layers. Required if the input is 2-D and `dtype` is
+        "categorical" or "auto".
+
+    metadata : Mapping[str, Dict], optional
+        A mapping of layer names to additional metadata dictionaries
+        associated with each fitness layer.
+
+    Returns
+    -------
+    Dict[str, BaseFitnessLayer]
+        A mapping of layer names to BaseFitnessLayer instances.
+        Each object in the input mapping is coerced into a fitness layer
+        based on its type and structure.
+    """
+    out: Dict[str, BaseFitnessLayer] = {}
+    for name, obj in layers.items():
+        cats = categories.get(name) if categories else None
+        meta = metadata.get(name) if metadata else None
+        # Heuristic: if `cats` provided, prefer categorical coercion
+        dtype = "categorical" if cats is not None else "auto"
+        out[name] = make_fitness_layer(name, obj, dtype=dtype, categories=cats, metadata=meta)
+    return out
+    
 # TODO: Non linear composition modifiers.
 # TODO: Temporal seascape modifiers / iterator.
