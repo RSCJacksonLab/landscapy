@@ -1,9 +1,10 @@
 import numpy as np
+import pandas as pd
 import networkx as nx
 import torch
 from torch_geometric.data import Data
 from torch_geometric.utils import from_networkx
-from typing import List, Union, Dict, Any, Iterable, Literal,  Protocol, runtime_checkable, Hashable, Union, Tuple, Mapping
+from typing import List, Union, Dict, Any, Iterable, Literal,  Protocol, runtime_checkable, Hashable, Union, Tuple, Mapping, Callable, Optional
 from dataclasses import dataclass
 from .sequence import BaseNumpySequence, make_sequence
 from .graph import create_diffusion_emb_graph, create_hamming_graph, create_tda_graph, create_knn_graph, _encode_multiallele, create_phylo_graph
@@ -16,8 +17,85 @@ from collections import defaultdict
 from cogent3 import ArrayAlignment, load_aligned_seqs
 from pathlib import Path
 import warnings
-
 from .._const import PROT_20
+
+GraphCtor = Callable[..., nx.Graph]
+
+@dataclass(frozen=True)
+class _GraphRegistryItem:
+    fn: GraphCtor
+    needs_embeddings: bool
+
+_GRAPH_REGISTRY: dict[str, _GraphRegistryItem] = {
+    "hamming":   _GraphRegistryItem(create_hamming_graph, needs_embeddings=False),
+    "knn":       _GraphRegistryItem(create_knn_graph, needs_embeddings=True),
+    "tda":       _GraphRegistryItem(create_tda_graph, needs_embeddings=True),
+    "diffusion": _GraphRegistryItem(create_diffusion_emb_graph, needs_embeddings=True),
+    # phylogenetic handled separately (alignment/ASR path)
+}
+def _resolve_embeddings_for_graph(sequences: list[BaseNumpySequence],
+                                  graph_type: str,
+                                  embeddings: Optional[np.ndarray],
+                                  embedding_domain: Literal['plm', 'ohe'],
+                                  *,
+                                  model_name: str,
+                                  batch_size: int,
+                                  device: Optional[str],) -> Tuple[Optional[np.ndarray], dict]:
+    """
+    Helper function to resolve embeddings for a graph type.
+
+    Parameters
+    ----------
+    sequences : list[BaseNumpySequence]
+        List of sequences to compute embeddings for.
+    graph_type : str
+        The type of graph to create (e.g., 'hamming', 'knn', 'tda',
+        'diffusion').
+    
+    embeddings : Optional[np.ndarray]
+        Pre-computed embeddings, if available. If `None`, embeddings
+        will be computed.
+
+    embedding_domain : Literal['plm', 'ohe']
+        The domain of the embeddings. 'plm' for pre-trained language
+        model embeddings, 'ohe' for one-hot encoded sequences.
+    
+    model_name : str
+        The name of the pre-trained model to use for embeddings if
+        `embedding_domain` is 'plm'.
+
+    batch_size : int
+        The batch size to use for computing embeddings if
+        `embedding_domain` is 'plm'.
+
+    device : Optional[str]
+        The device to use for computing embeddings if
+        `embedding_domain` is 'plm'. If `None`, defaults to the
+
+    Returns 
+    -------
+    Tuple[Optional[np.ndarray], dict]
+        Returns a tuple containing the embeddings and a dictionary
+        with additional keyword arguments for the graph constructor.
+    """
+    reg = _GRAPH_REGISTRY.get(graph_type)
+    if reg is None or not reg.needs_embeddings:
+        return embeddings, {}
+
+    if embeddings is not None:
+        return embeddings, {"embeddings": embeddings}
+
+    if embedding_domain == "plm":
+        E = _compute_embeddings_from_sequences(
+            sequences, model_name=model_name, batch_size=batch_size, device=device
+        )
+        return E, {"embeddings": E}
+
+    if embedding_domain == "ohe":
+        E, _ = _encode_multiallele(sequences)
+        return E, {"embeddings": E}
+
+    raise ValueError(f"embedding_domain must be 'plm' or 'ohe', got {embedding_domain!r}")
 
 SeqKey = Union['BaseNumpySequence', str, Tuple]
 
@@ -124,204 +202,6 @@ class FitnessLandscape:
         if isinstance(k, (tuple, list, np.ndarray)):
             return tuple(list(k))
         raise TypeError(f"Unsupported sequence key type: {type(k)}")
-
-    @classmethod
-    def from_sequences(cls,
-                       sequences: List[BaseNumpySequence],
-                       fitness_layers: Dict[str, BaseFitnessLayer] = None,
-                       graph_type: Literal['hamming', 'knn', 'tda', 'diffusion'] = 'hamming',
-                       embeddings: np.ndarray = None,
-                       embedding_domain: Literal['plm', 'ohe'] = 'ohe',
-                       attach_embeddings: bool = True,
-                       _compute_phylo_embeddings: bool = False,
-                       **kwargs) -> 'FitnessLandscape':
-        """
-        Primary factory method to create a FitnessLandscape from a list
-        of sequences.This method orchestrates the computation of
-        embeddings (if needed) and the construction of the graph based
-        on the specified type.
-
-        Parameters
-        ----------
-        sequences : List[BaseNumpySequence]
-            The sequences to build the landscape from. 
-        
-        fitess_layers : Dict[str, BaseFitnessLayer]
-            The fitness landscape fitness layer(s).
-        
-        graph_type: str, default=`hamming`
-            The graph constructor type. Options are:
-            - `hamming` : The hamming graph where edges connect nodes
-            with a single mutation difference. 
-            - `knn` : k-nearest neighbor graph where each node is
-            connected to it's k nearest neigbors in the embedding
-            domain.
-            - `tda` : topological data analysis where edges are
-            computed by persistent homology in the embedding domain. 
-            - `diffusion` : Edges are computed according to a diffusion
-            process from a sequence evolution replacement matrix.
-        
-        embeddings : np.ndarray, default=`None`
-            Pre-computed embeddings, indexed by sequence.
-        
-        embedding_domain : str, default=`ohe`
-            The embedding domain for auto embedding construction.
-            Options are:
-            - `ohe`: one-hot encoded domain.
-            - `plm`: protein language model embeddings. Embedding
-            parameters must be provided in **kwargs. 
-        
-        attach_embeddings : bool, default=`True`
-            Boolean to attach embeddings as node attributes.
-
-        _compute_phylo_embeddings : bool, default=`False` 
-            Boolean to compute embeddings for phylogenetic seqeucnes.
-        
-        Returns
-        -------
-        FitnessLandscape
-            The constructed fitness landscape object.
-        """
-        embedding_based_graphs = {'tda', 'diffusion'}
-
-        # pop kwargs that will break constructor_kwargs
-        emb_arr_key = kwargs.pop('emb_arr_key', 'emb_arr')
-        model_name = kwargs.pop('model_name', 'facebook/esm2_t6_8M_UR50D')
-        batch_size = kwargs.pop('batch_size', 64)
-        device = kwargs.pop('device', None)
-
-        #  Build the Graph 
-        graph_constructors = {
-            'hamming': create_hamming_graph,
-            'knn': create_knn_graph,
-            'tda': create_tda_graph,
-            'diffusion': create_diffusion_emb_graph
-        }
-
-        # Phylogenetic reconstruction requires specific types
-        if graph_type == 'phylogenetic':
-
-            # Keep alignment for phylo and ASR.
-            alignment = load_aligned_seqs(sequences) if isinstance(sequences, Path) else sequences
-
-            # Reconstruct phylogeny and ancestral states.
-            graph = create_phylo_graph(alignment, **kwargs)
-            
-            # Collect sequences from the constructed graph (NOT the alignment).
-            sequences = [node[1]['sequence'] for node in graph.nodes(data=True)]
-
-            # Logic to ensure embeddings are correctly secured for extant and ancestral sequences.
-            if embeddings is not None:
-                if embeddings.shape[0] != len(sequences):
-                    raise ValueError(f"Embeddings expected embeddings shape {len(sequences)} in dim 0, found {embeddings.shape[0]}. Forgot ancestral sequences in precomputed embeddings?")
-            
-            elif _compute_phylo_embeddings:
-                if embedding_domain == 'plm':
-                    embeddings = _compute_embeddings_from_sequences(sequences,
-                                                                    model_name=model_name,
-                                                                    device=device,
-                                                                    batch_size=batch_size)
-                elif embedding_domain == 'ohe':
-                    embeddings, _ = _encode_multiallele(sequences)
-                
-            else:
-                raise ValueError(f"Expected `embedding_domain` to be either `plm` or `ohe`, found {embedding_domain}")
-
-            final_embeddings = embeddings if attach_embeddings else None
-            
-            return cls(sequences=sequences,
-                   graph=graph,
-                   fitness_layers=fitness_layers,
-                   embeddings=final_embeddings,
-                   emb_arr_key=emb_arr_key
-                   )
-
-        # Secure Embeddings.
-        # How to balance PLM emb vs ohe?
-        if graph_type in embedding_based_graphs:
-            if embeddings is None:
-                # Secure PLM embeddings
-                if embedding_domain == 'plm':
-                    model_name = model_name
-                    batch_size = batch_size
-                    embeddings = _compute_embeddings_from_sequences(
-                        sequences,
-                        model_name=model_name,
-                        batch_size=batch_size
-                    )
-                # Secure OHE embeddings
-                elif embedding_domain == 'ohe':
-                    embeddings, _ = _encode_multiallele(sequences)
-                
-                else:
-                    raise ValueError(f"Expected `embedding_domain` to be either `plm` or `ohe`, found {embedding_domain}")
-        
-        if graph_type not in graph_constructors:
-            raise ValueError(f"Unsupported graph type for construction: {graph_type}")
-        
-        constructor_kwargs = kwargs
-        if embeddings is not None:
-            constructor_kwargs['embeddings'] = embeddings
-
-        graph = graph_constructors[graph_type](sequences, **constructor_kwargs)
-
-        #Instantiate the class using the simple __init__ 
-        # The `attach_embeddings` flag controls embeddings in final graph.
-        final_embeddings = embeddings if attach_embeddings else None
-        
-        return cls(sequences=sequences,
-                   graph=graph,
-                   fitness_layers=fitness_layers,
-                   embeddings=final_embeddings,
-                   emb_arr_key=emb_arr_key
-                   )
-
-    @classmethod
-    def from_graph(cls,
-                   graph: nx.Graph, **kwargs) -> 'FitnessLandscape':
-        """
-        Factory method to create a FitnessLandscape from an existing,
-        annotated networkx graph.
-        """
-
-        node_list = list(graph.nodes())
-        sequences = []
-        raw_layer_data = defaultdict(list)
-
-        for node in node_list:
-            data = graph.nodes[node]
-            if 'sequence' not in data:
-                raise ValueError(f"Node {node} is missing 'sequence' attribute.")
-            sequences.append(data['sequence'])
-            for k, v in data.items():
-                if k.startswith('fitness_'):
-                    raw_layer_data[k[8:]].append(v)
-
-        # length validation
-        for name, values in raw_layer_data.items():
-            if len(values) != len(node_list):
-                raise ValueError(f"Layer '{name}' length {len(values)} != node count {len(node_list)}.")
-        
-        fitness_layers = {}
-        for name, values in raw_layer_data.items():
-
-            is_numeric = isinstance(values[0], (list, float, int, np.number))
-            if is_numeric:
-                numeric_values = [v if isinstance(v, list) else [v] for v in values]
-                fitness_layers[name] = NumericFitness(name=name, values=numeric_values)
-            else:
-                all_categories = sorted(list(set(values)))
-                fitness_layers[name] = CategoricalFitness(name=name, values=values, categories=all_categories)
-        
-        # Pop irrelevant keywords.
-        kwargs.pop('graph_type', None)
-        kwargs.pop('emb_nodes', None)
-        
-        # Call the simple constructor
-        return cls(sequences=sequences,
-                   graph=graph,
-                   fitness_layers=fitness_layers,
-                   **kwargs)
     
     # Annotation methods.
     def _annotate_graph_nodes_with_fitness(self):
@@ -893,7 +773,385 @@ class FitnessLandscape:
         """
         # Uses the new 'active_layer' property
         return self.active_layer.to_scalar()
+    
+    # Constructor methods.
+    @classmethod
+    def from_sequences(cls,
+                       sequences: List[BaseNumpySequence],
+                       fitness_layers: Dict[str, BaseFitnessLayer] = None,
+                       graph_type: Literal['hamming', 'knn', 'tda', 'diffusion'] = 'hamming',
+                       embeddings: np.ndarray = None,
+                       embedding_domain: Literal['plm', 'ohe'] = 'ohe',
+                       attach_embeddings: bool = True,
+                       _compute_phylo_embeddings: bool = False,
+                       **kwargs) -> 'FitnessLandscape':
+        """
+        Primary factory method to create a FitnessLandscape from a list
+        of sequences.This method orchestrates the computation of
+        embeddings (if needed) and the construction of the graph based
+        on the specified type.
 
+        Parameters
+        ----------
+        sequences : List[BaseNumpySequence]
+            The sequences to build the landscape from. 
+        
+        fitess_layers : Dict[str, BaseFitnessLayer]
+            The fitness landscape fitness layer(s).
+        
+        graph_type: str, default=`hamming`
+            The graph constructor type. Options are:
+            - `hamming` : The hamming graph where edges connect nodes
+            with a single mutation difference. 
+            - `knn` : k-nearest neighbor graph where each node is
+            connected to it's k nearest neigbors in the embedding
+            domain.
+            - `tda` : topological data analysis where edges are
+            computed by persistent homology in the embedding domain. 
+            - `diffusion` : Edges are computed according to a diffusion
+            process from a sequence evolution replacement matrix.
+        
+        embeddings : np.ndarray, default=`None`
+            Pre-computed embeddings, indexed by sequence.
+        
+        embedding_domain : str, default=`ohe`
+            The embedding domain for auto embedding construction.
+            Options are:
+            - `ohe`: one-hot encoded domain.
+            - `plm`: protein language model embeddings. Embedding
+            parameters must be provided in **kwargs. 
+        
+        attach_embeddings : bool, default=`True`
+            Boolean to attach embeddings as node attributes.
+
+        _compute_phylo_embeddings : bool, default=`False` 
+            Boolean to compute embeddings for phylogenetic seqeucnes.
+        
+        Returns
+        -------
+        FitnessLandscape
+            The constructed fitness landscape object.
+        """
+        embedding_based_graphs = {'tda', 'diffusion'}
+
+        # pop kwargs that will break constructor_kwargs
+        emb_arr_key = kwargs.pop('emb_arr_key', 'emb_arr')
+        model_name = kwargs.pop('model_name', 'facebook/esm2_t6_8M_UR50D')
+        batch_size = kwargs.pop('batch_size', 64)
+        device = kwargs.pop('device', None)
+
+        #  Build the Graph 
+        graph_constructors = {
+            'hamming': create_hamming_graph,
+            'knn': create_knn_graph,
+            'tda': create_tda_graph,
+            'diffusion': create_diffusion_emb_graph
+        }
+
+        # Phylogenetic reconstruction requires specific types
+        if graph_type == 'phylogenetic':
+
+            # Keep alignment for phylo and ASR.
+            alignment = load_aligned_seqs(sequences) if isinstance(sequences, Path) else sequences
+
+            # Reconstruct phylogeny and ancestral states.
+            graph = create_phylo_graph(alignment, **kwargs)
+            
+            # Collect sequences from the constructed graph (NOT the alignment).
+            sequences = [node[1]['sequence'] for node in graph.nodes(data=True)]
+
+            # Logic to ensure embeddings are correctly secured for extant and ancestral sequences.
+            if embeddings is not None:
+                if embeddings.shape[0] != len(sequences):
+                    raise ValueError(f"Embeddings expected embeddings shape {len(sequences)} in dim 0, found {embeddings.shape[0]}. Forgot ancestral sequences in precomputed embeddings?")
+            
+            elif _compute_phylo_embeddings:
+                if embedding_domain == 'plm':
+                    embeddings = _compute_embeddings_from_sequences(sequences,
+                                                                    model_name=model_name,
+                                                                    device=device,
+                                                                    batch_size=batch_size)
+                elif embedding_domain == 'ohe':
+                    embeddings, _ = _encode_multiallele(sequences)
+                
+            else:
+                raise ValueError(f"Expected `embedding_domain` to be either `plm` or `ohe`, found {embedding_domain}")
+
+            final_embeddings = embeddings if attach_embeddings else None
+            
+            return cls(sequences=sequences,
+                   graph=graph,
+                   fitness_layers=fitness_layers,
+                   embeddings=final_embeddings,
+                   emb_arr_key=emb_arr_key
+                   )
+
+        # Secure Embeddings.
+        # How to balance PLM emb vs ohe?
+        if graph_type in embedding_based_graphs:
+            if embeddings is None:
+                # Secure PLM embeddings
+                if embedding_domain == 'plm':
+                    model_name = model_name
+                    batch_size = batch_size
+                    embeddings = _compute_embeddings_from_sequences(
+                        sequences,
+                        model_name=model_name,
+                        batch_size=batch_size
+                    )
+                # Secure OHE embeddings
+                elif embedding_domain == 'ohe':
+                    embeddings, _ = _encode_multiallele(sequences)
+                
+                else:
+                    raise ValueError(f"Expected `embedding_domain` to be either `plm` or `ohe`, found {embedding_domain}")
+        
+        if graph_type not in graph_constructors:
+            raise ValueError(f"Unsupported graph type for construction: {graph_type}")
+        
+        constructor_kwargs = kwargs
+        if embeddings is not None:
+            constructor_kwargs['embeddings'] = embeddings
+
+        graph = graph_constructors[graph_type](sequences, **constructor_kwargs)
+
+        #Instantiate the class using the simple __init__ 
+        # The `attach_embeddings` flag controls embeddings in final graph.
+        final_embeddings = embeddings if attach_embeddings else None
+        
+        return cls(sequences=sequences,
+                   graph=graph,
+                   fitness_layers=fitness_layers,
+                   embeddings=final_embeddings,
+                   emb_arr_key=emb_arr_key
+                   )
+
+    @classmethod
+    def from_graph(cls,
+                   graph: nx.Graph, **kwargs) -> 'FitnessLandscape':
+        """
+        Factory method to create a FitnessLandscape from an existing,
+        annotated networkx graph.
+        """
+
+        node_list = list(graph.nodes())
+        sequences = []
+        raw_layer_data = defaultdict(list)
+
+        for node in node_list:
+            data = graph.nodes[node]
+            if 'sequence' not in data:
+                raise ValueError(f"Node {node} is missing 'sequence' attribute.")
+            sequences.append(data['sequence'])
+            for k, v in data.items():
+                if k.startswith('fitness_'):
+                    raw_layer_data[k[8:]].append(v)
+
+        # length validation
+        for name, values in raw_layer_data.items():
+            if len(values) != len(node_list):
+                raise ValueError(f"Layer '{name}' length {len(values)} != node count {len(node_list)}.")
+        
+        fitness_layers = {}
+        for name, values in raw_layer_data.items():
+
+            is_numeric = isinstance(values[0], (list, float, int, np.number))
+            if is_numeric:
+                numeric_values = [v if isinstance(v, list) else [v] for v in values]
+                fitness_layers[name] = NumericFitness(name=name, values=numeric_values)
+            else:
+                all_categories = sorted(list(set(values)))
+                fitness_layers[name] = CategoricalFitness(name=name, values=values, categories=all_categories)
+        
+        # Pop irrelevant keywords.
+        kwargs.pop('graph_type', None)
+        kwargs.pop('emb_nodes', None)
+        
+        # Call the simple constructor
+        return cls(sequences=sequences,
+                   graph=graph,
+                   fitness_layers=fitness_layers,
+                   **kwargs)
+    
+    
+    @classmethod
+    def build(cls,
+              sequences: list[BaseNumpySequence],
+              *,
+              graph: str | nx.Graph = "hamming",
+              fitness_layers: dict[str, BaseFitnessLayer] | None = None,
+              embeddings: np.ndarray | None = None,
+              embedding_domain: Literal["plm", "ohe"] = "ohe",
+              attach_embeddings: bool = True,
+              emb_arr_key: str = "emb_arr",
+              # PLM knobs (ignored for ohe/hamming)
+              model_name: str = "facebook/esm2_t6_8M_UR50D",
+              batch_size: int = 64,
+              device: str | None = None,
+              **graph_kwargs) -> "FitnessLandscape":
+        """
+        Constructor method for main entry to FitnessLandscape
+        initialisaition. 
+
+        Parameters
+        ----------
+        sequences : list[BaseNumpySequence]
+            List of sequences to build the landscape from.
+        
+        graph : str or nx.Graph, default=`"hamming"`
+            The graph type or an existing networkx graph. If a string,
+            it should be one of the registered graph types.
+        
+        fitness_layers : dict[str, BaseFitnessLayer], optional
+            Dictionary of fitness layers to attach to the landscape.
+        
+        embeddings : np.ndarray, optional
+            Pre-computed embeddings for the sequences. If `None`, they
+            will be computed based on the `embedding_domain`.
+        
+        embedding_domain : str, default=`"ohe"`
+            The domain for embeddings. Options are:
+            - `"plm"`: Protein language model embeddings.
+            - `"ohe"`: One-hot encoded sequences.
+        
+        attach_embeddings : bool, default=`True`
+            Whether to attach embeddings as node attributes in the graph.
+        
+        emb_arr_key : str, default=`"emb_arr"`
+            The key under which embeddings will be stored in the graph
+            nodes.
+        
+        model_name : str, default=`"facebook/esm2_t6_8M_UR50D"`
+            The name of the model to use for PLM embeddings.
+        
+        batch_size : int, default=`64`
+            Batch size for PLM embedding computation.
+        
+        device : str or None, default=`None`
+            Device to use for PLM embedding computation (e.g., "cpu" or "cuda").
+        
+        graph_kwargs : dict
+            Additional keyword arguments to pass to the graph constructor.
+        
+        Returns
+        -------
+        FitnessLandscape
+            The constructed fitness landscape object.
+        """
+        if isinstance(graph, nx.Graph):
+            # annotate & return
+            G = graph
+        else:
+            gtype = str(graph)
+            if gtype == "phylogenetic":
+                raise ValueError("Use FitnessLandscape.from_alignment(...) for phylogenetic graphs.")
+            reg = _GRAPH_REGISTRY.get(gtype)
+            if reg is None:
+                raise ValueError(f"Unknown graph type {gtype!r}. Options: {list(_GRAPH_REGISTRY)}")
+
+            # resolve embeddings only if needed
+            embeddings, extra = _resolve_embeddings_for_graph(
+                sequences, gtype, embeddings, embedding_domain,
+                model_name=model_name, batch_size=batch_size, device=device
+            )
+            ctor = reg.fn
+            G = ctor(sequences, **graph_kwargs, **extra)
+
+        # Attach embeddings to nodes if flagged
+        final_embeddings = embeddings if attach_embeddings else None
+        return cls(sequences=sequences,
+                   graph=G,
+                   fitness_layers=fitness_layers,
+                   embeddings=final_embeddings,
+                   emb_arr_key=emb_arr_key)
+
+    @classmethod
+    def from_alignment(cls,
+                       alignment: ArrayAlignment | Path,
+                       *,
+                       fitness_layers: dict[str, BaseFitnessLayer] | None = None,
+                       attach_embeddings: bool = True,
+                       emb_arr_key: str = "emb_arr",
+                       # PLM knobs for auto-embeddings on extant+ancestral
+                       embedding_domain: Literal["plm", "ohe"] = "ohe",
+                       model_name: str = "facebook/esm2_t6_8M_UR50D",
+                       batch_size: int = 64,
+                       device: str | None = None,
+                       _compute_phylo_embeddings: bool = False,
+                       **phylo_kwargs) -> "FitnessLandscape":
+        """
+        Constructor method to create a FitnessLandscape from an
+        alignment or a path to an alignment file. Convenience wrapper
+        around the phylogenetic graph constructor.
+
+        Parameters
+        ----------
+        alignment : ArrayAlignment or Path
+            The alignment object or path to an alignment file.
+        
+        fitness_layers : dict[str, BaseFitnessLayer], optional
+            Dictionary of fitness layers to attach to the landscape.
+        
+        attach_embeddings : bool, default=`True`
+            Whether to attach embeddings as node attributes in the graph.
+        
+        emb_arr_key : str, default=`"emb_arr"`
+            The key under which embeddings will be stored in the graph
+            nodes.
+        
+        embedding_domain : str, default=`"ohe"`
+            The domain for embeddings. Options are:
+            - `"plm"`: Protein language model embeddings.
+            - `"ohe"`: One-hot encoded sequences.
+        
+        model_name : str, default=`"facebook/esm2_t6_8M_UR50D"`
+            The name of the model to use for PLM embeddings.
+        
+        batch_size : int, default=`64`
+            Batch size for PLM embedding computation.
+        
+        device : str or None, default=`None`
+            Device to use for PLM embedding computation (e.g., "cpu" or "cuda").
+        
+        _compute_phylo_embeddings : bool, default=`False`
+            Whether to compute embeddings for phylogenetic sequences.
+        
+        phylo_kwargs : dict
+            Additional keyword arguments to pass to the phylogenetic graph constructor.
+        
+        Returns
+        -------
+        FitnessLandscape
+            The constructed fitness landscape object.
+        """
+
+        aln = load_aligned_seqs(alignment) if isinstance(alignment, Path) else alignment
+        G = create_phylo_graph(aln, **phylo_kwargs)
+        seqs = [data["sequence"] for _, data in G.nodes(data=True)]
+
+        E = None
+        if _compute_phylo_embeddings:
+            if embedding_domain == "plm":
+                E = _compute_embeddings_from_sequences(seqs, model_name=model_name, batch_size=batch_size, device=device)
+            elif embedding_domain == "ohe":
+                E, _ = _encode_multiallele(seqs)
+            else:
+                raise ValueError(f"embedding_domain must be 'plm' or 'ohe', got {embedding_domain!r}")
+
+        return cls(sequences=seqs,
+                   graph=G,
+                   fitness_layers=fitness_layers,
+                   embeddings=(E if attach_embeddings else None),
+                   emb_arr_key=emb_arr_key)
+
+    @classmethod
+    def from_graph_annotated(cls, graph: nx.Graph, **kwargs) -> "FitnessLandscape":
+        """
+        Thin alias around  existing `from_graph` for parity with other APIs.
+        """
+        return cls.from_graph(graph, **kwargs)
+
+    
     def __len__(self):
         return len(self.sequences)
     
@@ -918,6 +1176,7 @@ class DirectedFitnessLandscape(FitnessLandscape):
         if not isinstance(self.graph, nx.DiGraph):
             raise TypeError("DirectedFitnessLandscape requires a networkx.DiGraph object.")
     
+    # Custom constructor methods.
     @classmethod
     def from_sequences(cls,
                        sequences: Union[List[BaseNumpySequence], ArrayAlignment, Path],
@@ -1073,3 +1332,301 @@ class DirectedFitnessLandscape(FitnessLandscape):
         # Undirected FitnessLandscape logic is correct, just different typing.
         return super(DirectedFitnessLandscape, cls).from_graph(graph, **kwargs)
     
+
+
+    @classmethod
+    def build(cls,
+              sequences: list[BaseNumpySequence] | ArrayAlignment | Path,
+              *,
+              digraph: str | nx.DiGraph = "phylogenetic",
+              fitness_layers: dict[str, BaseFitnessLayer] | None = None,
+              embeddings: np.ndarray | None = None,
+              embedding_domain: Literal["plm", "ohe"] = "ohe",
+              attach_embeddings: bool = True,
+              emb_arr_key: str = "emb_arr",
+              model_name: str = "facebook/esm2_t6_8M_UR50D",
+              batch_size: int = 64,
+              device: str | None = None,
+              _compute_phylo_embeddings: bool = False,
+              **kwargs) -> "DirectedFitnessLandscape":
+        
+        """
+        Constructor method for main entry to DirectedFitnessLandscape.
+
+        Parameters
+        ----------
+        sequences : list[BaseNumpySequence] | ArrayAlignment | Path
+            List of sequences or an alignment to build the landscape from.
+
+        digraph : str or nx.DiGraph, default=`"phylogenetic"`
+            The directed graph type or an existing networkx directed graph.
+            If a string, it should be one of the registered digraph types.
+
+        fitness_layers : dict[str, BaseFitnessLayer], optional
+            Dictionary of fitness layers to attach to the landscape.
+
+        embeddings : np.ndarray, optional
+            Pre-computed embeddings for the sequences. If `None`, they
+            will be computed based on the `embedding_domain`.
+
+        embedding_domain : str, default=`"ohe"`
+            The domain for embeddings. Options are:
+            - `"plm"`: Protein language model embeddings.
+            - `"ohe"`: One-hot encoded sequences.
+
+        attach_embeddings : bool, default=`True`
+            Whether to attach embeddings as node attributes in the graph.
+
+        emb_arr_key : str, default=`"emb_arr"`
+            The key under which embeddings will be stored in the graph nodes.
+
+        model_name : str, default=`"facebook/esm2_t6_8M_UR50D"`
+            The name of the model to use for PLM embeddings.
+
+        batch_size : int, default=`64`
+            Batch size for PLM embedding computation.
+
+        device : str or None, default=`None`
+            Device to use for PLM embedding computation (e.g., "cpu" or "cuda").
+
+        _compute_phylo_embeddings : bool, default=`False`
+            Whether to compute embeddings for phylogenetic sequences.
+
+        kwargs : dict
+            Additional keyword arguments to pass to the digraph constructor.
+
+        Returns
+        -------
+        DirectedFitnessLandscape
+            The constructed directed fitness landscape object.
+        """
+
+        if isinstance(digraph, nx.DiGraph):
+            DG = digraph
+            seqs = [data["sequence"] for _, data in DG.nodes(data=True)]
+            E = embeddings
+            # attach optional embeddings
+            final_E = E if attach_embeddings else None
+            return cls(sequences=seqs, graph=DG, fitness_layers=fitness_layers,
+                       embeddings=final_E, emb_arr_key=emb_arr_key)
+
+        dtype = str(digraph)
+        if dtype == "phylogenetic":
+            aln = load_aligned_seqs(sequences) if isinstance(sequences, Path) else sequences
+            DG = create_phylo_digraph(aln, **kwargs)
+            seqs = [data["sequence"] for _, data in DG.nodes(data=True)]
+
+            E = None
+            if _compute_phylo_embeddings:
+                if embedding_domain == "plm":
+                    E = _compute_embeddings_from_sequences(seqs, model_name=model_name, batch_size=batch_size, device=device)
+                elif embedding_domain == "ohe":
+                    E, _ = _encode_multiallele(seqs)
+                else:
+                    raise ValueError(f"embedding_domain must be 'plm' or 'ohe', got {embedding_domain!r}")
+
+            return cls(sequences=seqs, graph=DG, fitness_layers=fitness_layers,
+                       embeddings=(E if attach_embeddings else None), emb_arr_key=emb_arr_key)
+
+        # embedding-based directed constructors 
+        ctor_map = {
+            "diffusion_nq": create_evol_diffusion_digraph,
+            "particle_filter": create_particle_filter_digraph,
+        }
+        if dtype not in ctor_map:
+            raise ValueError(f"Unknown digraph type {dtype!r}. Options: {list(ctor_map)}")
+
+        seqs = sequences if not isinstance(sequences, (Path, ArrayAlignment)) else alignment_to_base_numpy_sequences(sequences)
+        # resolve embeddings if needed 
+        E, extra = _resolve_embeddings_for_graph(
+            seqs, "diffusion", embeddings, embedding_domain,
+            model_name=model_name, batch_size=batch_size, device=device
+        )
+        DG = ctor_map[dtype](seqs, **kwargs, **extra)
+        return cls(sequences=seqs, graph=DG, fitness_layers=fitness_layers,
+                   embeddings=(E if attach_embeddings else None), emb_arr_key=emb_arr_key)
+    
+def read_csv_landscape(path: str | Path,
+                       *,
+                       sequence_col: str = "sequence",
+                       id_col: str | None = None,
+                       alphabet: Iterable | None = None,
+                       moltype: str | None = None,
+                       graph: str | nx.Graph = "hamming",
+                       
+                       # layer parsing
+                       numeric_layers: list[str] | None = None, # e.g., ["fitness", "score"]
+                       replicate_prefixes: dict[str, list[str]] | None = None, # {"fitness": ["fitness.rep1","fitness.rep2"]}
+                       categorical_layers: list[str] | None = None, # e.g., ["label"]
+                       probabilistic_specs: dict[str, list[str]] | None = None, # {"label": ["label=A","label=B","label=C"]}
+                       
+                       # embeddings for graph if needed
+                       embeddings: np.ndarray | None = None,
+                       embedding_domain: Literal["plm", "ohe"] = "ohe",
+                       attach_embeddings: bool = True,
+                       emb_arr_key: str = "emb_arr",
+                       model_name: str = "facebook/esm2_t6_8M_UR50D",
+                       batch_size: int = 64,
+                       device: str | None = None) -> FitnessLandscape:
+    """
+    Function to initialise a FitnessLandscape from a CSV file.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to the CSV file containing the landscape data.
+    
+    sequence_col : str, default=`"sequence"`
+        The column name in the CSV that contains the sequences.
+    
+    id_col : str or None, default=`None`
+        Optional column name for sequence IDs (not used in landscape).
+    
+    alphabet : Iterable, optional
+        The alphabet to use for sequence encoding. If None, defaults to
+        the standard alphabet for the specified moltype.
+    
+    moltype : str, optional
+        The molecular type of the sequences (e.g., "protein", "dna").
+    
+    graph : str or nx.Graph, default=`"hamming"`
+        The graph type or an existing networkx graph to use.
+    
+    numeric_layers : list[str] | None, optional
+        List of numeric layer names to parse from the CSV.
+    
+    replicate_prefixes : dict[str, list[str]] | None, optional
+        Dictionary mapping layer names to lists of replicate column names.
+    
+    categorical_layers : list[str] | None, optional
+        List of categorical layer names to parse from the CSV.
+    
+    probabilistic_specs : dict[str, list[str]] | None, optional
+        Dictionary mapping layer names to lists of probabilistic column names.
+    
+    embeddings : np.ndarray | None, optional
+        Pre-computed embeddings for the sequences. If None, they will be computed.
+    
+    embedding_domain : Literal["plm", "ohe"], default=`"ohe"`
+        The domain for embeddings. Options are:
+        - `"plm"`: Protein language model embeddings.
+        - `"ohe"`: One-hot encoded sequences.
+    
+    attach_embeddings : bool, default=`True`
+        Whether to attach embeddings as node attributes in the graph.
+    
+    emb_arr_key : str, default=`"emb_arr"`
+        The key under which embeddings will be stored in the graph nodes.
+    
+    model_name : str, default=`"facebook/esm2_t6_8M_UR50D"`
+        The name of the model to use for PLM embeddings.
+    
+    batch_size : int, default=`64`
+        Batch size for PLM embedding computation.
+    
+    device : str or None, default=`None`
+        Device to use for PLM embedding computation (e.g., "cpu" or "cuda").
+    
+    Returns
+    -------
+    FitnessLandscape
+        The constructed fitness landscape object.
+    """
+
+    df = pd.read_csv(path)
+
+    if sequence_col not in df.columns:
+        raise ValueError(f"sequence_col '{sequence_col}' not found in CSV columns {list(df.columns)}")
+
+    # build sequences
+    seqs = [make_sequence(s, alphabet=alphabet, moltype=moltype) for s in df[sequence_col].tolist()]
+
+    layers: dict[str, BaseFitnessLayer] = {}
+
+    # numeric scalar columns
+    if numeric_layers:
+        for name in numeric_layers:
+            if name not in df.columns:
+                raise ValueError(f"Numeric layer column '{name}' not found")
+            layers[name] = NumericFitness.from_scalars(name, df[name].to_numpy())
+
+    # numeric replicate groups
+    if replicate_prefixes:
+        for name, cols in replicate_prefixes.items():
+            for c in cols:
+                if c not in df.columns:
+                    raise ValueError(f"Replicate column '{c}' for layer '{name}' not found")
+            reps = df[cols].to_numpy(dtype=float)  # shape (N, R)
+            # convert rows to list[list]
+            rep_lists = [row[~np.isnan(row)].tolist() if np.isnan(row).any() else row.tolist()
+                         for row in reps]
+            layers[name] = NumericFitness.from_replicates(name, rep_lists)
+
+    # categorical single-column layers
+    if categorical_layers:
+        for name in categorical_layers:
+            if name not in df.columns:
+                raise ValueError(f"Categorical layer column '{name}' not found")
+            vals = df[name].astype(str).tolist()
+            layers[name] = CategoricalFitness.from_values(name, vals)
+
+    # probabilistic layers (wide)
+    if probabilistic_specs:
+        for name, cols in probabilistic_specs.items():
+            for c in cols:
+                if c not in df.columns:
+                    raise ValueError(f"Probabilistic column '{c}' for layer '{name}' not found")
+            P = df[cols].to_numpy(dtype=float)
+            cats = [c.split("=", 1)[1] if "=" in c else c for c in cols]
+            layers[name] = ProbabilisticCategoricalFitness.from_probabilities(name, P, categories=cats)
+
+    # build graph qnd landscape (using the unified builder).
+    L = FitnessLandscape.build(
+        sequences=seqs,
+        graph=graph,
+        fitness_layers=layers if layers else None,
+        embeddings=embeddings,
+        embedding_domain=embedding_domain,
+        attach_embeddings=attach_embeddings,
+        emb_arr_key=emb_arr_key,
+        model_name=model_name,
+        batch_size=batch_size,
+        device=device,
+    )
+    return L
+
+def to_csv_landscape(L: FitnessLandscape,
+                     path: str | Path,
+                     *,
+                     sequence_col: str = "sequence",
+                     include_layers: bool = True) -> None:
+    
+    """
+    Function to write a FitnessLandscape to a CSV file.
+    
+    Parameters
+    ----------
+    L : FitnessLandscape
+        The fitness landscape object to write to CSV.
+    
+    path : str or Path
+        The path where the CSV file will be saved.
+    
+    sequence_col : str, default=`"sequence"`
+        The column name for sequences in the output CSV.
+    
+    include_layers : bool, default=`True`
+        Whether to include fitness layers in the output CSV.
+    """
+    rows = []
+    for i, s in enumerate(L.sequences):
+        row = {sequence_col: s.to_str()}
+        if include_layers:
+            for name, layer in L.fitness_layers.items():
+                if layer.dtype == "numeric":
+                    row[name] = float(layer.to_scalar()[i])
+                elif layer.dtype == "categorical":
+                    row[name] = layer.get_value(i)
+            # (extend to probabilistic; emit wide columns).
+        rows.append(row)
+    pd.DataFrame(rows).to_csv(path, index=False)
