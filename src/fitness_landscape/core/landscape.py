@@ -455,9 +455,21 @@ class FitnessLandscape:
 
     #Fitness layer appending, modifying and viewing methods.
 
-    def view(self, name: str) -> BaseFitnessLayer:
+    def view(self,
+             name: str) -> BaseFitnessLayer:
         """
         Retrieves a fitness layer and sets it as the new active view.
+        Main entry point for accessing fitness layers.
+
+        Parameters
+        ----------
+        name : str
+            The name of the fitness layer to retrieve.
+        
+        Returns
+        -------
+        BaseFitnessLayer
+            The fitness layer corresponding to the provided name.
         """
         if name not in self.fitness_layers:
             raise KeyError(f"Fitness layer '{name}' not found.")
@@ -485,24 +497,50 @@ class FitnessLandscape:
             on_duplicates: Literal['error','first','all','aggregate'] = 'error',
             allow_missing: bool = False) -> None:
         """
-        Attach a new fitness layer.
+        Method to attach a fitness layer to the landscape.
+        
+        Parameters
+        ----------
+        layer : BaseFitnessLayer, optional
+            A pre-constructed fitness layer to attach. If provided,
+            it overrides the other parameters (name, values, dtype,
+            categories). If `None`, the other parameters must be
+            provided.
+        
+        name : str, optional
+            The name of the fitness layer to create. Required if
+            `layer` is not provided.
+        
+        values : list, dict, or iterable, optional
+            The values to use for the fitness layer. If `map_by` is
+            'index', this should be a list of values aligned with the
+            sequences. If `map_by` is 'sequence', this should be a
+            mapping of sequence keys to values (e.g., dict or iterable
+            of tuples). Required if `layer` is not provided.
+        
+        dtype : Literal['numeric', 'categorical'], optional
+            The data type of the fitness layer. Must be 'numeric' or
+            'categorical'. Required if `layer` is not provided.
 
-        Two modes:
-        1) attach(layer=BaseFitnessLayer(...))  # current behavior
-        2) attach(name=..., values=..., dtype=..., map_by='sequence'|'index', ...)
-
-        - If map_by='sequence', `values` must be either a dict {SeqKey -> value}
-        or an iterable of (SeqKey, value). Values follow layer dtype:
-            numeric: list[float] (replicates) or float
-            categorical: str
-            probabilistic: np.ndarray over categories
-        - on_duplicates controls behavior when the same sequence appears multiple
-        times in self.sequences:
-            'error'     : raise
-            'first'     : write to the first index only
-            'all'       : write to all matching indices
-            'aggregate' : numeric only — merge replicate lists across all matches
-        - allow_missing lets you ignore keys that don't exist in self.sequences.
+        categories : list[str], optional
+            The categories for a categorical fitness layer. Required if
+            `dtype` is 'categorical' and `layer` is not provided.
+        
+        map_by : Literal['index', 'sequence'], default='index'
+            How to map the `values` to sequences. If 'index', the
+            `values` should be a list aligned with the sequences.
+            If 'sequence', the `values` should be a mapping of
+            sequence keys to values (e.g., dict or iterable of tuples).
+        
+        on_duplicates : Literal['error', 'first', 'all', 'aggregate'], default='error'
+            How to handle duplicate sequences when mapping values.
+            - 'error': Raise an error if duplicates are found.
+            - 'first': Use the first value for duplicates.
+            - 'all': Use the value for all duplicates.
+            - 'aggregate': Merge values for duplicates (only for numeric).
+        
+        allow_missing : bool, default=False
+            If `True`, allows sequences to not have a value assigned.
         """
 
         if layer is not None:
