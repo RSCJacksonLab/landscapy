@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Iterable, List, Sequence as _SeqLike, Union, Literal, Mapping
-
+from .._const import PROT_20
 import numpy as np
 from cogent3.core.sequence import Sequence as _C3Sequence
 from cogent3.core.moltype import MolType
@@ -134,11 +134,11 @@ class BaseNumpySequence:
             positions: Union[int, Iterable[int], None] = None,
             *,
             values: Union[Iterable, None] = None,
-            rng: Union[np.random.Generator, None] = None) -> "BaseNumpySequence":
+            seed: int = None) -> "BaseNumpySequence":
         """
         Create a mutated copy of the sequence.
         """
-        rng = rng or np.random.default_rng()
+        rng = np.random.default_rng(seed)
         new_np = self._np.copy()
 
         if positions is None:
@@ -240,6 +240,233 @@ class BaseNumpySequence:
         # renormalise row–wise
         filtered = filtered / filtered.sum(axis=1, keepdims=True)
         return filtered
+    
+    # Factory constructor methods
+    @classmethod
+    def from_string(cls,
+                    s: str,
+                    *,
+                    alphabet: Iterable = PROT_20,
+                    moltype: str | None = None,
+                    sequence_id: str | None = None) -> "BaseNumpySequence":
+        """
+        Build from a plain string like 'ACDE' or '0101'.
+
+        Parameters
+        ----------
+        s : str
+            The sequence string. 
+        
+        alphabet : Iterable, default=`PROT_20`
+            The alphabet. Defaults to the canonical 20 amino acids.
+        
+        moltype: str, default=`None`
+            The (optional) moltype.
+        
+        sequence_id: str, default=`None`
+            The (optional) sequence ID. If `None`, the sequence is used
+            as the id. 
+
+        Returns
+        -------
+        BaseNumpySequence
+            The constructed BaseNumpySequence object.
+        """
+        arr = np.array(list(s))
+        
+        return cls(arr,
+                   sequence_id=sequence_id,
+                   alphabet=alphabet,
+                   moltype=moltype)
+
+    @classmethod
+    def from_iterable(cls,
+                      it: _SeqLike | np.ndarray,
+                      *,
+                      alphabet: Iterable  = PROT_20,
+                      moltype: str | None = None,
+                      sequence_id: str | None = None) -> "BaseNumpySequence":
+        """
+        Build from any 1D iterable/array of symbols/numbers.
+        
+        Parameters
+        ----------
+        it : Iterable
+            The sequence iterable. 
+        
+        alphabet : Iterable, default=`PROT_20`
+            The alphabet. Defaults to the canonical 20 amino acids.
+        
+        moltype: str, default=`None`
+            The (optional) moltype.
+        
+        sequence_id: str, default=`None`
+            The (optional) sequence ID. If `None`, the sequence is used
+            as the id. 
+
+        Returns
+        -------
+        BaseNumpySequence
+            The constructed BaseNumpySequence object.
+        """
+        arr = np.asarray(list(it)).ravel()
+        
+        return cls(arr,
+                   sequence_id=sequence_id,
+                   alphabet=alphabet,
+                   moltype=moltype)
+
+    @classmethod
+    def from_cogent3(cls,
+                     seq: _C3Sequence,
+                     *,
+                     sequence_id: str | None = None) -> "BaseNumpySequence":
+        """
+        Build directly from a cogent3 Sequence (moltype auto-carried).
+
+        Parameters
+        ----------
+        seq : Sequence
+            The cogent3 Sequence object. 
+        
+        sequence_id: str, default=`None`
+            The (optional) sequence ID. If `None`, the sequence is used
+            as the id. 
+
+        Returns
+        -------
+        BaseNumpySequence
+            The constructed BaseNumpySequence object.
+        """
+        return cls(seq,
+                   sequence_id=sequence_id,
+                   alphabet=None,
+                   moltype=seq.moltype)
+
+    @classmethod
+    def from_one_hot(cls,
+                     one_hot: np.ndarray,
+                     *,
+                     alphabet: Iterable = None,
+                     sequence_id: str | None = None) -> "BaseNumpySequence":
+        """
+        Build from (L, |A|) one-hot (argmax per row). No stochastic
+        tie-break.
+
+        Parameters
+        ----------
+        one_hot : np.ndarray
+            The sequence one-hot array. 
+        
+        alphabet : Iterable, default=`None`
+            The alphabet. Defaults to computation on the fly based on
+            the size of the array.
+        
+        sequence_id: str, default=`None`
+            The (optional) sequence ID. If `None`, the sequence is used
+            as the id. 
+
+        Returns
+        -------
+        BaseNumpySequence
+            The constructed BaseNumpySequence object.
+        """
+        one_hot = np.asarray(one_hot)
+        if one_hot.ndim != 2:
+            raise ValueError("one_hot must be 2D (L, |A|)")
+        idx = np.argmax(one_hot, axis=1)
+        if alphabet is not None:
+            # Auto compute alphabet if not provided.
+            alphabet = list(alphabet)
+        else: 
+            alphabet = list(range(one_hot.shape[1]))
+        arr = np.array([alphabet[i] for i in idx], dtype=object)
+        
+        return cls(arr,
+                   sequence_id=sequence_id,
+                   alphabet=alphabet)
+
+    @classmethod
+    def from_integer(cls,
+                     ints: _SeqLike[int] | np.ndarray,
+                     *,
+                     alphabet: Iterable = None,
+                     sequence_id: str | None = None) -> "BaseNumpySequence":
+        """
+        Build from integer indices into a provided alphabet.
+
+        Parameters
+        ----------
+        ints : SeqLike
+            The int list or iterable.
+        
+        alphabet : Iterable, default=`None`
+            The alphabet. Defaults to computation on the fly based on
+            the size on the maximum int.
+        
+        sequence_id: str, default=`None`
+            The (optional) sequence ID. If `None`, the sequence is used
+            as the id. 
+        Returns
+        -------
+        BaseNumpySequence
+            The constructed BaseNumpySequence object.
+        """
+        idx = np.asarray(ints, dtype=int).ravel()
+        
+        # Auto compute alphabet if not provided.
+        if alphabet is not None:
+            alphabet = list(alphabet)
+        else:
+            alphabet = list(range(max(idx)+1))
+
+        if np.any((idx < 0) | (idx >= len(alphabet))):
+            raise ValueError("integer indices out of range for given alphabet")
+        arr = np.array([alphabet[i] for i in idx], dtype=object)
+        
+        return cls(arr,
+                   sequence_id=sequence_id,
+                   alphabet=alphabet)
+
+    @classmethod
+    def random(cls,
+               length: int,
+               *,
+               alphabet: Iterable = PROT_20, 
+               seed: int = None,
+               sequence_id: str | None = None) -> "BaseNumpySequence":
+        """
+        Uniform random sequence of given length and alphabet.
+
+        Parameters
+        ----------
+        length : int
+            The length of the random sequences. 
+        
+        alphabet : Iterable, default=`PROT_20`
+            The alphabet for the random sequence. Defaults to the 20
+            canonical amino acids.
+        
+        seed : int, default=`None`
+            The random state initialisation seed. 
+        
+        sequence_id : str, default=`None`
+            The (optional) sequence ID. If `None`, the sequence is used
+            as the id. 
+        Returns
+        -------
+        BaseNumpySequence
+            The constructed BaseNumpySequence object.            
+            
+        """
+        rng = np.random.default_rng(seed)
+        A = list(alphabet)
+        arr = np.array(rng.choice(A, size=length), dtype=object)
+        
+        return cls(arr,
+                   sequence_id=sequence_id,
+                   alphabet=A)
+
 
 # BinarySequence can now be much simpler
 class BinarySequence(BaseNumpySequence):
@@ -253,6 +480,103 @@ class BinarySequence(BaseNumpySequence):
             raise ValueError("BinarySequence accepts only 0/1 symbols")
         
         super().__init__(arr, alphabet=['0', '1'], moltype=None)
+
+    @classmethod
+    def from_bits(cls,
+                  bits: _SeqLike[int] | np.ndarray,
+                  *,
+                  sequence_id: str | None = None) -> "BinarySequence":
+        """
+        Build from a 0/1 iterable/array.
+        
+        Parameters
+        ----------
+        bits : _SeqLike[int] or np.ndarray
+            The bits to construct the sequence from. 
+        
+        sequence_id : str, default=`None`
+            The (optional) sequence ID. If `None`, the sequence is used
+            as the id. 
+        
+        Returns
+        -------
+        BaseNumpySequence
+            The constructed BaseNumpySequence object.  
+        """
+        arr = np.asarray(bits, dtype=int).ravel()
+        return cls(arr)
+
+    @classmethod
+    def from_integer_bits(cls,
+                          value: int,
+                          *,
+                          length: int,
+                          msb_first: bool = True,
+                          sequence_id: str | None = None) -> "BinarySequence":
+        """
+        Build from an integer's bit pattern clipped/padded to length.
+
+        Parameters
+        ----------
+        value : int
+            The integer value to use
+        
+        length : int
+            The length to truncate the bits to. 
+        
+        msb_first : bool, default=`True`
+            Boolean to mask the first bit. 
+        
+        sequence_id : str, default=`None`
+            The (optional) sequence ID. If `None`, the sequence is used
+            as the id. 
+        Returns
+        -------
+        BaseNumpySequence
+            The constructed BaseNumpySequence object.  
+        """
+        if value < 0:
+            raise ValueError("value must be non-negative")
+        bits = np.array(list(np.binary_repr(value, width=length)), dtype=int)
+        if not msb_first:
+            bits = bits[::-1]
+        return cls(bits)
+
+    @classmethod
+    def random(cls,
+               length: int,
+               *,
+               p_one: float = 0.5,
+               seed: int = None,
+               sequence_id: str | None = None) -> "BinarySequence":
+        
+        """
+        Construct random sequenceo of bits. 
+
+        Parameters
+        ----------
+        length : int
+            The length of the sequence. 
+        
+        p_one : float, default=0.5
+            The probability of a value being clamped to `1`.
+        
+        seed : int, default=`None`
+            The random state initialisation seed. 
+        
+        sequence_id : str, default=`None`
+            The (optional) sequence ID. If `None`, the sequence is used
+            as the id. 
+
+        Returns
+        -------
+        BaseNumpySequence
+            The constructed BaseNumpySequence object.  
+        """
+        rng = np.random.default_rng(seed)
+        arr = rng.random(length) < p_one
+        return cls(arr.astype(int))
+
 
 class MultialleleSequence(BaseNumpySequence):
     """
@@ -268,6 +592,27 @@ class MultialleleSequence(BaseNumpySequence):
         super().__init__(arr,
                          alphabet=alphabet,
                          moltype=None)
+        
+    @classmethod
+    def random(cls,
+               length: int,
+               *,
+               alphabet: Iterable,
+               seed: int | None = None,
+               sequence_id: str | None = None) -> "MultialleleSequence":
+        rng = np.random.default_rng(seed)
+        A = list(alphabet)
+        arr = np.array(rng.choice(A, size=length), dtype=object)
+        return cls(arr, alphabet=A)
+
+    @classmethod
+    def from_string(cls,
+                    s: str,
+                    *,
+                    alphabet: Iterable,
+                    sequence_id: str | None = None) -> "MultialleleSequence":
+        return cls(list(s), alphabet=alphabet)
+
 
 class SoftSequence(BaseNumpySequence):
     """
@@ -281,8 +626,8 @@ class SoftSequence(BaseNumpySequence):
         The ordered alphabet corresponding to columns of `posterior`.
     hard_rule : {'argmax', 'sample'}, default 'argmax'
         How to derive the proxy hard sequence used by existing code.
-    rng : np.random.Generator, optional
-        RNG used when `hard_rule='sample'`.
+    seed : int
+        The random initialisation seed. 
     """
     def __init__(self,
                  aa_posterior: np.ndarray,
@@ -290,10 +635,11 @@ class SoftSequence(BaseNumpySequence):
                  alphabet: Iterable,
                  hard_rule: str = "argmax",
                  gap_posterior: np.ndarray = None,
-                 rng: np.random.Generator | None = None):
+                 seed: int = None):
 
         self.alphabet = list(alphabet) # The core, ungapped alphabet
-        self._rng = rng or np.random.default_rng()
+        self._rng = np.random.default_rng(seed)
+        self._seed = seed
         
         # Determine the alphabet to be used for the hard sequence proxy
         hard_sequence_alphabet = self.alphabet
@@ -350,7 +696,43 @@ class SoftSequence(BaseNumpySequence):
         return SoftSequence(self.posterior,
                             alphabet=self.alphabet,
                             hard_rule="sample",
-                            rng=self._rng)
+                            seed=self._seed)
+
+    @classmethod
+    def from_posteriors(cls,
+                        aa_posterior: np.ndarray,
+                        *,
+                        alphabet: Iterable = PROT_20,
+                        gap_posterior: np.ndarray | None = None,
+                        hard_rule: Literal["argmax", "sample"] = "argmax",
+                        seed: int = None) -> "SoftSequence":
+        """
+        Alias around __init__ for clarity / parity with other classes.
+
+        Parameters
+        ----------
+        posterior : np.ndarray
+            Shape (L, A). Rows are sites, columns are alphabet symbols.
+        
+        alphabet : Iterable, default=`PROT_20`
+            The ordered alphabet corresponding to columns of `posterior`.
+        
+        hard_rule : {'argmax', 'sample'}, default 'argmax'
+            How to derive the proxy hard sequence used by existing code.
+        
+        seed : int, default=`None`
+            The seed for random state initialisation.
+        
+        Returns
+        -------
+        SoftSequence
+            The constructed soft sequence.
+        """
+        return cls(aa_posterior,
+                   alphabet=alphabet,
+                   gap_posterior=gap_posterior,
+                   hard_rule=hard_rule,
+                   seed=seed)
 
     @staticmethod
     def compute_conditional_gap_dist(aa_post_dist: np.ndarray,       
@@ -383,7 +765,6 @@ class SoftSequence(BaseNumpySequence):
         # Fill the gap probability
         cond[:, num_alleles]  = d[:, 0]
         return cond
-
 
 def make_sequence(sequence: _SeqConvertible,
                   *,
@@ -424,6 +805,47 @@ def make_sequence(sequence: _SeqConvertible,
         return BinarySequence(seq_np)
     
     return BaseNumpySequence(seq_np, sequence_id=seq_id, alphabet=alphabet, moltype=moltype)
+
+# Batch factory functions
+def as_sequences(items: Iterable[Union[str, _SeqLike, np.ndarray, BaseNumpySequence, _C3Sequence]],
+                 *,
+                 binary: bool = False,
+                 alphabet: Iterable | None = PROT_20,
+                 moltype: str | None = None) -> List[BaseNumpySequence]:
+    """
+    Coerce a heterogeneous iterable of inputs into BaseNumpySequence
+    (or BinarySequence). Respects existing `make_sequence` behavior.
+
+    Parameters
+    ----------
+    items : Iterable
+        Iterable of heterogenous (or homogenous) input types.
+    
+    binary : bool, default=`False`
+        Boolean for whether sequences are binary.
+    
+    alphabet : iterable, default=`PROT_20`
+        The sequence alphabet.
+    
+    moltype : str, default=`None`
+        The (optional) moltype.
+    
+    Returns
+    -------
+    List[BaseNumpySequence]
+        List of constructed `BaseNumpySequence` objects.
+    """
+    out: list[BaseNumpySequence] = []
+    for x in items:
+        if isinstance(x, str) and not binary:
+            if set(x).issubset({'0', '1'}):
+                out.append(BinarySequence.from_bits([int(ch) for ch in x]))
+            else:
+                out.append(BaseNumpySequence.from_string(x, alphabet=alphabet, moltype=moltype))
+        else:
+            inferred_flag = True if binary is True else None
+            out.append(make_sequence(x, binary=inferred_flag, alphabet=alphabet, moltype=moltype))
+    return out
 
 
 def sequence_distance(seq1: Union[BaseNumpySequence, np.ndarray],
@@ -513,11 +935,11 @@ def read_from_fasta(filepath: Path,
     # Use cogent3 to load the sequences from the FASTA file
     seq_collection = load_unaligned_seqs(filepath, moltype=moltype)
 
-    # Convert the cogent3 sequences to BaseNumpySequence objects
+    moltype_obj = get_moltype(moltype)
+    alph = list(moltype_obj.alphabet)
+
     numpy_sequences = []
     for seq in seq_collection.iter_seqs():
-        # The make_sequence function can handle the cogent3 sequence object directly
-        numpy_seq = make_sequence(seq, moltype=moltype)
+        numpy_seq = make_sequence(seq, moltype=moltype, alphabet=alph)
         numpy_sequences.append(numpy_seq)
-
     return numpy_sequences

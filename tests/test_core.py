@@ -5,10 +5,17 @@ from fitness_landscape.core.sequence import *
 from fitness_landscape.core.graph import *
 from fitness_landscape.core.graph import _encode_multiallele 
 from fitness_landscape.core.digraph import *
-from fitness_landscape.core.landscape import FitnessLandscape, DirectedFitnessLandscape
-from fitness_landscape.core.fitness import NumericFitness, CategoricalFitness
+from fitness_landscape.core.landscape import FitnessLandscape, DirectedFitnessLandscape, to_csv_landscape, read_csv_landscape
+from fitness_landscape.core.fitness import (
+    NumericFitness,
+    CategoricalFitness,
+    ProbabilisticCategoricalFitness,
+    make_fitness_layer,
+    as_fitness_layers,
+)
 from fitness_landscape.core.superscape import FitnessSuperscape
 import torch
+import pandas as pd
 from torch_geometric.data import Data
 from fitness_landscape.core.fitness import NumericFitness, CategoricalFitness, ProbabilisticCategoricalFitness
 from pathlib import Path
@@ -16,6 +23,7 @@ from fitness_landscape.phylo._sub_matrices import nq_pfam
 from fitness_landscape.embedding.particle_sampler import SequenceGenerator, TopPSampler
 from unittest.mock import patch
 from fitness_landscape.utils import alignment_to_base_numpy_sequences
+from cogent3 import get_moltype
 
 @pytest.mark.parametrize("n,L,B", [(60, 6, 3), (80, 5, 4)])
 def test_hamming_graph_multiallele_smoke_largeish(n, L, B):
@@ -1398,3 +1406,434 @@ def test_to_sequence_tensors_index_and_sequence_lookup():
     score_tensor = out_seq[0]["fitness_tensors"]["score"]
     assert torch.is_tensor(score_tensor)
     assert torch.allclose(score_tensor[~torch.isnan(score_tensor)], torch.tensor([0.2]))
+
+
+def test_base_from_string_and_iterable_defaults():
+    s = BaseNumpySequence.from_string("ACDE")
+    assert isinstance(s, BaseNumpySequence)
+    assert s.to_str() == "ACDE"
+    # Default alphabet is PROT_20
+    assert s.alphabet == list(PROT_20)
+
+    t = BaseNumpySequence.from_iterable(list("WQER"), alphabet=list("WQER"))
+    assert t.to_str() == "WQER"
+    assert t.alphabet == list("WQER")
+
+
+def test_base_from_cogent3_preserves_moltype_and_alphabet():
+    prot = get_moltype("protein")
+    c3 = prot.make_seq("ACDEFG")
+    s = BaseNumpySequence.from_cogent3(c3)
+    assert s.to_str() == "ACDEFG"
+    # Alphabet should come from cogent3 moltype
+    assert set(s.alphabet) >= set(list("ACDEFG"))  # superset check (protein alphabet)
+
+
+def test_from_one_hot_with_and_without_alphabet_roundtrip():
+    one_hot = np.array([
+        [1, 0, 0],
+        [0, 1, 0],
+        [0, 0, 1],
+    ])
+    # With explicit alphabet
+    seq = BaseNumpySequence.from_one_hot(one_hot, alphabet=["A", "C", "D"])
+    assert seq.to_str() == "ACD"
+    # Round-trip to one-hot shape
+    oh = seq.to_one_hot(mapping={"A":0, "C":1, "D":2})
+    assert oh.shape == one_hot.shape
+    assert np.all((oh == one_hot))
+
+    seq_num = BaseNumpySequence.from_one_hot(one_hot)
+    # Should have length 3 and correct argmax positions
+    assert len(seq_num) == 3
+    # Rebuilding its own one-hot should match shape
+    oh2 = seq_num.to_one_hot(mapping={str(i): i for i in range(3)})
+    assert oh2.shape == (3, 3)
+
+
+def test_from_integer_with_explicit_alphabet():
+    idxs = [0, 2, 1, 2]
+    alphabet = ["A", "B", "C"]
+    s = BaseNumpySequence.from_integer(idxs, alphabet=alphabet)
+    assert s.to_str() == "ACBC"
+    assert s.alphabet == alphabet
+
+
+def test_make_sequence_infers_binary_and_base_numpy():
+    b = make_sequence([0, 1, 1, 0])  # infer binary
+    assert isinstance(b, BinarySequence)
+    assert b.to_array().tolist() == [0, 1, 1, 0]
+
+    p = make_sequence("ACD", alphabet=list("ACDE"))
+    assert isinstance(p, BaseNumpySequence)
+    assert p.to_str() == "ACD"
+
+
+def test_binary_sequence_constructors_and_random():
+    b1 = BinarySequence.from_bits([1, 0, 1])
+    assert isinstance(b1, BinarySequence)
+    assert b1.to_array().tolist() == [1, 0, 1]
+
+    b2 = BinarySequence.from_integer_bits(13, length=6)  # 001101 (MSB-first)
+    assert isinstance(b2, BinarySequence)
+    assert len(b2) == 6
+
+    b3 = BinarySequence.random(10, p_one=0.25, seed=123)
+    assert isinstance(b3, BinarySequence)
+    assert len(b3) == 10
+    # Reproducible
+    b4 = BinarySequence.random(10, p_one=0.25, seed=123)
+    assert np.array_equal(b3.to_array(), b4.to_array())
+
+
+def test_multiallele_sequence_random_and_from_string():
+    m1 = MultialleleSequence.random(5, alphabet=["A", "B", "C"])
+    assert isinstance(m1, MultialleleSequence)
+    assert len(m1) == 5
+    assert set(m1.alphabet) == {"A", "B", "C"}
+
+    m2 = MultialleleSequence.from_string("ABC", alphabet=["A", "B", "C"])
+    assert m2.to_str() == "ABC"
+
+
+def test_softsequence_from_posteriors_argmax_and_sample():
+    aa_post = np.array([[0.1, 0.9],
+                        [0.7, 0.3],
+                        [0.4, 0.6]])
+    s_arg = SoftSequence.from_posteriors(aa_post, alphabet=["X", "Y"], hard_rule="argmax")
+    assert s_arg.to_str() == "YXY"
+
+    s_samp = SoftSequence.from_posteriors(aa_post, alphabet=["X", "Y"], hard_rule="sample", seed=7)
+    # deterministic due to seed
+    assert isinstance(s_samp, SoftSequence)
+    assert len(s_samp) == 3
+    # resample uses same seed stored in instance
+    again = s_samp.resample()
+    assert isinstance(again, SoftSequence)
+    assert len(again) == 3
+
+
+def test_as_sequences_mixed_inputs_and_binary_detection():
+    items = ["ACD", "0101", np.array(list("AAA")), [0, 1, 0, 0]]
+    seqs = as_sequences(items, alphabet=list("ACDE"))
+    assert isinstance(seqs[0], BaseNumpySequence)
+    assert isinstance(seqs[1], BinarySequence)
+    assert isinstance(seqs[2], BaseNumpySequence)
+    assert isinstance(seqs[3], BinarySequence)
+    assert seqs[0].to_str() == "ACD"
+    assert seqs[1].to_array().tolist() == [0, 1, 0, 1]
+
+
+def test_generate_sequences_and_distance():
+    seqs = generate_sequences(length=3, alphabet=["A", "B"])
+    assert len(seqs) == 8
+    assert all(isinstance(s, BaseNumpySequence) for s in seqs)
+
+    d_h = sequence_distance(seqs[0], seqs[-1], metric="hamming")
+    assert isinstance(d_h, (float, int))
+    d_e = sequence_distance(np.array([0, 0]), np.array([1, 1]), metric="euclidean")
+    assert pytest.approx(d_e) == np.sqrt(2)
+
+
+def test_read_from_fasta_roundtrip(tmp_path):
+    fasta = tmp_path / "toy.fasta"
+    fasta.write_text(">seq1\nACDE\n>seq2\nWQER\n")
+    seqs = read_from_fasta(fasta, moltype="protein")
+    assert len(seqs) == 2
+    assert seqs[0].to_str() == "ACDE"
+    assert seqs[1].to_str() == "WQER"
+    assert set("ACDEWQER").issubset(set(seqs[0].alphabet))
+
+def test_numeric_from_scalars_and_tensor_roundtrip():
+    vals = [0.1, 0.2, 0.3, 0.4]
+    nf = NumericFitness.from_scalars("fit", vals)
+    assert nf.dtype == "numeric"
+    assert len(nf) == 4
+    # mean equals original scalars
+    np.testing.assert_allclose(nf.to_scalar(), np.array(vals))
+    # tensor shape (N, max_reps) = (4, 1)
+    t = nf.get_tensor().numpy()
+    assert t.shape == (4, 1)
+    np.testing.assert_allclose(t[:, 0], np.array(vals))
+
+    # Build from dense tensor with NaNs and trim strategy
+    mat = np.array([[1.0,  2.0,  np.nan],
+                    [3.0,  np.nan, np.nan],
+                    [5.0,  6.0,  7.0]])
+    nf2 = NumericFitness.from_tensor("fit2", mat, pad_strategy="trim_tail_nans")
+    assert len(nf2) == 3
+    # row means computed on the trimmed lists
+    means = []
+    for row in mat:
+        non_nan = np.where(~np.isnan(row))[0]
+        last = non_nan[-1]  # last non-NaN index
+        means.append(np.nanmean(row[: last + 1]))
+    np.testing.assert_allclose(nf2.to_scalar(), np.array(means))
+
+def test_numeric_from_replicates_and_index_map_and_random():
+    reps = [[1.0, 2.0], [], [5.0]]
+    nf = NumericFitness.from_replicates("r", reps)
+    assert len(nf) == 3
+    # empty replicate becomes [nan]
+    tensor = nf.get_tensor().numpy()
+    assert tensor.shape == (3, 2)  # padded
+    assert np.isnan(tensor[1, 0])
+
+    # index map with fill
+    mp = {0: 10.0, 2: [1.0, 1.5]}
+    nf2 = NumericFitness.from_index_map("imap", mp, length=3, fill=-1.0)
+    assert len(nf2) == 3
+    scalars = nf2.to_scalar()
+    assert scalars[0] == 10.0 and scalars[1] == -1.0
+    assert np.isclose(scalars[2], np.mean([1.0, 1.5]))
+
+    # random constructor reproducibility & shape
+    nf3a = NumericFitness.random("rnd", length=5, reps=3, dist="normal", seed=123)
+    nf3b = NumericFitness.random("rnd", length=5, reps=3, dist="normal", seed=123)
+    np.testing.assert_allclose(nf3a.get_tensor().numpy(), nf3b.get_tensor().numpy())
+    assert nf3a.get_tensor().shape == (5, 3)
+
+def test_categorical_from_values_and_one_hot_and_index_map():
+    vals = ["A", "B", "A", "C"]
+    cf = CategoricalFitness.from_values("cat", vals)
+    assert cf.dtype == "categorical"
+    assert len(cf) == 4
+    # default rank map follows category order used internally
+    r = cf.to_scalar()
+    assert r.dtype == int
+    # roundtrip via one-hot
+    one_hot = cf.get_tensor().numpy()
+    cats = cf.categories
+    cf2 = CategoricalFitness.from_one_hot("cat2", one_hot, categories=cats)
+    assert cf2.categories == cats
+    assert cf2._values == vals
+
+    # index map, explicit categories and default
+    mp = {0: "X", 2: "Y"}
+    cf3 = CategoricalFitness.from_index_map(
+        "imap", mp, length=3, default="Z", categories=["X", "Y", "Z"]
+    )
+    assert cf3._values == ["X", "Z", "Y"]
+    # wrong rank map coverage
+    with pytest.raises(ValueError):
+        cf3.to_scalar(rank_map={"X": 0})  # missing Y/Z
+
+def test_categorical_random_reproducible():
+    cats = ["L", "M", "H"]
+    cf1 = CategoricalFitness.random("r", length=6, categories=cats, seed=7)
+    cf2 = CategoricalFitness.random("r", length=6, categories=cats, seed=7)
+    assert cf1._values == cf2._values
+    assert set(cf1._values).issubset(set(cats))
+
+def test_probabilistic_from_probabilities_logits_counts_samples():
+    cats = ["A", "B", "C"]
+    # probabilities (already normalized)
+    P = np.array([[0.7, 0.2, 0.1],
+                  [0.0, 1.0, 0.0],
+                  [0.3, 0.3, 0.4]])
+    pf = ProbabilisticCategoricalFitness.from_probabilities("p", P, categories=cats)
+    assert pf.dtype == "categorical"
+    assert len(pf) == 3
+    s = pf.to_scalar()
+    np.testing.assert_array_equal(s, np.array([0, 1, 2]))
+
+    Z = np.array([[3.0, 1.0, 0.0],
+                  [0.1, 2.4, -1.0],
+                  [-2.0, -2.0, 0.0]])
+    pf2 = ProbabilisticCategoricalFitness.from_logits("log", Z, categories=cats)
+    np.testing.assert_array_equal(pf2.to_scalar(), np.array([0, 1, 2]))
+
+    # counts with smoothing and without
+    C = np.array([[7, 2, 1],
+                  [0, 5, 0],
+                  [3, 3, 4]], dtype=float)
+    pf3 = ProbabilisticCategoricalFitness.from_counts("cnt", C, categories=cats, alpha=0.0)
+    assert np.allclose(pf3.get_tensor().sum(axis=1).numpy(), 1.0)
+    pf3s = ProbabilisticCategoricalFitness.from_counts("cnts", C, categories=cats, alpha=1.0)
+    # smoothing changes distribution
+    assert not np.allclose(pf3.get_tensor().numpy(), pf3s.get_tensor().numpy())
+
+    samples = [["A", "A", "B"], ["B", "B"], ["C", "C", "A", "C"]]
+    pf4 = ProbabilisticCategoricalFitness.from_samples("s", samples, categories=cats)
+    assert pf4.probabilities.shape == (3, 3)
+    assert np.allclose(pf4.probabilities.sum(axis=1), 1.0)
+
+def test_make_fitness_layer_numeric_and_categorical_auto():
+    # numeric 1-D
+    nf = make_fitness_layer("n1", [1.0, 2.0, 3.0])
+    assert isinstance(nf, NumericFitness)
+    np.testing.assert_allclose(nf.to_scalar(), np.array([1.0, 2.0, 3.0]))
+
+    # numeric 2-D → NumericFitness
+    mat = np.array([[1.0, 2.0], [3.0, 4.0]])
+    nf2 = make_fitness_layer("n2", mat)
+    assert isinstance(nf2, NumericFitness)
+    assert nf2.get_tensor().shape == (2, 2)
+
+    # categorical from one-hot (explicit dtype + categories)
+    one_hot = np.array([[1, 0, 0],
+                        [0, 0, 1]])
+    cf = make_fitness_layer("c1", one_hot, dtype="categorical", categories=["X", "Y", "Z"])
+    assert isinstance(cf, CategoricalFitness)
+    assert cf._values == ["X", "Z"]
+
+    # probabilistic categorical (rows sum to 1)
+    P = np.array([[0.2, 0.8], [0.6, 0.4]])
+    pf = make_fitness_layer("pc", P, dtype="categorical", categories=["A", "B"])
+    assert isinstance(pf, ProbabilisticCategoricalFitness)
+    np.testing.assert_allclose(pf.get_tensor().sum(axis=1).numpy(), 1.0)
+
+
+def test_as_fitness_layers_mixed_mapping():
+    layers_in = {
+        "fit": [0.0, 1.0, 2.0],# numeric scalars
+        "rep": [[1.0, 2.0], [3.0], [4.0, 5.0]], # replicates
+        "label": np.array([[1, 0], [0, 1], [1, 0]]), # one-hot categorical
+        "post": np.array([[0.7, 0.3], [0.1, 0.9], [0.5, 0.5]])  # probabilities
+    }
+    cats = {
+        "label": ["A", "B"],
+        "post": ["X", "Y"],
+    }
+    out = as_fitness_layers(layers_in, categories=cats)
+    assert set(out.keys()) == {"fit", "rep", "label", "post"}
+    assert isinstance(out["fit"], NumericFitness)
+    assert isinstance(out["rep"], NumericFitness)
+    assert isinstance(out["label"], CategoricalFitness)
+    assert isinstance(out["post"], ProbabilisticCategoricalFitness)
+
+    # sanity on shapes
+    assert out["fit"].get_tensor().shape == (3, 1)
+    assert out["rep"].get_tensor().shape[0] == 3
+    assert out["label"].get_tensor().shape == (3, 2)
+    assert out["post"].get_tensor().shape == (3, 2)
+
+def _toy_seqs():
+    # short, small alphabet to keep graphs trivial
+    return [make_sequence(s) for s in ["ACD", "ACE", "ACF", "BCD"]]
+
+
+def test_build_hamming_basic_and_annotation():
+    seqs = _toy_seqs()
+    # attach one numeric layer to ensure annotation happens
+    fit = NumericFitness.from_scalars("fitness", [0.1, 0.2, 0.3, 0.4])
+    L = FitnessLandscape.build(
+        sequences=seqs,
+        graph="hamming",
+        fitness_layers={"fitness": fit},
+        attach_embeddings=False,  # hamming does not require embeddings
+    )
+    assert isinstance(L.graph, nx.Graph)
+    assert len(L) == len(seqs)
+    # nodes should have fitness annotations
+    for _, data in L.graph.nodes(data=True):
+        assert "sequence" in data
+        assert "fitness_fitness" in data
+
+
+def test_build_with_existing_graph_object():
+    seqs = _toy_seqs()
+    G = create_hamming_graph(seqs)
+    # pre-make a categorical layer
+    lab = CategoricalFitness.from_values("label", ["A", "B", "A", "B"])
+    L = FitnessLandscape.build(
+        sequences=seqs,
+        graph=G,
+        fitness_layers={"label": lab},
+        attach_embeddings=False,
+    )
+    assert L.graph is G
+    # categorical layer annotated on nodes
+    for _, data in L.graph.nodes(data=True):
+        assert "label" in L.fitness_layers
+        assert "fitness_label" in data
+
+
+def test_build_embedding_graph_auto_ohe_and_x_tensor_shape():
+    seqs = _toy_seqs()
+    L = FitnessLandscape.build(
+        sequences=seqs,
+        graph="tda", 
+        embedding_domain="ohe",
+        attach_embeddings=True,
+        n_components=1
+    )
+    # Embeddings should be computed/attached
+    assert L.embeddings is not None
+    assert isinstance(L.embeddings, np.ndarray)
+    # Export to PyG tensor; x should be present
+    pyg = L.to_graph_tensor()
+    assert hasattr(pyg, "x")
+    assert pyg.num_nodes == len(seqs)
+    assert pyg.x.shape[0] == len(seqs)
+
+def test_view_and_get_layer_selection_and_errors():
+    seqs = _toy_seqs()
+    layers = {
+        "fit": NumericFitness.from_scalars("fit", [0.0, 1.0, 2.0, 3.0]),
+        "cls": CategoricalFitness.from_values("cls", ["X", "Y", "X", "Y"]),
+    }
+    L = FitnessLandscape.build(seqs, graph="hamming", fitness_layers=layers)
+    # view() sets active layer
+    L.view("cls")
+    assert L.active_layer_name == "cls"
+    assert L.active_layer.dtype == "categorical"
+    # get_layer finds by key and by name equivalently
+    assert L.get_layer("fit") is layers["fit"]
+    # unknown raises a helpful KeyError
+    try:
+        L.get_layer("does_not_exist")
+    except KeyError as e:
+        assert "Layer 'does_not_exist' not found" in str(e)
+
+
+def test_read_csv_landscape_and_to_csv_roundtrip(tmp_path):
+    df = pd.DataFrame(
+        {
+            "sequence": ["ACD", "ACE", "ACF", "BCD"],
+            "fitness": [0.1, 0.2, 0.3, 0.4],
+            "fitness.rep1": [0.1, 0.3, 0.5, 0.7],
+            "fitness.rep2": [0.2, np.nan, 0.6, 0.9],
+            "label": ["A", "B", "A", "B"],
+            "label=A": [0.7, 0.2, 0.8, 0.1],
+            "label=B": [0.3, 0.8, 0.2, 0.9],
+        }
+    )
+    p = tmp_path / "toy_landscape.csv"
+    df.to_csv(p, index=False)
+
+    L = read_csv_landscape(
+        p,
+        sequence_col="sequence",
+        numeric_layers=["fitness"],
+        replicate_prefixes={"rep": ["fitness.rep1", "fitness.rep2"]},
+        categorical_layers=["label"],
+        probabilistic_specs={"post": ["label=A", "label=B"]},
+        graph="hamming",
+        attach_embeddings=False,
+    )
+
+    # layers exist with correct types
+    assert isinstance(L.fitness_layers["fitness"], NumericFitness)
+    assert isinstance(L.fitness_layers["rep"], NumericFitness)
+    assert isinstance(L.fitness_layers["label"], CategoricalFitness)
+    assert isinstance(L.fitness_layers["post"], ProbabilisticCategoricalFitness)
+
+    # replicate tensor has shape (N, max_reps==2) with padding
+    t_rep = L.fitness_layers["rep"].get_tensor().numpy()
+    assert t_rep.shape == (4, 2)
+    # probabilistic rows sum to approx 1
+    P = L.fitness_layers["post"].get_tensor().numpy()
+    np.testing.assert_allclose(P.sum(axis=1), 1.0, atol=1e-6)
+
+    # Write out again (numeric + categorical get exported)
+    out = tmp_path / "roundtrip.csv"
+    to_csv_landscape(L, out, sequence_col="sequence", include_layers=True)
+    df2 = pd.read_csv(out)
+
+    # Expected columns: sequence + fitness + rep + label
+    assert set(["sequence", "fitness", "label"]).issubset(set(df2.columns))
+    assert len(df2) == 4
+    # values are preserved for scalar numeric + categorical
+    np.testing.assert_allclose(df2["fitness"].to_numpy(), df["fitness"].to_numpy())
+    assert df2["label"].tolist() == df["label"].tolist()
