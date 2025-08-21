@@ -6,7 +6,13 @@ from fitness_landscape.core.graph import *
 from fitness_landscape.core.graph import _encode_multiallele 
 from fitness_landscape.core.digraph import *
 from fitness_landscape.core.landscape import FitnessLandscape, DirectedFitnessLandscape
-from fitness_landscape.core.fitness import NumericFitness, CategoricalFitness
+from fitness_landscape.core.fitness import (
+    NumericFitness,
+    CategoricalFitness,
+    ProbabilisticCategoricalFitness,
+    make_fitness_layer,
+    as_fitness_layers,
+)
 from fitness_landscape.core.superscape import FitnessSuperscape
 import torch
 from torch_geometric.data import Data
@@ -1536,3 +1542,167 @@ def test_read_from_fasta_roundtrip(tmp_path):
     assert seqs[0].to_str() == "ACDE"
     assert seqs[1].to_str() == "WQER"
     assert set("ACDEWQER").issubset(set(seqs[0].alphabet))
+
+def test_numeric_from_scalars_and_tensor_roundtrip():
+    vals = [0.1, 0.2, 0.3, 0.4]
+    nf = NumericFitness.from_scalars("fit", vals)
+    assert nf.dtype == "numeric"
+    assert len(nf) == 4
+    # mean equals original scalars
+    np.testing.assert_allclose(nf.to_scalar(), np.array(vals))
+    # tensor shape (N, max_reps) = (4, 1)
+    t = nf.get_tensor().numpy()
+    assert t.shape == (4, 1)
+    np.testing.assert_allclose(t[:, 0], np.array(vals))
+
+    # Build from dense tensor with NaNs and trim strategy
+    mat = np.array([[1.0,  2.0,  np.nan],
+                    [3.0,  np.nan, np.nan],
+                    [5.0,  6.0,  7.0]])
+    nf2 = NumericFitness.from_tensor("fit2", mat, pad_strategy="trim_tail_nans")
+    assert len(nf2) == 3
+    # row means computed on the trimmed lists
+    means = []
+    for row in mat:
+        non_nan = np.where(~np.isnan(row))[0]
+        last = non_nan[-1]  # last non-NaN index
+        means.append(np.nanmean(row[: last + 1]))
+    np.testing.assert_allclose(nf2.to_scalar(), np.array(means))
+
+def test_numeric_from_replicates_and_index_map_and_random():
+    reps = [[1.0, 2.0], [], [5.0]]
+    nf = NumericFitness.from_replicates("r", reps)
+    assert len(nf) == 3
+    # empty replicate becomes [nan]
+    tensor = nf.get_tensor().numpy()
+    assert tensor.shape == (3, 2)  # padded
+    assert np.isnan(tensor[1, 0])
+
+    # index map with fill
+    mp = {0: 10.0, 2: [1.0, 1.5]}
+    nf2 = NumericFitness.from_index_map("imap", mp, length=3, fill=-1.0)
+    assert len(nf2) == 3
+    scalars = nf2.to_scalar()
+    assert scalars[0] == 10.0 and scalars[1] == -1.0
+    assert np.isclose(scalars[2], np.mean([1.0, 1.5]))
+
+    # random constructor reproducibility & shape
+    nf3a = NumericFitness.random("rnd", length=5, reps=3, dist="normal", seed=123)
+    nf3b = NumericFitness.random("rnd", length=5, reps=3, dist="normal", seed=123)
+    np.testing.assert_allclose(nf3a.get_tensor().numpy(), nf3b.get_tensor().numpy())
+    assert nf3a.get_tensor().shape == (5, 3)
+
+def test_categorical_from_values_and_one_hot_and_index_map():
+    vals = ["A", "B", "A", "C"]
+    cf = CategoricalFitness.from_values("cat", vals)
+    assert cf.dtype == "categorical"
+    assert len(cf) == 4
+    # default rank map follows category order used internally
+    r = cf.to_scalar()
+    assert r.dtype == int
+    # roundtrip via one-hot
+    one_hot = cf.get_tensor().numpy()
+    cats = cf.categories
+    cf2 = CategoricalFitness.from_one_hot("cat2", one_hot, categories=cats)
+    assert cf2.categories == cats
+    assert cf2._values == vals
+
+    # index map, explicit categories and default
+    mp = {0: "X", 2: "Y"}
+    cf3 = CategoricalFitness.from_index_map(
+        "imap", mp, length=3, default="Z", categories=["X", "Y", "Z"]
+    )
+    assert cf3._values == ["X", "Z", "Y"]
+    # wrong rank map coverage
+    with pytest.raises(ValueError):
+        cf3.to_scalar(rank_map={"X": 0})  # missing Y/Z
+
+def test_categorical_random_reproducible():
+    cats = ["L", "M", "H"]
+    cf1 = CategoricalFitness.random("r", length=6, categories=cats, seed=7)
+    cf2 = CategoricalFitness.random("r", length=6, categories=cats, seed=7)
+    assert cf1._values == cf2._values
+    assert set(cf1._values).issubset(set(cats))
+
+def test_probabilistic_from_probabilities_logits_counts_samples():
+    cats = ["A", "B", "C"]
+    # probabilities (already normalized)
+    P = np.array([[0.7, 0.2, 0.1],
+                  [0.0, 1.0, 0.0],
+                  [0.3, 0.3, 0.4]])
+    pf = ProbabilisticCategoricalFitness.from_probabilities("p", P, categories=cats)
+    assert pf.dtype == "categorical"
+    assert len(pf) == 3
+    s = pf.to_scalar()
+    np.testing.assert_array_equal(s, np.array([0, 1, 2]))
+
+    Z = np.array([[3.0, 1.0, 0.0],
+                  [0.1, 2.4, -1.0],
+                  [-2.0, -2.0, 0.0]])
+    pf2 = ProbabilisticCategoricalFitness.from_logits("log", Z, categories=cats)
+    np.testing.assert_array_equal(pf2.to_scalar(), np.array([0, 1, 2]))
+
+    # counts with smoothing and without
+    C = np.array([[7, 2, 1],
+                  [0, 5, 0],
+                  [3, 3, 4]], dtype=float)
+    pf3 = ProbabilisticCategoricalFitness.from_counts("cnt", C, categories=cats, alpha=0.0)
+    assert np.allclose(pf3.get_tensor().sum(axis=1).numpy(), 1.0)
+    pf3s = ProbabilisticCategoricalFitness.from_counts("cnts", C, categories=cats, alpha=1.0)
+    # smoothing changes distribution
+    assert not np.allclose(pf3.get_tensor().numpy(), pf3s.get_tensor().numpy())
+
+    samples = [["A", "A", "B"], ["B", "B"], ["C", "C", "A", "C"]]
+    pf4 = ProbabilisticCategoricalFitness.from_samples("s", samples, categories=cats)
+    assert pf4.probabilities.shape == (3, 3)
+    assert np.allclose(pf4.probabilities.sum(axis=1), 1.0)
+
+def test_make_fitness_layer_numeric_and_categorical_auto():
+    # numeric 1-D
+    nf = make_fitness_layer("n1", [1.0, 2.0, 3.0])
+    assert isinstance(nf, NumericFitness)
+    np.testing.assert_allclose(nf.to_scalar(), np.array([1.0, 2.0, 3.0]))
+
+    # numeric 2-D → NumericFitness
+    mat = np.array([[1.0, 2.0], [3.0, 4.0]])
+    nf2 = make_fitness_layer("n2", mat)
+    assert isinstance(nf2, NumericFitness)
+    assert nf2.get_tensor().shape == (2, 2)
+
+    # categorical from one-hot (explicit dtype + categories)
+    one_hot = np.array([[1, 0, 0],
+                        [0, 0, 1]])
+    cf = make_fitness_layer("c1", one_hot, dtype="categorical", categories=["X", "Y", "Z"])
+    assert isinstance(cf, CategoricalFitness)
+    assert cf._values == ["X", "Z"]
+
+    # probabilistic categorical (rows sum to 1)
+    P = np.array([[0.2, 0.8], [0.6, 0.4]])
+    pf = make_fitness_layer("pc", P, dtype="categorical", categories=["A", "B"])
+    assert isinstance(pf, ProbabilisticCategoricalFitness)
+    np.testing.assert_allclose(pf.get_tensor().sum(axis=1).numpy(), 1.0)
+
+
+def test_as_fitness_layers_mixed_mapping():
+    layers_in = {
+        "fit": [0.0, 1.0, 2.0],# numeric scalars
+        "rep": [[1.0, 2.0], [3.0], [4.0, 5.0]], # replicates
+        "label": np.array([[1, 0], [0, 1], [1, 0]]), # one-hot categorical
+        "post": np.array([[0.7, 0.3], [0.1, 0.9], [0.5, 0.5]])  # probabilities
+    }
+    cats = {
+        "label": ["A", "B"],
+        "post": ["X", "Y"],
+    }
+    out = as_fitness_layers(layers_in, categories=cats)
+    assert set(out.keys()) == {"fit", "rep", "label", "post"}
+    assert isinstance(out["fit"], NumericFitness)
+    assert isinstance(out["rep"], NumericFitness)
+    assert isinstance(out["label"], CategoricalFitness)
+    assert isinstance(out["post"], ProbabilisticCategoricalFitness)
+
+    # sanity on shapes
+    assert out["fit"].get_tensor().shape == (3, 1)
+    assert out["rep"].get_tensor().shape[0] == 3
+    assert out["label"].get_tensor().shape == (3, 2)
+    assert out["post"].get_tensor().shape == (3, 2)

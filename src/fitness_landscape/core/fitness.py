@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Literal, List, Any, Tuple, Union
+from typing import Dict, Literal, List, Any, Tuple, Union, Mapping
 import torch
 import numpy as np
 from scipy import stats
@@ -916,7 +916,7 @@ class ProbabilisticCategoricalFitness(BaseFitnessLayer):
             An instance of the ProbabilisticCategoricalFitness class.
         """
         cats = list(categories)
-        idx_map = {c: i for i in cats}
+        idx_map = {c: i for i, c in enumerate(cats)}
         num_seq = len(samples)
         num_cat = len(cats)
         C = np.zeros((num_seq, num_cat), dtype=float)
@@ -1005,33 +1005,60 @@ def make_fitness_layer(name: str,
     if isinstance(obj, BaseFitnessLayer):
         return obj
 
-    # Torch / numpy unify
     is_tensor = isinstance(obj, torch.Tensor)
-    arr = obj.detach().cpu().numpy() if is_tensor else np.asarray(obj, dtype=object)
 
-    # Replicate lists (ragged) are object dtype or list of lists
+    # Fast-path: replicate lists (ragged)
     if isinstance(obj, list) and obj and isinstance(obj[0], (list, tuple, np.ndarray)):
         return NumericFitness.from_replicates(name, obj, metadata=metadata)
 
-    # 1-D numeric
-    if arr.ndim == 1 and np.issubdtype(np.array(arr).dtype, np.number):
-        return NumericFitness.from_scalars(name, arr.astype(float), metadata=metadata)
+    # Try to coerce numerically
+    try:
+        arr_num = obj.detach().cpu().numpy() if is_tensor else np.asarray(obj, dtype=float)
+    except (TypeError, ValueError):
+        arr_num = None
 
-    # 2-D numeric
-    if arr.ndim == 2 and np.issubdtype(np.array(arr, dtype=float).dtype, np.number):
-        if dtype == "categorical":
-            if categories is None:
-                raise ValueError("categories required for categorical 2-D inputs")
-            # Heuristic: rows sum ~1 then probabilities; rows are one-hot integers then one-hot
-            row_sum = arr.astype(float).sum(axis=1)
-            if np.allclose(row_sum, 1.0, atol=1e-6):
-                return ProbabilisticCategoricalFitness.from_probabilities(name, arr.astype(float), categories=categories, metadata=metadata)
-            # integer one-hot?
-            if set(np.unique(arr)).issubset({0, 1}):
-                return CategoricalFitness.from_one_hot(name, arr.astype(float), categories=categories, metadata=metadata)
-            raise ValueError("Ambiguous 2-D categorical tensor; provide probabilities or one-hot")
-        if dtype in ("numeric", "auto"):
-            return NumericFitness.from_tensor(name, arr.astype(float), metadata=metadata)
+    if arr_num is not None:
+        if arr_num.ndim == 1:
+            return NumericFitness.from_scalars(name, arr_num, metadata=metadata)
+
+        if arr_num.ndim == 2:
+            if dtype == "categorical":
+                if categories is None:
+                    raise ValueError("categories required for categorical 2-D inputs")
+                
+                is_binary = np.all((arr_num == 0) | (arr_num == 1))
+                row_sum = arr_num.sum(axis=1)
+                is_one_hot = bool(is_binary and np.allclose(row_sum, 1.0))
+
+                if is_one_hot:
+                    return CategoricalFitness.from_one_hot(
+                        name, arr_num, categories=categories, metadata=metadata
+                    )
+
+                if np.allclose(row_sum, 1.0, atol=1e-6):
+                    return ProbabilisticCategoricalFitness.from_probabilities(
+                        name, arr_num, categories=categories, metadata=metadata
+                    )
+
+                raise ValueError(
+                    "Ambiguous 2-D categorical tensor; provide probabilities (rows sum≈1) "
+                    "or a strict one-hot matrix."
+                )
+
+            # numeric matrix
+            if dtype in ("numeric", "auto"):
+                return NumericFitness.from_tensor(name, arr_num, metadata=metadata)
+
+    # Fallback for non-numeric objects
+    arr_obj = obj.detach().cpu().numpy() if is_tensor else np.asarray(obj, dtype=object)
+    if arr_obj.ndim == 2 and dtype == "categorical":
+        if categories is None:
+            raise ValueError("categories required for categorical 2-D inputs")
+        row_sum = np.asarray(arr_obj, dtype=float).sum(axis=1)
+        if np.allclose(row_sum, 1.0, atol=1e-6):
+            return ProbabilisticCategoricalFitness.from_probabilities(
+                name, np.asarray(arr_obj, dtype=float), categories=categories, metadata=metadata
+            )
 
     raise TypeError(f"Cannot infer fitness layer from object of type {type(obj)} with dtype='{dtype}'")
 
