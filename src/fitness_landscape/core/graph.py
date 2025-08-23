@@ -117,11 +117,14 @@ def create_hamming_graph_binary(sequences: list[BinarySequence]) -> nx.Graph:
     for i, seq in enumerate(sequences):
         G.nodes[i]['sequence'] = seq
         
-    for u, v in G.edges():
-        G[u][v]['weight'] = 1.0
-        G[u][v]['distance'] = 1
+    #TODO: Confirm that indices match here.
+    aligned_arr = [s.to_array().astype(np.uint8) for s in sequences]
+    
+    # Stamp standardised edge attributes to graph.
+    attach_expected_hamming_to_edges(G, aligned_arr)
     
     return G
+
 
 def _encode_multiallele(seqs: list[BaseNumpySequence]) -> tuple[np.ndarray, dict[str,int]]:
     """
@@ -255,11 +258,12 @@ def create_hamming_graph_multiallele(sequences: list[BaseNumpySequence]) -> nx.G
     for i, seq in enumerate(sequences):
         G.nodes[i]['sequence'] = seq
         
-    # TODO: Update `weight`, `distance`, `similarity` logic.
-    for u, v in G.edges():
-        G[u][v]['weight'] = 1.0
-        G[u][v]['distance'] = 1
-
+    #TODO: Confirm that indices match here.
+    aligned_arr = [s.to_array().astype(np.uint8) for s in sequences]
+    
+    # Stamp standardised edge attributes to graph.
+    attach_expected_hamming_to_edges(G, aligned_arr)
+    
     return G
 
 # Main public method
@@ -561,14 +565,15 @@ def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
     M = coo_matrix((V, (I, J)), shape=(n, n)).tocsr()
     U = M.maximum(M.T)
 
-    G = nx.from_scipy_sparse_array(U, edge_attribute='distance')
+    G = nx.from_scipy_sparse_array(U)
     
     G.add_nodes_from(range(n))
     for i in range(n):
         G.nodes[i]['sequence'] = sequences[i]
     
-    for u, v in G.edges():
-        G[u][v]['weight'] = G[u][v]['distance']
+    # Attach edge attributes.    
+    compute_edge_mutations_star(G=G)
+
     return G
 
 def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
@@ -696,14 +701,11 @@ def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
         for j, dij in zip(sel_ids, sel_ds):
             if i == j:
                 continue
-            if G.has_edge(i, j):
-                # keep the tighter (min) distance
-                prev = G[i][j].get("distance", dij)
-                if dij < prev:
-                    G[i][j]["distance"] = dij
-                    G[i][j]["weight"]   = dij
             else:
-                G.add_edge(i, j, distance=dij, weight=dij)
+                G.add_edge(i, j)
+
+    # Attach edge attributes.    
+    compute_edge_mutations_star(G=G)
 
     return G
 
@@ -878,6 +880,9 @@ def create_tda_graph(sequences: List[BaseNumpySequence],
         G = _reweight_graph_by_simplices(G=G,
                                          simplex_tree=simplex_tree)
 
+    
+    # Attach edge attributes.    
+    compute_edge_mutations_star(G=G)
     return G
 
 def _reweight_graph_by_simplices(G: nx.Graph,
@@ -1063,11 +1068,13 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
     rows, cols = np.where(np.triu(diffused_matrix > connectivity_threshold, k=1))
     
     for i, j in zip(rows, cols):
-        G.add_edge(i, j, weight=diffused_matrix[i, j])
+        G.add_edge(i, j, kernel_weight=diffused_matrix[i, j])
         
     for i, seq in enumerate(sequences):
         G.nodes[i]['sequence'] = seq
         
+    # Attach edge attributes.    
+    compute_edge_mutations_star(G=G)
     return G
 
 def create_phylo_graph(sequences: Union[Path, ArrayAlignment],
@@ -1100,7 +1107,11 @@ def create_phylo_graph(sequences: Union[Path, ArrayAlignment],
     constructor = ASRConstructor(sequences,
                                  replacement_matrix = replacement_matrix,
                                  model_fitting = model_fitting)
+    
     graph = constructor.construct_dag(graph_type='undirected')
+    
+    # Attach edge attributes.    
+    compute_edge_mutations_star(G=graph)
     return graph
 
 def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
@@ -1266,13 +1277,15 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     rows, cols = np.where(np.triu(symmetric_diffused_matrix > connectivity_threshold, k=1))
 
     for i, j in zip(rows, cols):
-        graph.add_edge(i, j, weight=symmetric_diffused_matrix[i, j])
+        graph.add_edge(i, j, kernel_weight=symmetric_diffused_matrix[i, j])
 
     for i, seq in enumerate(sequences):
         graph.nodes[i]['sequence'] = seq
 
+    # Attach edge attributes.    
+    compute_edge_mutations_star(G=graph)
     return graph
-
+    
 def pairwise_expected_hamming_from_aligned(aligned: Sequence[np.ndarray],
                                            *,
                                            gap_at: int = -1,

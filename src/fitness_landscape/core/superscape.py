@@ -1,9 +1,34 @@
-from pydantic import BaseModel, Field, field_validator, ValidationError, ConfigDict
-from typing import Union, List, Literal, Iterable, Dict, Any
+from pydantic import (
+    BaseModel,
+    Field,
+    field_validator,
+    ValidationError,
+    ConfigDict
+)
+from typing import (
+    Union,
+    List,
+    Literal,
+    Iterable,
+    Dict,
+    Any
+)
 import numpy as np
-from ..core.landscape import FitnessLandscape, DirectedFitnessLandscape
-from ..core.sequence import BaseNumpySequence, SoftSequence
-from ..core.fitness import NumericFitness, CategoricalFitness, ProbabilisticCategoricalFitness, BaseFitnessLayer
+from ..core.landscape import (
+    FitnessLandscape,
+    DirectedFitnessLandscape
+)
+from ..core.graph import compute_edge_mutations_star
+from ..core.sequence import (
+    BaseNumpySequence,
+    SoftSequence
+)
+from ..core.fitness import (
+    NumericFitness,
+    CategoricalFitness,
+    ProbabilisticCategoricalFitness,
+    BaseFitnessLayer
+)
 from ..graph_matching.latent_alignment import RJMCMCAligner
 from ..graph_matching.hierarchical_alignment import HierarchicalRJMCMCAligner
 import networkx as nx
@@ -11,7 +36,10 @@ from softalign.soft_alignment import align_soft_sequences
 import ray
 from pathlib import Path
 from cogent3 import ArrayAlignment
-from ..utils import PROT_20, alignment_to_base_numpy_sequences
+from ..utils import (
+    PROT_20,
+    alignment_to_base_numpy_sequences
+)
 import torch
 
 
@@ -258,9 +286,12 @@ class FitnessSuperscape:
                 sequences=latent_sequences,
                 fitness_layers=latent_fitness_layers,
                 graph=self.latent_graph)
-        
+    
         else:
             raise ValueError(f"Expected latent graph to be nx.Graph or nx.DiGraph, found {type(self.latent_graph)}")
+        
+        # Attach Hamming edge attributes
+        compute_edge_mutations_star(G=self.latent_landscape.graph)
 
 
     @staticmethod
