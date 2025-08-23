@@ -1,16 +1,33 @@
 from pathlib import Path
-from typing import Union, Dict, List, Literal
+from typing import (
+    Union,
+    Dict,
+    List,
+    Literal
+)
 import numpy as np
 import networkx as nx
-from cogent3 import load_aligned_seqs, ArrayAlignment, PhyloNode, load_tree, get_app
+from cogent3 import (
+    load_aligned_seqs,
+    ArrayAlignment,
+    PhyloNode,
+    load_tree,
+    get_app
+)
 import piqtree
 from piqtree import Model
 from piqtree.model import AaModel
 from piqtree import model_finder
 import math
 from cogent3.util.table import Table
-from ..core.sequence import BaseNumpySequence, SoftSequence
-from .._const import PROT_20, ALPHABET_21
+from ..core.sequence import (
+    BaseNumpySequence,
+    SoftSequence
+)
+from .._const import (
+    PROT_20,
+    ALPHABET_21
+)
 
 class ASRConstructor:
     """
