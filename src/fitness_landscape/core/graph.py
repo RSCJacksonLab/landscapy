@@ -1,6 +1,6 @@
 import numpy as np
 import networkx as nx
-from typing import List, Union, Literal, Tuple
+from typing import List, Union, Literal, Tuple, Optional, Sequence
 from .sequence import BaseNumpySequence, BinarySequence, sequence_distance, SoftSequence
 from ..phylo.phylogenetic_asr import ASRConstructor
 from ..phylo._sub_matrices import lg
@@ -12,11 +12,10 @@ from sklearn.metrics.pairwise import euclidean_distances
 from pathlib import Path
 from cogent3 import ArrayAlignment
 from .._const import PROT_20
-from ..utils import calculate_gapped_soft_score
+from ..utils import calculate_gapped_soft_score, 
 from softalign.soft_alignment import align_soft_sequences
 from scipy.sparse import csr_matrix
 from scipy.sparse import coo_matrix
-
 import faiss
 
 
@@ -1273,3 +1272,316 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         graph.nodes[i]['sequence'] = seq
 
     return graph
+
+def pairwise_expected_hamming_from_aligned(aligned: Sequence[np.ndarray],
+                                           *,
+                                           gap_at: int = -1,
+                                           return_norm: bool = True,
+                                           block_cols: Optional[int] = None,
+                                           eps: float = 1e-12) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
+    """
+    Compute pairwise expected Hamming counts and effective lengths for
+    N aligned soft sequences. Does not apply to hard sequences. 
+
+    Parameters
+    ----------
+    aligned : Sequence[np.ndarray]
+        List of aligned soft sequences, each of shape (L_aln, A+1)
+        where last axis is A amino acids + gap.
+
+    gap_at : int, default=-1
+        Index of the gap channel in the last axis of aligned[i].
+        If negative, counts from the end (-1 = last channel).
+    
+    return_norm : bool, default=True
+        Whether to return normalized expected mismatch fraction in [0,1].
+    
+    block_cols : Optional[int], default=None
+        If set, process columns in blocks of this size for memory efficiency.
+        If None, process all columns at once.
+    
+    eps : float, default=1e-12
+        Small value to avoid division by zero in normalization.
+
+    Returns
+    -------
+    exp_mut : np.ndarray
+        Expected mismatch counts for each pair of sequences, shape (N, N).
+    
+    eff_len : np.ndarray
+        Effective length of each pair of sequences, shape (N, N).
+    
+    dist : Optional[np.ndarray]
+        Normalized expected mismatch fraction in [0,1] if return_norm=True,
+        shape (N, N). Otherwise None.
+    """
+    # Stack to (N, L, C)
+    P = np.asarray(aligned, dtype=np.float64)
+    if P.ndim != 3:
+        raise ValueError("aligned must stack to shape (N, L, A+1)")
+    N, L, C = P.shape
+    if C < 2:
+        raise ValueError("last axis must have >=2 channels (>=1 AA + gap)")
+
+    # Split AA vs gap
+    gap_idx = gap_at if gap_at >= 0 else (C + gap_at)
+    if not (0 <= gap_idx < C):
+        raise ValueError("gap_at out of range for last axis")
+    P_gap = P[..., gap_idx] # (N, L)
+    P_aa  = np.delete(P, gap_idx, axis=2) # (N, L, A)
+
+    # Probability each sequence is non-gap at column
+    Wcol = (1.0 - P_gap) # (N, L)
+
+    exp_mut = np.zeros((N, N), dtype=np.float64)
+    eff_len = np.zeros((N, N), dtype=np.float64)
+
+    B = block_cols or L
+    for s in range(0, L, B):
+        e = min(s + B, L)
+        Pa = P_aa[:, s:e, :] # (N, b, A)
+        W  = Wcol[:, s:e] # (N, b)s
+
+        id_batch = np.einsum("nka,mka->nmk", Pa, Pa, optimize=True)
+
+        # joint non-gap weight per column to (N,N,b)
+        w_batch = np.einsum("nc,mc->nmc", W, W, optimize=True)
+
+        # expected mismatches per column is w * (1 - id)
+        exp_mut += np.sum(w_batch * (1.0 - id_batch), axis=2)
+        eff_len += np.sum(w_batch, axis=2)
+
+    if return_norm:
+        dist = exp_mut / np.maximum(eff_len, eps)
+        np.clip(dist, 0.0, 1.0, out=dist)
+        return exp_mut, eff_len, dist
+    else:
+        return exp_mut, eff_len, None
+
+def _ensure_gapped_last(arr: np.ndarray,
+                        *,
+                        eps: float = 1e-12) -> np.ndarray:
+    """
+    Helper function to ensure array is (L, A+1) with a final gap channel.
+    If input is (L, A) (ungapped), append gap = 1 - sum(AA) (clipped).
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input array of shape (L, A) or (L, A+1) where
+        A is the number of amino acids (20 or 21 including gap).
+    
+    eps : float, default=1e-12
+        Small value to avoid division by zero in normalization.
+    
+    Returns
+    -------
+    np.ndarray
+        Array of shape (L, A+1) with gap channel appended if needed.
+    """
+    if arr.ndim != 2:
+        raise ValueError("sequence array must be 2-D (L, A or L, A+1)")
+    L, C = arr.shape
+    if C >= 21:
+        return arr
+    aa_sum = arr.sum(axis=1, keepdims=True)
+    gap = np.clip(1.0 - aa_sum, 0.0, 1.0)
+    return np.concatenate([arr, gap], axis=1)
+
+def _expected_mutations_from_aligned(Au: np.ndarray,
+                                     Av: np.ndarray,
+                                     *,
+                                     gap_at: int = -1,
+                                     eps: float = 1e-12) -> Tuple[float, float, float]:
+    """
+    Helper function to compute the expected Hamming between two aligned
+    soft sequences.
+
+    Parameters
+    ----------
+    Au : np.ndarray
+        Aligned soft sequence for u, shape (L, A+1) where A is the number of amino acids (20 or 21 including gap).
+    
+    Av : np.ndarray
+        Aligned soft sequence for v, same shape as Au. shape must match Au.
+
+    gap_at : int, default=-1
+        Index of the gap channel in the last axis of Au/Av.
+        If negative, counts from the end (-1 = last channel). Default behaviour is compatible with PROT_20.
+
+    eps : float, default=1e-12
+        Small value to avoid division by zero in normalization.
+
+    Returns
+    -------
+    Tuple[float, float, float]
+        Expected mutation count, effective length, and normalized mismatch fraction.
+    """
+    Pu = _ensure_gapped_last(np.asarray(Au, float))
+    Pv = _ensure_gapped_last(np.asarray(Av, float))
+
+    if Pu.shape != Pv.shape:
+        raise ValueError("Aligned arrays for a pair must have the same shape")
+
+    L, C = Pu.shape
+    gap_idx = gap_at if gap_at >= 0 else (C + gap_at)
+    if not (0 <= gap_idx < C):
+        raise ValueError("gap_at out of range")
+
+    # split
+    pu_gap = Pu[:, gap_idx] # (L,)
+    pv_gap = Pv[:, gap_idx]
+    pu_aa  = np.delete(Pu, gap_idx, axis=1) # (L, A)
+    pv_aa  = np.delete(Pv, gap_idx, axis=1)
+
+    w = (1. - pu_gap) * (1. - pv_gap) # (L,) joint non-gap weight
+    ident = np.sum(pu_aa * pv_aa, axis=1) # (L,) identity per col
+    mut = np.sum(w * (1. - ident))
+    eff = np.sum(w)
+    dist = float(mut / max(eff, eps))
+    return float(mut), float(eff), dist
+
+def compute_edge_mutations_star(G: nx.Graph | nx.DiGraph,
+                                *,
+                                alphabet: List = PROT_20,
+                                center_key: str = "ungapped_arr", # expects (L, A) unaligned sequences.
+                                chunk_size: Optional[int] = None,
+                                eps: float = 1e-12) -> None:
+    """
+    Function to compute the expected Hamming distance for each edge
+    in a graph via star subgraph computation. Sets edge attributes in place. 
+    The complexity is approximately sum_u cost(align([u] + N_u_chunk)).
+
+    Parameters
+    ----------
+    G : nx.Graph or nx.DiGraph
+        The graph to compute expected Hamming distances for.
+    
+    alphabet : List, default=PROT_20
+        The alphabet used for alignment. Should be PROT_20 or a PAML alphabet.
+    
+    center_key : str, default="ungapped_arr"
+        The key in G.nodes that contains the unaligned sequence array for each node.
+        This should be a soft sequence array of shape (L, A) where A is the number of amino acids.
+
+    chunk_size : Optional[int], default=None
+        If set, process neighbors in chunks of this size to save memory.
+        If None, process all neighbors at once.
+    
+    eps : float, default=1e-12
+        Small value to avoid division by zero in normalization.
+    """
+    # record which undirected edges have been computed.
+    done = set()
+
+    set_w = {}
+    set_d = {}
+    set_s = {}
+
+    nodes = list(G.nodes())
+    for u in nodes:
+        # Gather neighbors needing (u,v)
+        pending_vs = []
+        for v in G.neighbors(u):
+            e = (u, v) if G.is_directed() else tuple(sorted((u, v)))
+            if e in done:
+                continue
+            if center_key not in G.nodes[u] or center_key not in G.nodes[v]:
+                continue
+            pending_vs.append(v)
+
+        if not pending_vs:
+            continue
+
+        # chunk helper
+        def _chunks(lst, k):
+            if k is None or k <= 0:
+                yield lst
+            else:
+                for i in range(0, len(lst), k):
+                    yield lst[i:i+k]
+
+        Pu = G.nodes[u][center_key]
+        for chunk in _chunks(pending_vs, chunk_size):
+            seqs = [Pu] + [G.nodes[v][center_key] for v in chunk]
+
+            # Do one MSA for u and its neighbors.
+            # NOTE: Should always be PROT_20 (or a PAML alphabet).
+            aligned, _ = align_soft_sequences(sequences=seqs, alphabet=alphabet)
+
+            Au = np.asarray(aligned[0])
+            for i, v in enumerate(chunk, start=1):
+                Av = np.asarray(aligned[i])
+                mut, eff, dist = _expected_mutations_from_aligned(Au, Av)
+                e_u_v = (u, v) if G.is_directed() else tuple(sorted((u, v)))
+                done.add(e_u_v)
+                set_w[(u, v)] = float(mut)
+                set_d[(u, v)] = float(dist)
+                set_s[(u, v)] = float(-np.log(max(dist, eps)))
+
+    if set_w:
+        nx.set_edge_attributes(G, set_w, "weight")
+    if set_d:
+        nx.set_edge_attributes(G, set_d, "dist")
+    if set_s:
+        nx.set_edge_attributes(G, set_s, "sim")
+
+def attach_expected_hamming_to_edges(G: nx.Graph | nx.DiGraph,
+                                     aligned: Sequence[np.ndarray],
+                                     node_order: Optional[Sequence] = None,
+                                     *,
+                                     gap_at: int = -1,
+                                     eps: float = 1e-12) -> None:
+    """
+    Function to attach expected Hamming edge attributes to a graph from a 
+    precomputed alignment of soft sequences. The expected Hamming distance
+    is computed for each edge based on the aligned sequences.
+
+    Parameters
+    ----------
+    G : nx.Graph or nx.DiGraph
+        The graph to attach expected Hamming distances to.
+    
+    aligned : Sequence[np.ndarray]
+        List of aligned soft sequences, each of shape (L_aln, A+1)
+        where last axis is A amino acids + gap. Indices must match the node indices in G or the
+        indices in `node_order`.
+    
+    node_order : Optional[Sequence], default=None
+        If provided, specifies the order of nodes in G to match the aligned sequences.
+    
+    gap_at : int, default=-1
+        Index of the gap channel in the last axis of aligned[i].
+        If negative, counts from the end (-1 = last channel).
+    
+    eps : float, default=1e-12
+        Small value to avoid division by zero in normalization.
+    """
+    if node_order is None:
+        node_order = list(G.nodes())
+    if len(node_order) != len(aligned):
+        raise ValueError("node_order length must match number of aligned arrays")
+
+    # compute global pairwise once
+    exp_mut, eff_len, dist = pairwise_expected_hamming_from_aligned(
+        aligned, gap_at=gap_at, return_norm=True
+    )
+    idx = {n: i for i, n in enumerate(node_order)}
+
+    set_w = {}
+    set_d = {}
+    set_s = {}
+    for u, v in G.edges():
+        i, j = idx[u], idx[v]
+        w = float(exp_mut[i, j])
+        d = float(dist[i, j])
+        set_w[(u, v)] = w
+        set_d[(u, v)] = d
+        set_s[(u, v)] = float(-np.log(max(d, eps)))
+
+    if set_w:
+        nx.set_edge_attributes(G, set_w, "weight")
+    if set_d:
+        nx.set_edge_attributes(G, set_d, "dist")
+    if set_s:
+        nx.set_edge_attributes(G, set_s, "sim")

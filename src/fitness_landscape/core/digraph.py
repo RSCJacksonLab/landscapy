@@ -14,7 +14,7 @@ from ..phylo._sub_matrices import nq_pfam
 from sklearn.neighbors import NearestNeighbors
 from ..phylo.phylogenetic_asr import ASRConstructor
 from ..utils import calculate_gapped_soft_score
-from .graph import _find_knn_balltree, _find_knn_faiss, _encode_multiallele
+from .graph import _find_knn_balltree, _find_knn_faiss, _encode_multiallele, attach_expected_hamming_to_edges
 from ..embedding.particle_sampler import (
     EvolutionParticleSampler,
     SequenceGenerator,

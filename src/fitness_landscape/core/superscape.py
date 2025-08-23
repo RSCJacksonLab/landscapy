@@ -11,7 +11,7 @@ from softalign.soft_alignment import align_soft_sequences
 import ray
 from pathlib import Path
 from cogent3 import ArrayAlignment
-from ..utils import alignment_to_base_numpy_sequences
+from ..utils import PROT_20, alignment_to_base_numpy_sequences
 import torch
 
 
