@@ -1619,9 +1619,12 @@ def attach_expected_hamming_to_edges(G: nx.Graph | nx.DiGraph,
     for u, v in G.edges():
         i, j = idx[u], idx[v]
         w_count  = float(exp_mut[i, j]) # absolute expected mutations (Hamming count)
-        # Store counts as distance (tests expect Hamming *counts* in `distance`)
+
+        # Normalised distance.
+        w_dist = float(dist[i, j])
+
         set_weight[(u, v)] = w_count
-        set_distance[(u, v)] = w_count
+        set_distance[(u, v)] = w_dist
         set_sim[(u, v)] = float(1.0 / (w_count + eps))
 
     if set_weight:

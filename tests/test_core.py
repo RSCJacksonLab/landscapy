@@ -773,7 +773,7 @@ def test_hamming_graph_binary_hypercube_degree_and_edges():
     # default edge attributes present
     for u, v, d in G.edges(data=True):
         assert d.get('weight') == 1.0
-        assert d.get('distance') == 1
+        assert d.get('distance') == 0.25
 
 
 def test_hamming_graph_binary_dispatch_auto_backend():
@@ -871,7 +871,7 @@ def test_hamming_graph_multiallele_attributes_alignment():
         assert np.array_equal(G.nodes[i]['sequence'].to_array(), s.to_array())
     for u, v, d in G.edges(data=True):
         assert d.get('weight') == 1.0
-        assert d.get('distance') == 1
+        assert d.get('distance') == 0.5
 
 def _toy_binary_seqs_L4():
     # 16 nodes = all 4-bit strings
