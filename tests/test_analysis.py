@@ -44,6 +44,40 @@ from fitness_landscape._const import PROT_20
 
 
 @pytest.fixture
+def mock_superscape_for_posterior_analysis(mocker):
+    """
+    Provides a FitnessSuperscape instance where sample_latent_landscapes
+    is mocked to return a predictable ensemble of simple landscapes.
+    """
+    # 1. Create a dummy superscape object. Its contents don't matter
+    #    as we will mock the sampling method.
+    superscape = MagicMock(spec=FitnessSuperscape)
+    superscape.latent_landscape = True # To pass the initial check
+
+    # 2. Create the predictable ensemble of landscapes to be "returned" by the mock
+    ensemble = []
+    # Sample 1: A 4-node path graph
+    g1 = nx.path_graph(4)
+    s1 = generate_sequences(length=2, alphabet=[0,1])
+    for i, seq in enumerate(s1): g1.nodes[i]['sequence'] = seq
+    ensemble.append(FitnessLandscape(sequences=s1, graph=g1))
+
+    # Sample 2: A 5-node complete graph
+    g2 = nx.complete_graph(5)
+    s2 = generate_sequences(length=3, alphabet=[0,1])[:5] # just need 5
+    for i, seq in enumerate(s2): g2.nodes[i]['sequence'] = seq
+    ensemble.append(FitnessLandscape(sequences=s2, graph=g2))
+
+    # 3. Mock the sample_latent_landscapes method
+    mocker.patch.object(
+        superscape,
+        'sample_latent_landscapes',
+        return_value=ensemble
+    )
+    
+    return superscape
+
+@pytest.fixture
 def mock_superscape_with_posterior(mocker):
     """
     """
@@ -1495,3 +1529,51 @@ def test_sample_latent_landscapes(mock_superscape_with_posterior):
     if n_samples > 5:
         assert num_path_graphs > 0
         assert num_complete_graphs > 0
+
+def test_sample_posterior_analysis_scalar_output(mock_superscape_for_posterior_analysis):
+    """
+    """
+    superscape = mock_superscape_for_posterior_analysis
+    analysis_fn = lambda L: L.graph.number_of_nodes()
+    results = sample_posterior_graph_analysis(
+        superscape,
+        analysis_fn=analysis_fn,
+        n_samples=2 
+    )
+
+    assert "results" in results
+    assert "summary" in results
+    assert results["results"] == [4, 5]
+
+    summary = results["summary"]
+    assert summary["mean"] == pytest.approx(4.5)
+    assert summary["std"] == pytest.approx(np.std([4, 5], ddof=1))
+
+def test_sample_posterior_analysis_dict_output(mock_superscape_for_posterior_analysis):
+    """
+    Tests that the analysis function correctly summarizes dictionary outputs.
+    """
+    superscape = mock_superscape_for_posterior_analysis
+
+    def graph_metrics(L):
+        return {
+            "node_count": L.graph.number_of_nodes(),
+            "edge_count": L.graph.number_of_edges(),
+        }
+
+    results = sample_posterior_graph_analysis(
+        superscape,
+        analysis_fn=graph_metrics,
+        n_samples=2
+    )
+
+    assert "results" in results
+    assert "per_key" in results
+    
+    node_summary = results["per_key"]["node_count"]
+    assert node_summary["samples"] == [4, 5]
+    assert node_summary["mean"] == pytest.approx(4.5)
+
+    edge_summary = results["per_key"]["edge_count"]
+    assert edge_summary["samples"] == [3, 10]
+    assert edge_summary["mean"] == pytest.approx(6.5)

@@ -547,13 +547,11 @@ def sample_posterior_graph_analysis(landscape: FitnessSuperscape,
     landscape_samples = landscape.sample_latent_landscapes(n_samples=n_samples, seed=seed)
     for landscape in landscape_samples:
         if layer_name is not None:
-            # No-op if it's already active; raises if the name is invalid
+
             landscape.view(layer_name)
 
-        out = analysis_fn(subL)
+        out = analysis_fn(landscape)
         results.append(out)
-
-    # scalar outputs easiest, summarize directly
     if _is_scalar_list(results):
         arr = np.asarray(results, dtype=float)
         return {
@@ -561,14 +559,10 @@ def sample_posterior_graph_analysis(landscape: FitnessSuperscape,
         "summary": _summarize_arr(arr, alpha=0.05),
     }
 
-    # dict-of-numerics outputs with consistent keys, harder per-key summary
     if all(isinstance(r, dict) for r in results):
-
-        # find common keys across all dicts
         keys = set(results[0].keys())
         for r in results[1:]:
             keys &= set(r.keys())
-        # keep only numeric keys
         per_key_samples: Dict[str, list[float]] = {k: [] for k in keys}
         
         for r in results:
@@ -578,7 +572,6 @@ def sample_posterior_graph_analysis(landscape: FitnessSuperscape,
                 try:
                     per_key_samples[k].append(float(v))
                 except Exception:
-                    # Not numeric  drop this key from aggregation
                     per_key_samples.pop(k, None)
 
         per_key_summary: Dict[str, Dict[str, Any]] = {}
@@ -589,7 +582,6 @@ def sample_posterior_graph_analysis(landscape: FitnessSuperscape,
                 "samples": vals,
             }
 
-        # If nothing numeric return raw results.
         if not per_key_summary:
             return {"results": results}
 
