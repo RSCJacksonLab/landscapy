@@ -106,6 +106,17 @@ class BaseNumpySequence:
         return f"{self.__class__.__name__}({self._np.tolist()})"
 
     @property
+    def ungapped_arr(self) -> np.ndarray:
+        one_hot = np.asarray(self.to_one_hot(), dtype=np.float64)  # (L, |A|)
+
+        if "gap" in self.alphabet or "-" in self.alphabet:
+            gap_idx = self.alphabet.index("gap") if "gap" in self.alphabet else self.alphabet.index("-")
+            keep = [i for i in range(one_hot.shape[1]) if i != gap_idx]
+            one_hot = one_hot[:, keep]
+
+        return one_hot
+    
+    @property
     def sequence(self) -> np.ndarray:
         return self._np
 
