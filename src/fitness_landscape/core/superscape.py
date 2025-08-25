@@ -104,22 +104,22 @@ class FitnessSuperscape:
 
         # Run RJMCMC sampling using the hierachical aligner (scales in linear time).
         # and not the RJMCMC aligner (scales in O(N^2K^2) time).
-        hierarchical_aligner = HierarchicalRJMCMCAligner(
+        self._hierarchical_aligner = HierarchicalRJMCMCAligner(
             graphs=self._landscape_graphs,
             aligner_params=sampler_kwargs
         )
         # The results are now stored directly, not the aligner object
-        self.latent_graph, self._latent_mappings = hierarchical_aligner.run_alignment()
+        self.latent_graph, self._latent_mappings = self._hierarchical_aligner.run_alignment()
         
         # Collect local traces 
-        self.local_trace_E = hierarchical_aligner.local_energy_traces
-        self.local_trace_NL = hierarchical_aligner.local_nl_traces
-        self.local_trace_edges = hierarchical_aligner.local_edges_traces
+        self.local_trace_E = self._hierarchical_aligner.local_energy_traces
+        self.local_trace_NL = self._hierarchical_aligner.local_nl_traces
+        self.local_trace_edges = self._hierarchical_aligner.local_edges_traces
         
         # Collect meta traces 
-        self.meta_trace_E = hierarchical_aligner.meta_energy_trace
-        self.meta_trace_NL = hierarchical_aligner.meta_nl_trace
-        self.meta_trace_edges = hierarchical_aligner.meta_edges_trace
+        self.meta_trace_E = self._hierarchical_aligner.meta_energy_trace
+        self.meta_trace_NL = self._hierarchical_aligner.meta_nl_trace
+        self.meta_trace_edges = self._hierarchical_aligner.meta_edges_trace
         
         # Canonical node order.
         self._node_orders = [list(L.graph.nodes()) for L in self.landscapes]
@@ -294,6 +294,140 @@ class FitnessSuperscape:
         if all(isinstance(seq, SoftSequence) and hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for _, seq in self.latent_graph.nodes(data='sequence')):
             compute_edge_mutations_star(G=self.latent_landscape.graph)
 
+
+    def sample_latent_landscapes(self,
+                                    n_samples: int,
+                                    seed: int = None) -> List[FitnessLandscape]:
+            """
+            Samples from the posterior distribution of the latent landscape to create an
+            ensemble of plausible landscapes.
+
+            Parameters
+            ----------
+            n_samples : int
+                The number of latent landscapes to sample.
+
+            seed : int, optional
+                Random seed for reproducibility. If `None`, a random seed is used.
+
+            Returns
+            -------
+            List[FitnessLandscape]
+                A list of FitnessLandscape objects, each representing a sample from the posterior.
+            """
+            if not hasattr(self, '_hierarchical_aligner') or not self._hierarchical_aligner.full_posterior_L:
+                raise RuntimeError("The hierarchical alignment has not been run or did not store posterior samples. "
+                                "Run `run_alignment()` on the HierarchicalRJMCMCAligner first.")
+
+            posterior_L = self._hierarchical_aligner.full_posterior_L
+            posterior_mappings = self._hierarchical_aligner.full_posterior_mappings
+            num_available_samples = len(posterior_L)
+
+            sampled_landscapes = []
+            for _ in range(n_samples):
+
+                # Randomly select a pre-computed sample index
+                sample_idx = np.random.randint(num_available_samples)
+                
+                L_sample_matrix = posterior_L[sample_idx]
+                mappings_sample = posterior_mappings[sample_idx]
+
+                # Construct the graph for this sample
+                graph_sample = nx.from_numpy_array(
+                    L_sample_matrix,
+                    create_using=nx.DiGraph if self._hierarchical_aligner.directed else nx.Graph
+                )
+
+                # Construct a full FitnessLandscape object from this sample
+                landscape_sample = self._construct_landscape_from_sample(graph_sample, mappings_sample)
+                sampled_landscapes.append(landscape_sample)
+
+            return sampled_landscapes
+
+    def _construct_landscape_from_sample(self, 
+                                         graph_sample: Union[nx.Graph, nx.DiGraph], 
+                                         mappings_sample: Dict[int, np.ndarray]) -> FitnessLandscape:
+        """
+        Helper function to build a FitnessLandscape object from a single posterior sample.
+        This logic mirrors the `construct_latent_landscape` method but operates on a
+        single probabilistic mapping instead of the posterior mean.
+        """
+        num_latent_nodes = graph_sample.number_of_nodes()
+        all_prob_maps = mappings_sample        
+        
+        all_ungapped_arrs = []
+        for k, L in enumerate(self.landscapes):
+            order = self._node_orders[k]
+            for node_id in order:
+                data = L.graph.nodes[node_id]
+                all_ungapped_arrs.append(data['ungapped_arr'])
+
+        all_lengths = [len(seq) for landscape in self.landscapes for seq in landscape.sequences]
+        default_length = int(np.median(all_lengths)) if all_lengths else 1
+
+        latent_sequences = []
+        for latent_node_idx in range(num_latent_nodes):
+            prob_col = all_prob_maps[:, latent_node_idx]
+            contributor_indices = np.where(prob_col > 0)[0]
+            
+            if len(contributor_indices) == 0:
+
+                # Handle cases where a latent node has no contributors in a sample
+                uniform_probability = 1.0 / len(self.alphabet)
+                uniform_posterior = np.full((default_length, len(self.alphabet)), uniform_probability)
+                ambiguous_sequence = SoftSequence(uniform_posterior, self.alphabet)
+                latent_sequences.append(ambiguous_sequence)
+                continue
+
+            ungapped_arrs_to_align = [all_ungapped_arrs[i] for i in contributor_indices]
+            contributor_probs = prob_col[contributor_indices]
+
+            aligned_arrays, _ = align_soft_sequences(sequences=ungapped_arrs_to_align, alphabet=self.alphabet)
+            aligned_tensor = np.array(aligned_arrays)
+            
+            total_prob_for_node = np.sum(contributor_probs) + 1e-12
+            weighted_sum_posterior = np.einsum('i,ija->ja', contributor_probs, aligned_tensor)
+            final_posterior = weighted_sum_posterior / total_prob_for_node
+            
+            aa_posterior = final_posterior[:, :-1]
+            gap_posterior = final_posterior[:, -1:]
+
+            latent_sequences.append(
+                SoftSequence(
+                    aa_posterior=aa_posterior,
+                    alphabet=self.alphabet,
+                    gap_posterior=gap_posterior
+                )
+            )
+            
+        latent_fitness_layers = {}
+        all_layer_names = set(name for l in self.landscapes for name in l.fitness_layers)
+
+        for name in all_layer_names:
+            first_layer = next(l.fitness_layers[name] for l in self.landscapes if name in l.fitness_layers)
+            
+            if first_layer.dtype == 'numeric':
+
+                all_means = np.concatenate([l.view(name).to_scalar() for l in self.landscapes])
+                total_prob_per_latent = all_prob_maps.sum(axis=0) + 1e-12
+                weighted_sum = all_prob_maps.T @ all_means
+                latent_means = (weighted_sum / total_prob_per_latent).tolist()
+                latent_fitness_layers[name] = NumericFitness(name, [[m] for m in latent_means])
+            
+            elif first_layer.dtype == 'categorical':
+
+                categories = first_layer.categories
+                all_one_hot = np.concatenate([l.view(name).get_tensor().numpy() for l in self.landscapes])
+                total_prob_per_latent = all_prob_maps.sum(axis=0) + 1e-12
+                weighted_sum_of_one_hots = all_prob_maps.T @ all_one_hot
+                latent_probabilities = weighted_sum_of_one_hots / total_prob_per_latent[:, np.newaxis]
+                latent_fitness_layers[name] = ProbabilisticCategoricalFitness(name, latent_probabilities, categories)
+
+        LandscapeClass = DirectedFitnessLandscape if isinstance(graph_sample, nx.DiGraph) else FitnessLandscape
+        return LandscapeClass(
+            sequences=latent_sequences,
+            fitness_layers=latent_fitness_layers,
+            graph=graph_sample)
 
     @staticmethod
     def _validate_embeddings(graphs: list[Union[nx.Graph, nx.DiGraph]]) -> None:
