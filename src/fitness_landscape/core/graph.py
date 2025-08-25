@@ -1,6 +1,6 @@
 import numpy as np
 import networkx as nx
-from typing import List, Union, Literal, Tuple
+from typing import List, Union, Literal, Tuple, Optional, Sequence
 from .sequence import BaseNumpySequence, BinarySequence, sequence_distance, SoftSequence
 from ..phylo.phylogenetic_asr import ASRConstructor
 from ..phylo._sub_matrices import lg
@@ -16,9 +16,9 @@ from ..utils import calculate_gapped_soft_score
 from softalign.soft_alignment import align_soft_sequences
 from scipy.sparse import csr_matrix
 from scipy.sparse import coo_matrix
-
 import faiss
 
+_BaseSequence = [BaseNumpySequence, BinarySequence, SoftSequence]
 
 def _pack_binary(seqs: list[BaseNumpySequence]) -> np.ndarray:
     """
@@ -118,11 +118,14 @@ def create_hamming_graph_binary(sequences: list[BinarySequence]) -> nx.Graph:
     for i, seq in enumerate(sequences):
         G.nodes[i]['sequence'] = seq
         
-    for u, v in G.edges():
-        G[u][v]['weight'] = 1.0
-        G[u][v]['distance'] = 1
+    # Convert to non-matrix form and autodetect for Hamming diffs.
+    aligned_arr = [s.to_array() for s in sequences]
+
+    # Stamp standardised edge attributes to graph.
+    attach_expected_hamming_to_edges(G, aligned_arr)
     
     return G
+
 
 def _encode_multiallele(seqs: list[BaseNumpySequence]) -> tuple[np.ndarray, dict[str,int]]:
     """
@@ -255,12 +258,15 @@ def create_hamming_graph_multiallele(sequences: list[BaseNumpySequence]) -> nx.G
     G = nx.from_scipy_sparse_array(A)
     for i, seq in enumerate(sequences):
         G.nodes[i]['sequence'] = seq
-        
-    # TODO: Update `weight`, `distance`, `similarity` logic.
-    for u, v in G.edges():
-        G[u][v]['weight'] = 1.0
-        G[u][v]['distance'] = 1
 
+    if len(sequences) == 0 or G.number_of_nodes() == 0 or G.number_of_edges() == 0:
+        return G
+        
+    aligned_arr = [s.to_array() for s in sequences]
+    
+    # Stamp standardised edge attributes to graph.
+    attach_expected_hamming_to_edges(G, aligned_arr)
+    
     return G
 
 # Main public method
@@ -475,7 +481,8 @@ def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
                                k: int,
                                tie_policy: Literal['all', 'min_index', 'random'] = 'all',
                                tiebuffer: int = 128,
-                               seed: int = 42) -> nx.Graph:
+                               seed: int = 42,
+                               eps: float = 1e-12) -> nx.Graph:
     """
     Function to create an exact KNN using the scipy `BallTree`
     algorithm.
@@ -563,13 +570,25 @@ def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
     U = M.maximum(M.T)
 
     G = nx.from_scipy_sparse_array(U, edge_attribute='distance')
-    
     G.add_nodes_from(range(n))
     for i in range(n):
         G.nodes[i]['sequence'] = sequences[i]
-    
-    for u, v in G.edges():
-        G[u][v]['weight'] = G[u][v]['distance']
+
+    # Compute distances on the fly if not PROT_20.
+    if not all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for seq in sequences):
+        # Keep FAISS/BallTree distances as *Hamming counts* for tests
+        # Add weight and knn_weight as the same Hamming count
+        counts = { (u, v): float(d["distance"]) for u, v, d in G.edges(data=True) }
+        nx.set_edge_attributes(G, counts, "distance")
+        nx.set_edge_attributes(G, counts, "weight")
+        nx.set_edge_attributes(G, counts, "knn_weight")
+        # Similarity based on the per-site fraction; safe even if tests don't assert it
+        nx.set_edge_attributes(G, { (u, v): float(-np.log(max(d["distance"] / max(L, 1), eps)))
+                                    for u, v, d in G.edges(data=True) }, "sim")
+    # Attach edge attributes - ONLY if 20 amino acids.
+    else:
+        compute_edge_mutations_star(G=G)
+
     return G
 
 def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
@@ -582,7 +601,8 @@ def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
                             hnsw_M: int = 32,
                             tiebuffer : int = 128,
                             tie_policy: Literal['all', 'min_index', 'random'] = 'all',
-                            seed: int = 42) -> nx.Graph:
+                            seed: int = 42,
+                            eps: float = 1e-12) -> nx.Graph:
     """
     Function to create an approximate nearest neighbour graph using
     FAISS indexing for efficient neighbour searching. 
@@ -637,27 +657,33 @@ def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
         The constructed nearest neighbor graph. 
     """
     
-    X = _one_hot_matrix_amino(sequences) # (n, L*20) one-hot
+    X = _one_hot_matrix_amino(sequences)
     n, d = X.shape
     L = len(sequences[0])
 
-    D, I = _find_knn_faiss(X, k=k, index_type=index_type, metric=metric, use_gpu=use_gpu, hnsw_M=hnsw_M, tiebuffer=tiebuffer)
+    D, I = _find_knn_faiss(X, k=k, index_type=index_type, metric=metric,
+                           use_gpu=use_gpu, hnsw_M=hnsw_M, tiebuffer=tiebuffer)
 
-    # Convert metric distances to Hamming distances.
+    # Convert FAISS distances to Hamming counts.
+    # ip: D = inner product; matches = D; hamming = L - matches
     if metric == "ip":
-        dpos_all = (L - D).astype(np.float32)
-    else: 
-        dpos_all = (0.5 * D).astype(np.float32)
+        hamming_all = (L - D).astype(np.float32)
+    else:
+        hamming_all = (0.5 * D).astype(np.float32)
 
+    # Build graph and keep min hamming per edge.
     G = nx.Graph()
     for i, s in enumerate(sequences):
         G.add_node(i, sequence=s)
 
+    min_hamming = {}
+
+    rng = np.random.default_rng(seed)
     for i in range(n):
         ids = I[i]
-        ds  = dpos_all[i]
+        ds  = hamming_all[i]
 
-        # filter invalids / -1 and optionally self
+        # filter invalids (-1) and optionally self
         valid = ids >= 0
         if not include_self:
             valid &= (ids != i)
@@ -677,35 +703,49 @@ def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
         else:
             dk = ds[k-1]
             cand = np.nonzero(ds <= dk)[0]
-            if tie_policy in ("min_index"):
+            if tie_policy == "min_index":
                 take = cand[:k]
             elif tie_policy == "all":
                 take = cand
             elif tie_policy == "random":
-                if cand.size > k:
-                    rng = np.random.default_rng(seed)
-                    take = rng.choice(cand, size=k, replace=False)
-                else:
-                    take = cand
+                take = rng.choice(cand, size=min(k, cand.size), replace=False)
             else:
                 raise ValueError(f"Unknown tie_policy: {tie_policy}")
 
         sel_ids = ids[take].astype(int)
         sel_ds  = ds[take].astype(float)
 
-        # add edges; if an edge exists from the other direction, keep the min distance
         for j, dij in zip(sel_ids, sel_ds):
             if i == j:
                 continue
-            if G.has_edge(i, j):
-                # keep the tighter (min) distance
-                prev = G[i][j].get("distance", dij)
-                if dij < prev:
-                    G[i][j]["distance"] = dij
-                    G[i][j]["weight"]   = dij
-            else:
-                G.add_edge(i, j, distance=dij, weight=dij)
+            u, v = (i, j) if i < j else (j, i)
+            prev = min_hamming.get((u, v))
+            if prev is None or dij < prev:
+                min_hamming[(u, v)] = dij
+                G.add_edge(u, v)
 
+    # If all nodes carry amino soft arrays, compute expected Hamming via alignment.
+    # This will stamp: weight (expected mutation count), distance (normalized),
+    # sim (-log(distance)), etc., overriding any FAISS-derived placeholders below.
+    has_soft_20 = all(
+        hasattr(seq, "ungapped_arr") and getattr(seq, "ungapped_arr", None) is not None
+        and getattr(seq, "ungapped_arr").shape[1] == 20
+        for seq in sequences
+    )
+
+    if not all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for _, seq in G.nodes(data='sequence')):
+        # Stamp FAISS-derived attributes as *Hamming counts*
+        if min_hamming:
+            counts = { (u, v): float(h) for (u, v), h in min_hamming.items() }
+            nx.set_edge_attributes(G, counts, "distance")
+            nx.set_edge_attributes(G, counts, "weight")
+            nx.set_edge_attributes(G, counts, "knn_weight")
+            nx.set_edge_attributes(G, { (u, v): float(-np.log(max(h / max(L, 1), eps)))
+                                        for (u, v), h in min_hamming.items() }, "sim")
+
+    else:
+        # Compute exat Hamming distances.
+        compute_edge_mutations_star(G=G)
     return G
 
 def create_knn_graph(sequences: List[BaseNumpySequence],
@@ -873,12 +913,16 @@ def create_tda_graph(sequences: List[BaseNumpySequence],
         if len(simplex) == 2:
             node1, node2 = simplex[0], simplex[1]
             dist = np.linalg.norm(low_dim_data[node1] - low_dim_data[node2])
-            G.add_edge(node1, node2, weight=dist, distance=dist)
+            G.add_edge(node1, node2, weight=dist, tda_distance=dist)
             
     if reweight_simplex_edges:
         G = _reweight_graph_by_simplices(G=G,
                                          simplex_tree=simplex_tree)
 
+    
+    # Attach edge attributes.    
+    if all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for seq in sequences):
+        compute_edge_mutations_star(G=G)
     return G
 
 def _reweight_graph_by_simplices(G: nx.Graph,
@@ -1064,11 +1108,14 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
     rows, cols = np.where(np.triu(diffused_matrix > connectivity_threshold, k=1))
     
     for i, j in zip(rows, cols):
-        G.add_edge(i, j, weight=diffused_matrix[i, j])
+        G.add_edge(i, j, kernel_weight=diffused_matrix[i, j])
         
     for i, seq in enumerate(sequences):
         G.nodes[i]['sequence'] = seq
         
+    # Attach edge attributes.    
+    if all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for seq in sequences):
+        compute_edge_mutations_star(G=G)
     return G
 
 def create_phylo_graph(sequences: Union[Path, ArrayAlignment],
@@ -1101,7 +1148,11 @@ def create_phylo_graph(sequences: Union[Path, ArrayAlignment],
     constructor = ASRConstructor(sequences,
                                  replacement_matrix = replacement_matrix,
                                  model_fitting = model_fitting)
+    
     graph = constructor.construct_dag(graph_type='undirected')
+    
+    # Attach edge attributes.    
+    compute_edge_mutations_star(G=graph)
     return graph
 
 def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
@@ -1267,9 +1318,318 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     rows, cols = np.where(np.triu(symmetric_diffused_matrix > connectivity_threshold, k=1))
 
     for i, j in zip(rows, cols):
-        graph.add_edge(i, j, weight=symmetric_diffused_matrix[i, j])
+        graph.add_edge(i, j, kernel_weight=symmetric_diffused_matrix[i, j])
 
     for i, seq in enumerate(sequences):
         graph.nodes[i]['sequence'] = seq
 
+    # Attach edge attributes.    
+    if all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for seq in sequences):
+        compute_edge_mutations_star(G=graph)
     return graph
+    
+def expected_hamming_from_aligned(aligned_or_A: Sequence[np.ndarray] | np.ndarray,
+                                  B: Optional[np.ndarray] = None,
+                                  *,
+                                  gap_at: int = -1,
+                                  return_norm: bool = True,
+                                  block_cols: Optional[int] = None,
+                                  eps: float = 1e-12) -> Tuple:
+    """
+    Unified API to compute expected Hamming distances from aligned sequences.
+
+    Two usage modes:
+      1) Pairwise (two arrays):
+         (mut, eff, dist) = expected_hamming_from_aligned(A, B, ...)
+         where A and B are aligned soft arrays of shape (L, A) or (L, A+1) with gap channel optional.
+
+      2) Batch (list/array of N sequences):
+         (exp_mut, eff_len, dist) = expected_hamming_from_aligned([A1, A2, ..., AN], ...)
+         where each Ai is aligned; supports both soft (L, A or L, A+1) and hard (N,L) representations.
+
+    Parameters
+    ----------
+    aligned_or_A : Sequence[np.ndarray] | np.ndarray
+        Either a sequence of aligned arrays (batch mode) or the first aligned array for pair mode.
+
+    B : Optional[np.ndarray], default=None
+        The second aligned array for pair mode. If provided, pair mode is used.
+
+    gap_at : int, default=-1
+        Index of the gap channel in the last axis when gap is explicitly present.
+        If negative, counts from the end (-1 = last channel).
+
+    return_norm : bool, default=True
+        For batch mode, whether to return normalized mismatch fraction in [0,1].
+        (Ignored in pair mode; the function always returns (mut, eff, dist).)
+
+    block_cols : Optional[int], default=None
+        Batch mode only. If set, process columns in blocks of this size for memory efficiency.
+
+    eps : float, default=1e-12
+        Small value to avoid division by zero in normalization.
+
+    Returns
+    -------
+    Tuple
+        Pair mode: (mut: float, eff: float, dist: float)
+        Batch mode: (exp_mut: np.ndarray[N,N], eff_len: np.ndarray[N,N],
+                     dist: Optional[np.ndarray[N,N]] depending on return_norm)
+    """
+    # Pair mode.
+    if B is not None:
+        Pu = _ensure_gapped_last(np.asarray(aligned_or_A, float))
+        Pv = _ensure_gapped_last(np.asarray(B, float))
+
+        if Pu.shape != Pv.shape:
+            raise ValueError("Aligned arrays for a pair must have the same shape")
+
+        L, C = Pu.shape
+        gap_idx = gap_at if gap_at >= 0 else (C + gap_at)
+        if not (0 <= gap_idx < C):
+            raise ValueError("gap_at out of range")
+
+        # split into gap and amino channels
+        pu_gap = Pu[:, gap_idx]
+        pv_gap = Pv[:, gap_idx]
+        pu_aa  = np.delete(Pu, gap_idx, axis=1)
+        pv_aa  = np.delete(Pv, gap_idx, axis=1)
+
+        w = (1.0 - pu_gap) * (1.0 - pv_gap) # joint non-gap weight per column
+        ident = np.sum(pu_aa * pv_aa, axis=1) # expected identity per column
+        mut = float(np.sum(w * (1.0 - ident))) # expected mismatches
+        eff = float(np.sum(w)) # effective length (non-gap weight)
+        dist = float(mut / max(eff, eps))
+        return mut, eff, dist
+
+    # Batch mode
+    P = np.asarray(aligned_or_A, dtype=object)
+
+    # Soft aligned arrays with optional explicit gap channel: (N, L, C)
+    if P.ndim == 3:
+        P = np.asarray(aligned_or_A, dtype=np.float64)
+        N, L, C = P.shape
+        if C < 2:
+            raise ValueError("aligned soft arrays need at least 1 AA + 1 gap channel")
+
+        gap_idx = gap_at if gap_at >= 0 else (C + gap_at)
+        if not (0 <= gap_idx < C):
+            raise ValueError("gap_at out of range for last axis")
+
+        P_gap = P[..., gap_idx]    # (N, L)
+        P_aa  = np.delete(P, gap_idx, axis=2)  # (N, L, A)
+
+        Wcol  = (1.0 - P_gap)      # (N, L)
+
+        exp_mut = np.zeros((N, N), dtype=np.float64)
+        eff_len = np.zeros((N, N), dtype=np.float64)
+
+        Bsz = block_cols or L
+        for s in range(0, L, Bsz):
+            e  = min(s + Bsz, L)
+            Pa = P_aa[:, s:e, :]                  # (N, b, A)
+            W  = Wcol[:, s:e]                      # (N, b)
+
+            id_batch = np.einsum("nka,mka->nmk", Pa, Pa, optimize=True)  # (N,N,b)
+            w_batch  = np.einsum("nc,mc->nmc",  W,  W,  optimize=True)   # (N,N,b)
+
+            exp_mut += np.sum(w_batch * (1.0 - id_batch), axis=2)
+            eff_len += np.sum(w_batch, axis=2)
+
+        if return_norm:
+            dist = exp_mut / np.maximum(eff_len, eps)
+            np.clip(dist, 0.0, 1.0, out=dist)
+            return exp_mut, eff_len, dist
+        else:
+            return exp_mut, eff_len, None
+
+    # Hard (label) alignment path: P is (N, L)
+    elif P.ndim == 2:
+        N, L = P.shape
+        eq = (P[:, None, :] == P[None, :, :])
+        mism = (~eq)
+        exp_mut = mism.sum(axis=2).astype(np.float64)
+        eff_len = np.full((N, N), float(L), dtype=np.float64)
+        if return_norm:
+            dist = exp_mut / np.maximum(eff_len, eps)
+            return exp_mut, eff_len, dist
+        else:
+            return exp_mut, eff_len, None
+
+    else:
+        raise ValueError("aligned_or_A must stack to (N,L) or (N,L,C), or provide B for pair mode")
+
+def _ensure_gapped_last(arr: np.ndarray) -> np.ndarray:
+    """
+    Helper function to ensure array is (L, A+1) with a final gap channel.
+    If input is (L, A) (ungapped), append gap = 1 - sum(AA) (clipped).
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input array of shape (L, A) or (L, A+1) where
+        A is the number of amino acids (20 or 21 including gap).
+    
+    Returns
+    -------
+    np.ndarray
+        Array of shape (L, A+1) with gap channel appended if needed.
+    """
+    if arr.ndim != 2:
+        raise ValueError("sequence array must be 2-D (L, A or L, A+1)")
+    L, C = arr.shape
+    if C >= 21:
+        return arr
+    aa_sum = arr.sum(axis=1, keepdims=True)
+    gap = np.clip(1.0 - aa_sum, 0.0, 1.0)
+    return np.concatenate([arr, gap], axis=1)
+
+
+def compute_edge_mutations_star(G: nx.Graph | nx.DiGraph,
+                                *,
+                                alphabet: List = PROT_20,
+                                chunk_size: Optional[int] = None,
+                                eps: float = 1e-12) -> None:
+    """
+    Function to compute the expected Hamming distance for each edge
+    in a graph via star subgraph computation. Sets edge attributes in place. 
+    The complexity is approximately sum_u cost(align([u] + N_u_chunk)).
+
+    Parameters
+    ----------
+    G : nx.Graph or nx.DiGraph
+        The graph to compute expected Hamming distances for.
+    
+    alphabet : List, default=PROT_20
+        The alphabet used for alignment. Should be PROT_20 or a PAML alphabet.
+
+    chunk_size : Optional[int], default=None
+        If set, process neighbors in chunks of this size to save memory.
+        If None, process all neighbors at once.
+    
+    eps : float, default=1e-12
+        Small value to avoid division by zero in normalization.
+    """
+    
+    # Safety check.
+    if not all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for _, seq in G.nodes(data='sequence')):
+        raise ValueError("All nodes in G must have a `BaseNumpySequence` with `ungapped_arr` attribute and the PROT_20 alphabet.")
+    
+    # record which undirected edges have been computed.
+    done = set()
+
+    set_w = {}
+    set_d = {}
+    set_s = {}
+    
+    nodes = list(G.nodes())
+    for u in nodes:
+        # Gather neighbors needing (u,v)
+        pending_vs = []
+        for v in G.neighbors(u):
+            e = (u, v) if G.is_directed() else tuple(sorted((u, v)))
+            if e in done:
+                continue
+            pending_vs.append(v)
+
+        if not pending_vs:
+            continue
+
+        # chunk helper
+        def _chunks(lst, k):
+            if k is None or k <= 0:
+                yield lst
+            else:
+                for i in range(0, len(lst), k):
+                    yield lst[i:i+k]
+
+        Pu = G.nodes[u]['sequence'].ungapped_arr
+        for chunk in _chunks(pending_vs, chunk_size):
+            seqs = [Pu] + [G.nodes[v]['sequence'].ungapped_arr for v in chunk]
+
+            # Do one MSA for u and its neighbors.
+            # NOTE: Should always be PROT_20 (or a PAML alphabet).
+            aligned, _ = align_soft_sequences(sequences=seqs, alphabet=alphabet)
+
+            Au = np.asarray(aligned[0])
+            for i, v in enumerate(chunk, start=1):
+                Av = np.asarray(aligned[i])
+                mut, eff, dist = expected_hamming_from_aligned(Au, Av)
+                e_u_v = (u, v) if G.is_directed() else tuple(sorted((u, v)))
+                done.add(e_u_v)
+                set_w[(u, v)] = float(mut)
+                set_d[(u, v)] = float(dist)
+                set_s[(u, v)] = float(-np.log(max(dist, eps)))
+
+    if set_w:
+        nx.set_edge_attributes(G, set_w, "weight")
+    if set_d:
+        nx.set_edge_attributes(G, set_d, "distance")
+    if set_s:
+        nx.set_edge_attributes(G, set_s, "sim")
+
+def attach_expected_hamming_to_edges(G: nx.Graph | nx.DiGraph,
+                                     aligned: Sequence[np.ndarray],
+                                     node_order: Optional[Sequence] = None,
+                                     *,
+                                     gap_at: int = -1,
+                                     eps: float = 1e-12,
+                                     block_cols: Optional[int] = None) -> None:
+    """
+    Function to attach expected Hamming edge attributes to a graph from a 
+    precomputed alignment of soft sequences. The expected Hamming distance
+    is computed for each edge based on the aligned sequences.
+
+    Parameters
+    ----------
+    G : nx.Graph or nx.DiGraph
+        The graph to attach expected Hamming distances to.
+    
+    aligned : Sequence[np.ndarray]
+        List of aligned soft sequences, each of shape (L_aln, A+1)
+        where last axis is A amino acids + gap. Indices must match the node indices in G or the
+        indices in `node_order`.
+    
+    node_order : Optional[Sequence], default=None
+        If provided, specifies the order of nodes in G to match the aligned sequences.
+    
+    gap_at : int, default=-1
+        Index of the gap channel in the last axis of aligned[i].
+        If negative, counts from the end (-1 = last channel).
+    
+    eps : float, default=1e-12
+        Small value to avoid division by zero in normalization.
+    """
+    if node_order is None:
+        node_order = list(G.nodes())
+    if len(node_order) != len(aligned):
+        raise ValueError("node_order length must match len(aligned)")
+
+    # Compute pairwise matrices (soft or hard, auto-detected)
+    exp_mut, eff_len, dist = expected_hamming_from_aligned(
+        aligned, gap_at=gap_at, return_norm=True, block_cols=block_cols, eps=eps
+    )
+    idx = {n: i for i, n in enumerate(node_order)}
+
+    # Stamp onto existing edges
+    set_weight = {}
+    set_distance = {}
+    set_sim = {}
+
+    for u, v in G.edges():
+        i, j = idx[u], idx[v]
+        w_count  = float(exp_mut[i, j]) # absolute expected mutations (Hamming count)
+
+        # Normalised distance.
+        w_dist = float(dist[i, j])
+
+        set_weight[(u, v)] = w_count
+        set_distance[(u, v)] = w_dist
+        set_sim[(u, v)] = float(1.0 / (w_count + eps))
+
+    if set_weight:
+        nx.set_edge_attributes(G, set_weight, "weight")
+    if set_distance:
+        nx.set_edge_attributes(G, set_distance, "distance")
+    if set_sim:
+        nx.set_edge_attributes(G, set_sim, "sim")

@@ -7,7 +7,7 @@ from scipy.spatial import cKDTree, distance_matrix
 from scipy.sparse.csgraph import minimum_spanning_tree
 from .core.sequence import BaseNumpySequence, SoftSequence
 from dataclasses import dataclass
-
+from softalign.soft_alignment import align_soft_sequences
 from ._const import ALPHABET_21, PROT_20
 from cogent3 import ArrayAlignment, make_aligned_seqs, ArrayAlignment 
 
@@ -767,3 +767,4 @@ def check_full_hamming(landscape: 'FitnessLandscape',
         lex_perm=lex_perm,
         codes=codes
     )
+

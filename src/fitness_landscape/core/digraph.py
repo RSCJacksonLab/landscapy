@@ -14,7 +14,14 @@ from ..phylo._sub_matrices import nq_pfam
 from sklearn.neighbors import NearestNeighbors
 from ..phylo.phylogenetic_asr import ASRConstructor
 from ..utils import calculate_gapped_soft_score
-from .graph import _find_knn_balltree, _find_knn_faiss, _encode_multiallele
+from .graph import (
+    _find_knn_balltree,
+    _find_knn_faiss,
+    _encode_multiallele,
+    attach_expected_hamming_to_edges,
+    compute_edge_mutations_star
+)
+
 from ..embedding.particle_sampler import (
     EvolutionParticleSampler,
     SequenceGenerator,
@@ -59,6 +66,9 @@ def create_phylo_digraph(sequences: Union[Path, ArrayAlignment],
                                  model_fitting = model_fitting)
     # Construct digraph with `graph_type` flag.
     digraph = constructor.construct_dag(graph_type='directed')
+    
+    # Attach edge attributes.    
+    compute_edge_mutations_star(G=digraph)
     return digraph
 
 #TODO: Add emergence time masking.
@@ -234,13 +244,16 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
     
     for i, j in zip(rows, cols):
         if i != j:
-            digraph.add_edge(i, j, weight=diffused_matrix[i, j])
+            digraph.add_edge(i, j, kernel_weight=diffused_matrix[i, j])
         
     for i, seq in enumerate(sequences):
         digraph.nodes[i]['sequence'] = seq
-        
-    return digraph
 
+    # Attach edge attributes.    
+    if all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for seq in sequences):
+        compute_edge_mutations_star(G=digraph)
+    
+    return digraph
 
 def create_particle_filter_digraph(sequences: List[BaseNumpySequence],
                                    n_samples: int,
@@ -295,6 +308,10 @@ def create_particle_filter_digraph(sequences: List[BaseNumpySequence],
     evolution_exp.initialize(seed_sequences=[seq.to_str() for seq in sequences])
     evolution_exp.run()
     digraph = evolution_exp.G
+    
+    # Attach edge attributes. 
+    if all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for _, seq in digraph.nodes(data='sequence')):
+        compute_edge_mutations_star(G=digraph)
     
     return digraph
 
