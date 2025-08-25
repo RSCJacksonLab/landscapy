@@ -18,6 +18,7 @@ from scipy.sparse import csr_matrix
 from scipy.sparse import coo_matrix
 import faiss
 
+_BaseSequence = [BaseNumpySequence, BinarySequence, SoftSequence]
 
 def _pack_binary(seqs: list[BaseNumpySequence]) -> np.ndarray:
     """
@@ -733,7 +734,7 @@ def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
         for seq in sequences
     )
 
-    if not all(isinstance(seq, BaseNumpySequence) and hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for _, seq in G.nodes(data='sequence')):
+    if not all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for _, seq in G.nodes(data='sequence')):
         # Stamp FAISS-derived attributes.
         if min_hamming:
             set_distance = {}
@@ -1464,9 +1465,7 @@ def expected_hamming_from_aligned(aligned_or_A: Sequence[np.ndarray] | np.ndarra
     else:
         raise ValueError("aligned_or_A must stack to (N,L) or (N,L,C), or provide B for pair mode")
 
-def _ensure_gapped_last(arr: np.ndarray,
-                        *,
-                        eps: float = 1e-12) -> np.ndarray:
+def _ensure_gapped_last(arr: np.ndarray) -> np.ndarray:
     """
     Helper function to ensure array is (L, A+1) with a final gap channel.
     If input is (L, A) (ungapped), append gap = 1 - sum(AA) (clipped).
@@ -1476,9 +1475,6 @@ def _ensure_gapped_last(arr: np.ndarray,
     arr : np.ndarray
         Input array of shape (L, A) or (L, A+1) where
         A is the number of amino acids (20 or 21 including gap).
-    
-    eps : float, default=1e-12
-        Small value to avoid division by zero in normalization.
     
     Returns
     -------
@@ -1522,7 +1518,7 @@ def compute_edge_mutations_star(G: nx.Graph | nx.DiGraph,
     """
     
     # Safety check.
-    if not all(isinstance(seq, BaseNumpySequence) and hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for _, seq in G.nodes(data='sequence')):
+    if not all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for _, seq in G.nodes(data='sequence')):
         raise ValueError("All nodes in G must have a `BaseNumpySequence` with `ungapped_arr` attribute and the PROT_20 alphabet.")
     
     # record which undirected edges have been computed.

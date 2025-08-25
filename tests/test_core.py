@@ -960,11 +960,14 @@ def test_knn_faiss_hnsw_union_degree_and_attrs():
     # Use small set; approximate index should still be fine here
     seqs = _toy_binary_seqs_L4()
     k = 3
-    G = create_knn_graph(
-        sequences=seqs, k=k, backend="faiss",
-        index_type="hnsw", faiss_metric="ip",
-        hnsw_M=16, tiebuffer=16, include_self=False
-    )
+    G = create_knn_graph(sequences=seqs,
+                         k=k,
+                         backend="faiss",
+                         index_type="hnsw",
+                         faiss_metric="ip",
+                         hnsw_M=16,
+                         tiebuffer=16,
+                         include_self=False)
     assert isinstance(G, nx.Graph)
     assert G.number_of_nodes() == len(seqs)
     for v in G.nodes():

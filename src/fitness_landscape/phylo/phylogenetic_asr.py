@@ -332,11 +332,13 @@ class ASRConstructor:
             gapped_mat   = hard_seq.to_one_hot()            # (L, 21), 0/1
             ungapped_mat = hard_seq.remove_gap_arr()
 
+            # Collect ungapped sequence for base.
+            hard_seq = BaseNumpySequence(ungapped_mat,
+                                        alphabet=PROT_20)
+
             G.nodes[tip].update(
                 sequence=hard_seq,
-                fitness=np.nan,
                 gapped_arr=gapped_mat,
-                ungapped_arr=ungapped_mat,
             )
 
         for anc in set(G.nodes) - set(self.tip_names):
@@ -358,11 +360,15 @@ class ASRConstructor:
                 alphabet=ALPHABET_21,
                 hard_rule="argmax",
             )
-
+            
+            # (L,20)
+            # Remove gaps where posterior_probability is less than 0.5.
+            post = soft_seq.remove_gap_arr()
+            soft_seq = SoftSequence(post,
+                                    alphabet=PROT_20,
+                                    hard_rule="argmax")
+            
             G.nodes[anc].update(
                 sequence=soft_seq,
-                fitness=np.nan,
-                gapped_arr=gapped_post,
-                ungapped_arr=post,
-            )
+                gapped_arr=gapped_post,)
         return G

@@ -291,7 +291,8 @@ class FitnessSuperscape:
             raise ValueError(f"Expected latent graph to be nx.Graph or nx.DiGraph, found {type(self.latent_graph)}")
         
         # Attach Hamming edge attributes
-        compute_edge_mutations_star(G=self.latent_landscape.graph)
+        if all(isinstance(seq, SoftSequence) and hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for _, seq in self.latent_graph.nodes(data='sequence')):
+            compute_edge_mutations_star(G=self.latent_landscape.graph)
 
 
     @staticmethod
