@@ -505,11 +505,11 @@ def subsample_analysis(landscape: FitnessLandscape,
     # Fallback on heterogeneous or non-numeric outputs and return raw list.
     return {"results": results}
 
-def sample_latent_graph_analysis(landscape: FitnessSuperscape,
-                                 analysis_fn: Callable[[FitnessLandscape], Any],
-                                 n_samples: int = 100,
-                                 layer_name: Optional[str] = None,
-                                 seed: int = None) -> Dict:
+def sample_posterior_graph_analysis(landscape: FitnessSuperscape,
+                                    analysis_fn: Callable[[FitnessLandscape], Any],
+                                    n_samples: int = 100,
+                                    layer_name: Optional[str] = None,
+                                    seed: int = None) -> Dict:
     """
     Function to sample latent graphs from a superscape and compute
     an analysis function on each sampled graph.
