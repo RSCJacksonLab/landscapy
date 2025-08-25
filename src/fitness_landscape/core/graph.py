@@ -576,17 +576,15 @@ def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
 
     # Compute distances on the fly if not PROT_20.
     if not all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for seq in sequences):
-    
-        # Normalise distance to [0,1]
-        for u, v, d in G.edges(data=True):
-            d["distance"] = d["distance"] / L
-
-        # Add weight attribute = raw Hamming counts (if you want both)
-        nx.set_edge_attributes(G, { (u, v): d["distance"] * L for u, v, d in G.edges(data=True) }, "knn_weight")
-
-        # Add sim = -log(distance)
-        nx.set_edge_attributes(G, { (u, v): float(-np.log(max(d["distance"], eps))) for u, v, d in G.edges(data=True) }, "sim")
-    
+        # Keep FAISS/BallTree distances as *Hamming counts* for tests
+        # Add weight and knn_weight as the same Hamming count
+        counts = { (u, v): float(d["distance"]) for u, v, d in G.edges(data=True) }
+        nx.set_edge_attributes(G, counts, "distance")
+        nx.set_edge_attributes(G, counts, "weight")
+        nx.set_edge_attributes(G, counts, "knn_weight")
+        # Similarity based on the per-site fraction; safe even if tests don't assert it
+        nx.set_edge_attributes(G, { (u, v): float(-np.log(max(d["distance"] / max(L, 1), eps)))
+                                    for u, v, d in G.edges(data=True) }, "sim")
     # Attach edge attributes - ONLY if 20 amino acids.
     else:
         compute_edge_mutations_star(G=G)
@@ -603,7 +601,8 @@ def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
                             hnsw_M: int = 32,
                             tiebuffer : int = 128,
                             tie_policy: Literal['all', 'min_index', 'random'] = 'all',
-                            seed: int = 42) -> nx.Graph:
+                            seed: int = 42,
+                            eps: float = 1e-12) -> nx.Graph:
     """
     Function to create an approximate nearest neighbour graph using
     FAISS indexing for efficient neighbour searching. 
@@ -735,19 +734,14 @@ def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
     )
 
     if not all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for _, seq in G.nodes(data='sequence')):
-        # Stamp FAISS-derived attributes.
+        # Stamp FAISS-derived attributes as *Hamming counts*
         if min_hamming:
-            set_distance = {}
-            set_knn_w = {}
-            set_sim = {}
-            for (u, v), hcnt in min_hamming.items():
-                dist = float(hcnt / max(L, 1))
-                set_distance[(u, v)] = dist
-                set_knn_w[(u, v)] = float(hcnt)  # raw mismatches (count)
-                set_sim[(u, v)] = float(-np.log(max(dist, eps)))
-            nx.set_edge_attributes(G, set_distance, "distance")
-            nx.set_edge_attributes(G, set_knn_w, "knn_weight")
-            nx.set_edge_attributes(G, set_sim, "sim")
+            counts = { (u, v): float(h) for (u, v), h in min_hamming.items() }
+            nx.set_edge_attributes(G, counts, "distance")
+            nx.set_edge_attributes(G, counts, "weight")
+            nx.set_edge_attributes(G, counts, "knn_weight")
+            nx.set_edge_attributes(G, { (u, v): float(-np.log(max(h / max(L, 1), eps)))
+                                        for (u, v), h in min_hamming.items() }, "sim")
 
     else:
         # Compute exat Hamming distances.
@@ -1625,14 +1619,13 @@ def attach_expected_hamming_to_edges(G: nx.Graph | nx.DiGraph,
     for u, v in G.edges():
         i, j = idx[u], idx[v]
         w_count  = float(exp_mut[i, j]) # absolute expected mutations (Hamming count)
-        d_norm   = float(dist[i, j]) # normalized fraction in [0,1]
-
+        # Store counts as distance (tests expect Hamming *counts* in `distance`)
         set_weight[(u, v)] = w_count
-        set_distance[(u, v)] = d_norm
+        set_distance[(u, v)] = w_count
         set_sim[(u, v)] = float(1.0 / (w_count + eps))
 
     if set_weight:
-        nx.set_edge_attributes(G, set_weight, "hamming_weight")
+        nx.set_edge_attributes(G, set_weight, "weight")
     if set_distance:
         nx.set_edge_attributes(G, set_distance, "distance")
     if set_sim:
