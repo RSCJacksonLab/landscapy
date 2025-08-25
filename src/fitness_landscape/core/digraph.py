@@ -250,7 +250,9 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
         digraph.nodes[i]['sequence'] = seq
 
     # Attach edge attributes.    
-    compute_edge_mutations_star(G=digraph)
+    if all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for seq in sequences):
+        compute_edge_mutations_star(G=digraph)
+    
     return digraph
 
 def create_particle_filter_digraph(sequences: List[BaseNumpySequence],
@@ -307,8 +309,10 @@ def create_particle_filter_digraph(sequences: List[BaseNumpySequence],
     evolution_exp.run()
     digraph = evolution_exp.G
     
-    # Attach edge attributes.    
-    compute_edge_mutations_star(G=digraph)
+    # Attach edge attributes. 
+    if all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for _, seq in digraph.nodes(data='sequence')):
+        compute_edge_mutations_star(G=digraph)
+    
     return digraph
 
     # TODO: Evolutionary velocity connectivity
