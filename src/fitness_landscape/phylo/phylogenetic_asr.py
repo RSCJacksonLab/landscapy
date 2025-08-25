@@ -333,8 +333,8 @@ class ASRConstructor:
             ungapped_mat = hard_seq.remove_gap_arr()
 
             # Collect ungapped sequence for base.
-            hard_seq = BaseNumpySequence(ungapped_mat,
-                                        alphabet=PROT_20)
+            hard_seq = BaseNumpySequence.from_one_hot(ungapped_mat,
+                                                      alphabet=PROT_20)
 
             G.nodes[tip].update(
                 sequence=hard_seq,
