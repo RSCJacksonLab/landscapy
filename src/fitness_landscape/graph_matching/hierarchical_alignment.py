@@ -55,7 +55,7 @@ def run_local_alignment_task(cluster_subgraphs: List[Union[nx.Graph, nx.DiGraph]
     # Capture the order of nodes as the aligner sees them
     node_order = {i: list(g.nodes()) for i, g in enumerate(cluster_subgraphs)}
     
-    return blueprint, node_mapping, node_order, local_aligner.trace_E, local_aligner.trace_NL, local_aligner.trace_edges
+    return blueprint, node_mapping, node_order, local_aligner.trace_E, local_aligner.trace_NL, local_aligner.trace_edges, local_aligner._stored_L, local_aligner._stored_pi
 
 
 class HierarchicalRJMCMCAligner:
@@ -106,6 +106,15 @@ class HierarchicalRJMCMCAligner:
         self.local_nl_traces = {}
         self.local_edges_traces = {}
 
+        # Initialise storage of posterior samples.
+        self.local_posterior_L = []
+        self.local_posterior_pi = []
+        self.meta_posterior_L = []
+        self.meta_posterior_pi = []
+
+        self.full_posterior_L = []
+        self.full_posterior_mappings = []
+
         # Initialise meta trace storing
         self.meta_energy_trace = []
         self.meta_nl_trace = []
@@ -128,6 +137,9 @@ class HierarchicalRJMCMCAligner:
 
         # Global Meta-Alignment
         meta_blueprint, meta_mappings = self._run_global_meta_alignment(local_results, num_chains_per_task=num_chains_per_task)
+
+        # Collect full posterior samples.
+        self._reconstruct_and_store_full_posterior(local_results, meta_blueprint, meta_mappings)
 
         # Stitch results into the final format
         final_graph, final_mappings = self._stitch_results(local_results, meta_blueprint, meta_mappings)
@@ -242,10 +254,14 @@ class HierarchicalRJMCMCAligner:
         
         # Collect result
         ray_results = ray.get(futures)
-        for i, (blueprint, node_mapping, node_order, trace_E, trace_NL, trace_edges) in enumerate(ray_results):
+        for i, (blueprint, node_mapping, node_order, trace_E, trace_NL, trace_edges, stored_L, stored_pi) in enumerate(ray_results):
             clusters[i]['blueprint'] = blueprint
             clusters[i]['node_mapping'] = node_mapping
             clusters[i]['node_order'] = node_order
+
+            # Store posterior samples for local alignments
+            self.local_posterior_L.append(stored_L)
+            self.local_posterior_pi.append(stored_pi)
             
             # Store traces.
             self.local_energy_traces[i] = trace_E
@@ -319,6 +335,11 @@ class HierarchicalRJMCMCAligner:
         meta_aligner = RJMCMCAligner(graphs=meta_graphs, **self.aligner_params)
         meta_aligner.sample(num_chains=num_chains_per_task)
 
+        # Store posterior samples for the meta-alignment
+        self.meta_posterior_L = meta_aligner._stored_L
+        self.meta_posterior_pi = meta_aligner._stored_pi
+
+        # Collect traces.
         self.meta_energy_trace.extend(meta_aligner.trace_E)
         self.meta_nl_trace.extend(meta_aligner.trace_NL)
         self.meta_edges_trace.extend(meta_aligner.trace_edges)
@@ -328,10 +349,12 @@ class HierarchicalRJMCMCAligner:
     def _stitch_results(self,
                         local_results: List[Dict],
                         meta_blueprint: Union[nx.Graph, nx.DiGraph],
-                        meta_mappings: Dict[int, np.ndarray]) -> Tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray]]:
+                        meta_mappings: Dict[int, np.ndarray],
+                        sample_idx: Optional[int] = None) -> Tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray]]:
         """
         Method to stitch the local results and meta blueprint into a
-        final graph and mappings.
+        final graph and mappings. Can be used for both the posterior mean and for
+        individual posterior samples.
 
         Parameters
         ----------
@@ -343,6 +366,8 @@ class HierarchicalRJMCMCAligner:
         meta_mappings : Dict[int, np.ndarray]
             A mapping of original graph nodes to latent space nodes
             from the global alignment.
+        sample_idx : int, optional
+            The index of the posterior sample to use. If None, the posterior mean is used.
         
         Returns
         -------
@@ -351,24 +376,23 @@ class HierarchicalRJMCMCAligner:
             - The final aligned graph.
             - A mapping of original graph nodes to latent space nodes.
         """
-        # Handle directed and undirected cases.
         final_graph = nx.DiGraph() if self.directed else nx.Graph()
         local_to_global_nodemap = {}
 
         for i, result in enumerate(local_results):
-            local_bp = result['blueprint']
-            
-            # Create a mapping for this cluster's nodes to unique global names
+            # Use posterior sample if sample_idx is given, otherwise use posterior mean
+            if sample_idx is not None:
+                local_bp_matrix = self.local_posterior_L[i][sample_idx]
+                local_bp = nx.from_numpy_array(local_bp_matrix, create_using=nx.DiGraph if self.directed else nx.Graph)
+            else:
+                local_bp = result['blueprint']
+
             node_rename_mapping = {node: f"c{i}_n{node}" for node in local_bp.nodes()}
             
-            # Store this mapping for later use when adding bridge edges
             for local_node, global_name in node_rename_mapping.items():
                 local_to_global_nodemap[(i, local_node)] = global_name
                 
-            # Create a new graph with the relabeled nodes
             relabeled_bp = nx.relabel_nodes(local_bp, node_rename_mapping, copy=True)
-            
-            # Compose the uniquely-named blueprint into the final graph
             final_graph = nx.compose(final_graph, relabeled_bp)
 
         for i, j in meta_blueprint.edges():
@@ -380,20 +404,24 @@ class HierarchicalRJMCMCAligner:
             sim_matrix = cosine_similarity_matrix(embs_i, embs_j)
             i_idx, j_idx = np.unravel_index(np.argmax(sim_matrix), sim_matrix.shape)
             
-            # Find which local latent nodes these bridge nodes map to
-            # This requires the node order from the local alignment
             original_node_i_id = nodes_i[i_idx][1]
             original_node_j_id = nodes_j[j_idx][1]
             
             graph_idx_i = nodes_i[i_idx][0]
             graph_idx_j = nodes_j[j_idx][0]
             
-            # Find the local index for the original node ID
             local_node_idx_i = local_results[i]['node_order'][graph_idx_i].index(original_node_i_id)
             local_node_idx_j = local_results[j]['node_order'][graph_idx_j].index(original_node_j_id)
             
-            local_latent_i = np.argmax(local_results[i]['node_mapping'][graph_idx_i][local_node_idx_i, :])
-            local_latent_j = np.argmax(local_results[j]['node_mapping'][graph_idx_j][local_node_idx_j, :])
+            # Use posterior sample if sample_idx is given
+            if sample_idx is not None:
+                local_pi_i = self.local_posterior_pi[i][graph_idx_i][sample_idx]
+                local_pi_j = self.local_posterior_pi[j][graph_idx_j][sample_idx]
+                local_latent_i = local_pi_i[local_node_idx_i]
+                local_latent_j = local_pi_j[local_node_idx_j]
+            else:
+                local_latent_i = np.argmax(local_results[i]['node_mapping'][graph_idx_i][local_node_idx_i, :])
+                local_latent_j = np.argmax(local_results[j]['node_mapping'][graph_idx_j][local_node_idx_j, :])
 
             global_node_i = local_to_global_nodemap.get((i, local_latent_i))
             global_node_j = local_to_global_nodemap.get((j, local_latent_j))
@@ -418,8 +446,19 @@ class HierarchicalRJMCMCAligner:
                 global_name = local_to_global_nodemap.get((cluster_idx, local_latent_idx))
                 if global_name:
                     local_latent_to_master_col[local_latent_idx] = global_name_to_final_idx[global_name]
-            for graph_idx, prob_matrix in result['node_mapping'].items():
-                if prob_matrix.size == 0:
+            
+            for graph_idx in range(len(self.original_graphs)):
+                if sample_idx is not None:
+                    # For sampling, create a probabilistic mapping from the single permutation sample
+                    prob_matrix = np.zeros((len(result['node_order'][graph_idx]), num_local_latent))
+                    local_pi = self.local_posterior_pi[cluster_idx][graph_idx][sample_idx]
+                    for node_idx_local, latent_node in enumerate(local_pi):
+                        if latent_node != -1:
+                            prob_matrix[node_idx_local, latent_node] = 1.0
+                else:
+                    prob_matrix = result['node_mapping'].get(graph_idx)
+
+                if prob_matrix is None or prob_matrix.size == 0:
                     continue
 
                 local_to_master_row = np.array([
@@ -440,4 +479,37 @@ class HierarchicalRJMCMCAligner:
                 final_mappings[graph_idx][master_rows[valid_mask], master_cols[valid_mask]] = probs[valid_mask]
                 
         final_graph = nx.relabel_nodes(final_graph, global_name_to_final_idx, copy=True)
+
         return final_graph, final_mappings
+    
+    def _reconstruct_and_store_full_posterior(self,
+                                              local_results,
+                                              meta_blueprint,
+                                              meta_mappings):
+            """
+            Helper method to reconstruct and store the full posterior samples
+            of the final aligned graph and mappings by combining local and meta
+            posterior samples.
+            """
+            num_samples = len(self.meta_posterior_L)
+            if num_samples == 0:
+                return # No samples to process
+
+            for s_idx in range(num_samples):
+                # Get the meta-graph for this specific sample
+                meta_L_sample_matrix = self.meta_posterior_L[s_idx]
+                meta_blueprint_sample = nx.from_numpy_array(
+                    meta_L_sample_matrix, 
+                    create_using=nx.DiGraph if self.directed else nx.Graph
+                )
+
+                # Use the stitching logic on this specific sample
+                graph_sample, mappings_sample = self._stitch_results(
+                    local_results,
+                    meta_blueprint_sample,
+                    # Pass the mean meta-mappings, _stitch_results will use sampled local pi
+                    meta_mappings, 
+                    sample_idx=s_idx)
+                
+                self.full_posterior_L.append(nx.to_numpy_array(graph_sample))
+                self.full_posterior_mappings.append(mappings_sample)

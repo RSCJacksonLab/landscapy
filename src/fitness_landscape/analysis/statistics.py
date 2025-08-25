@@ -3,6 +3,7 @@ import numpy as np
 import scipy.stats as stats
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Mapping, Sequence
 from ..core.landscape import FitnessLandscape
+from ..core.superscape import FitnessSuperscape
 from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.metrics import mean_squared_error, r2_score
@@ -387,6 +388,25 @@ def permutation_test(*,
 
     return results
 
+ # Aggregation helpers
+def _is_scalar_list(xs: Sequence[Any]) -> bool:
+    try:
+        arr = np.asarray(xs, dtype=float)
+        return arr.ndim == 1 and arr.size == len(xs)
+    except Exception:
+        return False
+
+def _summarize_arr(arr: np.ndarray, alpha: float = 0.05) -> Dict[str, float]:
+    lo = 100.0 * (alpha / 2.0)
+    hi = 100.0 * (1.0 - alpha / 2.0)
+    return {
+        "mean": float(np.mean(arr)),
+        "std": float(np.std(arr, ddof=1)) if arr.size > 1 else 0.0,
+        "ci_low": float(np.percentile(arr, lo)),
+        "ci_high": float(np.percentile(arr, hi)),
+        "alpha": alpha,
+    }
+
 def subsample_analysis(landscape: FitnessLandscape,
                        analysis_fn: Callable[FitnessLandscape, Any],
                        n_samples: int = 100,
@@ -439,32 +459,13 @@ def subsample_analysis(landscape: FitnessLandscape,
         out = analysis_fn(subL)
         results.append(out)
 
-    # Aggregation helpers
-    def _is_scalar_list(xs: Sequence[Any]) -> bool:
-        try:
-            arr = np.asarray(xs, dtype=float)
-            return arr.ndim == 1 and arr.size == len(xs)
-        except Exception:
-            return False
-
-    def _summarize_arr(arr: np.ndarray, alpha: float = 0.05) -> Dict[str, float]:
-        lo = 100.0 * (alpha / 2.0)
-        hi = 100.0 * (1.0 - alpha / 2.0)
-        return {
-            "mean": float(np.mean(arr)),
-            "std": float(np.std(arr, ddof=1)) if arr.size > 1 else 0.0,
-            "ci_low": float(np.percentile(arr, lo)),
-            "ci_high": float(np.percentile(arr, hi)),
-            "alpha": alpha,
-        }
-
     # scalar outputs easiest, summarize directly
     if _is_scalar_list(results):
         arr = np.asarray(results, dtype=float)
         return {
-            "results": results,
-            "summary": _summarize_arr(arr, alpha=0.05),
-        }
+        "results": results,
+        "summary": _summarize_arr(arr, alpha=0.05),
+    }
 
     # dict-of-numerics outputs with consistent keys, harder per-key summary
     if all(isinstance(r, dict) for r in results):
@@ -483,6 +484,7 @@ def subsample_analysis(landscape: FitnessLandscape,
                     # Not numeric → drop this key from aggregation
                     per_key_samples.pop(k, None)
 
+        
         per_key_summary: Dict[str, Dict[str, Any]] = {}
         for k, vals in per_key_samples.items():
             arr = np.asarray(vals, dtype=float)
@@ -502,3 +504,88 @@ def subsample_analysis(landscape: FitnessLandscape,
 
     # Fallback on heterogeneous or non-numeric outputs and return raw list.
     return {"results": results}
+
+def sample_posterior_graph_analysis(landscape: FitnessSuperscape,
+                                    analysis_fn: Callable[[FitnessLandscape], Any],
+                                    n_samples: int = 100,
+                                    layer_name: Optional[str] = None,
+                                    seed: int = None) -> Dict:
+    """
+    Function to sample latent graphs from a superscape and compute
+    an analysis function on each sampled graph.
+
+    Parameters
+    ----------
+    landscape : FitnessSuperscape
+        The superscape to analyze.
+    
+    analysis_fn : Callable
+        The analysis function to call on the sampled fitness
+        landscape graphs. Should be a `lambda L: ...` function that
+        takes a single FitnessLandscape object and returns a scalar or
+        dictionary of numeric values.
+
+    n_samples : int, default=100
+        The number of latent graphs to sample and analyze.
+
+    subsample_edge_prop: float, default=0.9
+        The proportion of edges in `landscape` that are subsampled in
+        each induced subgraph. 
+
+    Returns
+    ------- 
+    """
+    if not isinstance(landscape, FitnessSuperscape):
+        raise ValueError("landscape must be a FitnessSuperscape.")
+
+    if not hasattr(landscape, 'latent_landscape'):
+        raise RuntimeError("The latent landscape has not been constructed yet. "
+                            "Run `construct_latent_landscape()` first.")
+
+    results: list[Any] = []
+
+    landscape_samples = landscape.sample_latent_landscapes(n_samples=n_samples, seed=seed)
+    for landscape in landscape_samples:
+        if layer_name is not None:
+
+            landscape.view(layer_name)
+
+        out = analysis_fn(landscape)
+        results.append(out)
+    if _is_scalar_list(results):
+        arr = np.asarray(results, dtype=float)
+        return {
+        "results": results,
+        "summary": _summarize_arr(arr, alpha=0.05),
+    }
+
+    if all(isinstance(r, dict) for r in results):
+        keys = set(results[0].keys())
+        for r in results[1:]:
+            keys &= set(r.keys())
+        per_key_samples: Dict[str, list[float]] = {k: [] for k in keys}
+        
+        for r in results:
+
+            for k in list(per_key_samples.keys()):
+                v = r.get(k, None)
+                try:
+                    per_key_samples[k].append(float(v))
+                except Exception:
+                    per_key_samples.pop(k, None)
+
+        per_key_summary: Dict[str, Dict[str, Any]] = {}
+        for k, vals in per_key_samples.items():
+            arr = np.asarray(vals, dtype=float)
+            per_key_summary[k] = {
+                **_summarize_arr(arr, alpha=0.05),
+                "samples": vals,
+            }
+
+        if not per_key_summary:
+            return {"results": results}
+
+        return {
+            "results": results,
+            "per_key": per_key_summary,
+        }

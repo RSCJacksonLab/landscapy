@@ -24,6 +24,8 @@ from fitness_landscape.analysis.diffusion_scale import (
     compute_ruggedness_diffusion_scale,
     compute_ruggedness_variance_energy,
 )
+from fitness_landscape.core.superscape import FitnessSuperscape
+from unittest.mock import MagicMock
 from fitness_landscape.analysis.coupling import *
 from fitness_landscape.models.elementary_landscape import *
 from fitness_landscape.models.nk import *
@@ -38,8 +40,108 @@ from fitness_landscape.analysis.persistent_homology import (
 from fitness_landscape.core.fitness import NumericFitness
 from fitness_landscape.utils import make_latent_geometric_graph_connected, sample_observed_induced_connected
 from scipy.sparse import issparse
+from fitness_landscape._const import PROT_20
 
 
+@pytest.fixture
+def mock_superscape_for_posterior_analysis(mocker):
+    """
+    Provides a FitnessSuperscape instance where sample_latent_landscapes
+    is mocked to return a predictable ensemble of simple landscapes.
+    """
+    # 1. Create a dummy superscape object. Its contents don't matter
+    #    as we will mock the sampling method.
+    superscape = MagicMock(spec=FitnessSuperscape)
+    superscape.latent_landscape = True # To pass the initial check
+
+    # 2. Create the predictable ensemble of landscapes to be "returned" by the mock
+    ensemble = []
+    # Sample 1: A 4-node path graph
+    g1 = nx.path_graph(4)
+    s1 = generate_sequences(length=2, alphabet=[0,1])
+    for i, seq in enumerate(s1): g1.nodes[i]['sequence'] = seq
+    ensemble.append(FitnessLandscape(sequences=s1, graph=g1))
+
+    # Sample 2: A 5-node complete graph
+    g2 = nx.complete_graph(5)
+    s2 = generate_sequences(length=3, alphabet=[0,1])[:5] # just need 5
+    for i, seq in enumerate(s2): g2.nodes[i]['sequence'] = seq
+    ensemble.append(FitnessLandscape(sequences=s2, graph=g2))
+
+    # 3. Mock the sample_latent_landscapes method
+    mocker.patch.object(
+        superscape,
+        'sample_latent_landscapes',
+        return_value=ensemble
+    )
+    
+    return superscape
+
+@pytest.fixture
+def mock_superscape_with_posterior(mocker):
+    """
+    """
+    alphabet = PROT_20
+    sequences1 = generate_sequences(length=1, alphabet=alphabet)
+    num_seq = len(sequences1)
+    fitness1 = NumericFitness(name="default", values=[[v] for v in np.random.rand(num_seq)])
+    landscape1 = FitnessLandscape.from_sequences(sequences1, fitness_layers={"default": fitness1})
+    for i, node in enumerate(landscape1.graph.nodes()):
+        seq = landscape1.sequences[i]
+        landscape1.graph.nodes[node]['emb_arr'] = np.random.rand(5)
+        landscape1.graph.nodes[node]['ungapped_arr'] = seq.to_one_hot()
+
+
+    sequences2 = generate_sequences(length=1, alphabet=alphabet)
+    fitness2 = NumericFitness(name="default", values=[[v] for v in np.random.rand(num_seq)])
+    landscape2 = FitnessLandscape.from_sequences(sequences2, fitness_layers={"default": fitness2})
+    for i, node in enumerate(landscape2.graph.nodes()):
+        seq = landscape2.sequences[i]
+        landscape2.graph.nodes[node]['emb_arr'] = np.random.rand(5)
+        landscape2.graph.nodes[node]['ungapped_arr'] = seq.to_one_hot()
+
+    mock_aligner = MagicMock()
+    
+    L_sample1 = np.array([[0, 1, 0], [1, 0, 1], [0, 1, 0]])
+    L_sample2 = np.array([[0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    mock_aligner.full_posterior_L = [L_sample1, L_sample2]
+
+    num_latent_nodes = 3
+    mapping1 = np.random.rand(num_seq, num_latent_nodes)
+    mapping1 /= mapping1.sum(axis=1, keepdims=True)
+    mapping2 = np.random.rand(num_seq, num_latent_nodes)
+    mapping2 /= mapping2.sum(axis=1, keepdims=True)
+
+    mock_aligner.full_posterior_mappings = [
+        {0: mapping1, 1: mapping2},
+        {0: mapping1, 1: mapping2}
+    ]
+    mock_aligner.directed = False
+
+    mean_graph = nx.complete_graph(num_latent_nodes)
+    mean_mappings = {0: mapping1, 1: mapping2}
+    mock_aligner.run_alignment.return_value = (mean_graph, mean_mappings)
+
+    mocker.patch(
+        'fitness_landscape.core.superscape.HierarchicalRJMCMCAligner',
+        return_value=mock_aligner
+    )
+
+    superscape = FitnessSuperscape([landscape1, landscape2], **{'burn_in': 1, 'samples': 1})
+    
+    graph = nx.complete_graph(num_latent_nodes)
+    sequences = [SoftSequence(np.random.rand(2, 20), alphabet=PROT_20) for _ in range(num_latent_nodes)]
+    for i, seq in enumerate(sequences):
+        graph.nodes[i]['sequence'] = seq
+
+    superscape.latent_graph = graph
+    superscape.latent_landscape = FitnessLandscape(
+        sequences=sequences,
+        graph=superscape.latent_graph,
+        fitness_layers={'default': NumericFitness('default', [[i] for i in range(num_latent_nodes)])}
+    )
+
+    return superscape
 
 def _make_landscape_from_values(values, name="default"):
     """
@@ -1383,3 +1485,95 @@ def test_subsample_local_dirichlet_mean(additive_landscape):
 
     assert "results" in out and len(out["results"]) == 20
     assert np.isfinite(out["summary"]["mean"])
+
+def test_get_expected_latent_landscape(mock_superscape_with_posterior):
+    """
+    Tests that the expected latent landscape has a weighted graph where edge
+    weights are the posterior probabilities of edge existence.
+    """
+    superscape = mock_superscape_with_posterior
+    expected_landscape = superscape.sample_latent_landscapes(n_samples=1)[0]
+
+    assert isinstance(expected_landscape, FitnessLandscape)
+    
+    graph = expected_landscape.graph
+    assert graph.number_of_nodes() == 3
+    assert graph[0][1]['weight'] == pytest.approx(1.0)
+
+def test_sample_latent_landscapes(mock_superscape_with_posterior):
+    """
+    Tests that sampling returns a list of FitnessLandscape objects with graph
+    structures consistent with the posterior samples.
+    """
+    superscape = mock_superscape_with_posterior
+    n_samples = 10
+    ensemble = superscape.sample_latent_landscapes(n_samples=n_samples)
+
+    assert isinstance(ensemble, list)
+    assert len(ensemble) == n_samples
+    assert all(isinstance(land, FitnessLandscape) for land in ensemble)
+
+    # Check that the graph structures in the ensemble match our two posterior samples
+    num_path_graphs = 0
+    num_complete_graphs = 0
+    for land in ensemble:
+        # A path graph on 3 nodes has 2 edges
+        if land.graph.number_of_edges() == 2:
+            num_path_graphs += 1
+        # A complete graph on 3 nodes has 3 edges
+        elif land.graph.number_of_edges() == 3:
+            num_complete_graphs += 1
+
+    assert num_path_graphs + num_complete_graphs == n_samples
+    # With enough samples, we should see both types of graphs
+    if n_samples > 5:
+        assert num_path_graphs > 0
+        assert num_complete_graphs > 0
+
+def test_sample_posterior_analysis_scalar_output(mock_superscape_for_posterior_analysis):
+    """
+    """
+    superscape = mock_superscape_for_posterior_analysis
+    analysis_fn = lambda L: L.graph.number_of_nodes()
+    results = sample_posterior_graph_analysis(
+        superscape,
+        analysis_fn=analysis_fn,
+        n_samples=2 
+    )
+
+    assert "results" in results
+    assert "summary" in results
+    assert results["results"] == [4, 5]
+
+    summary = results["summary"]
+    assert summary["mean"] == pytest.approx(4.5)
+    assert summary["std"] == pytest.approx(np.std([4, 5], ddof=1))
+
+def test_sample_posterior_analysis_dict_output(mock_superscape_for_posterior_analysis):
+    """
+    Tests that the analysis function correctly summarizes dictionary outputs.
+    """
+    superscape = mock_superscape_for_posterior_analysis
+
+    def graph_metrics(L):
+        return {
+            "node_count": L.graph.number_of_nodes(),
+            "edge_count": L.graph.number_of_edges(),
+        }
+
+    results = sample_posterior_graph_analysis(
+        superscape,
+        analysis_fn=graph_metrics,
+        n_samples=2
+    )
+
+    assert "results" in results
+    assert "per_key" in results
+    
+    node_summary = results["per_key"]["node_count"]
+    assert node_summary["samples"] == [4, 5]
+    assert node_summary["mean"] == pytest.approx(4.5)
+
+    edge_summary = results["per_key"]["edge_count"]
+    assert edge_summary["samples"] == [3, 10]
+    assert edge_summary["mean"] == pytest.approx(6.5)
