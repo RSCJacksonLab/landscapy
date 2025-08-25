@@ -353,7 +353,7 @@ class FitnessSuperscape:
         single probabilistic mapping instead of the posterior mean.
         """
         num_latent_nodes = graph_sample.number_of_nodes()
-        all_prob_maps = mappings_sample        
+        all_prob_maps = np.vstack([mappings_sample[k] for k in sorted(mappings_sample.keys())])      
         
         all_ungapped_arrs = []
         for k, L in enumerate(self.landscapes):
@@ -422,6 +422,10 @@ class FitnessSuperscape:
                 weighted_sum_of_one_hots = all_prob_maps.T @ all_one_hot
                 latent_probabilities = weighted_sum_of_one_hots / total_prob_per_latent[:, np.newaxis]
                 latent_fitness_layers[name] = ProbabilisticCategoricalFitness(name, latent_probabilities, categories)
+
+        for i, seq in enumerate(latent_sequences):
+            if i in graph_sample.nodes:
+                graph_sample.nodes[i]['sequence'] = seq
 
         LandscapeClass = DirectedFitnessLandscape if isinstance(graph_sample, nx.DiGraph) else FitnessLandscape
         return LandscapeClass(
