@@ -8,6 +8,7 @@ from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.metrics import mean_squared_error, r2_score
 from ..utils import sample_observed_induced_connected
+import ray
 
 def analyze_fitness_distribution(landscape: FitnessLandscape,
                                  **kwargs) -> Dict:
@@ -407,13 +408,47 @@ def _summarize_arr(arr: np.ndarray, alpha: float = 0.05) -> Dict[str, float]:
         "alpha": alpha,
     }
 
+@ray.remote
+def _analyze_worker(subL, layer_name, analysis_func):
+    if layer_name is not None:
+        subL.view(layer_name)
+    return analysis_func(subL)
+
+def _parallel_analyze_landscapes(landscape_samples: List[FitnessLandscape],
+                                 analysis_func: Callable[[FitnessLandscape], Any],
+                                 layer_name: str | None = None,
+                                 use_ray: bool = True,
+                                 num_workers: int | None = None) -> list:
+    """
+    Helper function to analyze multiple fitness landscapes in parallel
+    using Ray. If `use_ray` is False, runs serially.
+    """
+    if not use_ray:
+        out = []
+        for subL in landscape_samples:
+            if layer_name is not None:
+                subL.view(layer_name)
+            out.append(analysis_func(subL))
+        return out
+
+    if not ray.is_initialized():
+        ray.init(num_cpus=num_workers, ignore_reinit_error=True)
+        
+    # Put function and objects into the object store once
+    func_ref = ray.put(analysis_func)
+    obj_refs = [ray.put(sl) for sl in landscape_samples]
+    futures = [_analyze_worker.remote(sl_ref, layer_name, func_ref) for sl_ref in obj_refs]
+    return ray.get(futures)
+
 def subsample_analysis(landscape: FitnessLandscape,
-                       analysis_fn: Callable[FitnessLandscape, Any],
+                       analysis_func: Callable[FitnessLandscape, Any],
                        n_samples: int = 100,
                        subsample_node_prop: float = 0.9,
                        subsample_edge_prop: float = 0.9,
                        seed: int = None,
-                       layer_name: Optional[str] = None) -> Dict:
+                       layer_name: Optional[str] = None,
+                       use_ray: bool = True,
+                       num_workers: int = None) -> Dict:
     """
     Function to subsample a fitness landscape object into connected
     component subgraphs and compute an analysis function. Edges are not
@@ -425,7 +460,7 @@ def subsample_analysis(landscape: FitnessLandscape,
     landscape : FitnessLandscape
         The fitness landscape to analyze. 
     
-    analysis_fn : Callable
+    analysis_func : Callable
         The analysis function to call on the subsampled fitness
         landscape graphs. 
     
@@ -439,10 +474,20 @@ def subsample_analysis(landscape: FitnessLandscape,
     subsample_edge_prop: float, default=0.9
         The proportion of edges in `landscape` that are subsampled in
         each induced subgraph. 
+    
+    use_ray : bool, default=True
+        Whether to use Ray for parallel processing. If False, runs
+        serially.
+    
+    num_workers : int, optional
+        Number of parallel workers to use with Ray. If None, uses all
+        available CPUs. Ignored if `use_ray` is False.
     """
     rng = np.random.default_rng(seed)
     results: list[Any] = []
+    landscape_samples: list[FitnessLandscape] = []
 
+    # Collect samples.
     for i in range(n_samples):
         sub_seed = int(rng.integers(0, 2**63 - 1))
         subL = sample_observed_induced_connected(
@@ -452,12 +497,16 @@ def subsample_analysis(landscape: FitnessLandscape,
             seed=sub_seed,
             return_graph=False,
         )
-        if layer_name is not None:
-            # No-op if it's already active; raises if the name is invalid
-            subL.view(layer_name)
+        landscape_samples.append(subL)
 
-        out = analysis_fn(subL)
-        results.append(out)
+    # Run in parallel.
+    results: list[Any] = _parallel_analyze_landscapes(
+        landscape_samples=landscape_samples,
+        analysis_func=analysis_func,
+        layer_name=layer_name,
+        use_ray=use_ray,
+        num_workers=num_workers,
+)
 
     # scalar outputs easiest, summarize directly
     if _is_scalar_list(results):
@@ -506,10 +555,12 @@ def subsample_analysis(landscape: FitnessLandscape,
     return {"results": results}
 
 def sample_posterior_graph_analysis(landscape: FitnessSuperscape,
-                                    analysis_fn: Callable[[FitnessLandscape], Any],
+                                    analysis_func: Callable[[FitnessLandscape], Any],
                                     n_samples: int = 100,
                                     layer_name: Optional[str] = None,
-                                    seed: int = None) -> Dict:
+                                    seed: int = None,
+                                    use_ray: bool = True,
+                                    num_workers: int = None) -> Dict:
     """
     Function to sample latent graphs from a superscape and compute
     an analysis function on each sampled graph.
@@ -519,7 +570,7 @@ def sample_posterior_graph_analysis(landscape: FitnessSuperscape,
     landscape : FitnessSuperscape
         The superscape to analyze.
     
-    analysis_fn : Callable
+    analysis_func : Callable
         The analysis function to call on the sampled fitness
         landscape graphs. Should be a `lambda L: ...` function that
         takes a single FitnessLandscape object and returns a scalar or
@@ -531,6 +582,14 @@ def sample_posterior_graph_analysis(landscape: FitnessSuperscape,
     subsample_edge_prop: float, default=0.9
         The proportion of edges in `landscape` that are subsampled in
         each induced subgraph. 
+
+    use_ray : bool, default=True
+        Whether to use Ray for parallel processing. If False, runs
+        serially.
+    
+    num_workers : int, optional
+        Number of parallel workers to use with Ray. If None, uses all
+        available CPUs. Ignored if `use_ray` is False.
 
     Returns
     ------- 
@@ -545,13 +604,14 @@ def sample_posterior_graph_analysis(landscape: FitnessSuperscape,
     results: list[Any] = []
 
     landscape_samples = landscape.sample_latent_landscapes(n_samples=n_samples, seed=seed)
-    for landscape in landscape_samples:
-        if layer_name is not None:
+    
+    results: list[Any] = _parallel_analyze_landscapes(
+        landscape_samples=landscape_samples,
+        analysis_func=analysis_func,
+        layer_name=layer_name,
+        use_ray=use_ray,
+        num_workers=num_workers,)    
 
-            landscape.view(layer_name)
-
-        out = analysis_fn(landscape)
-        results.append(out)
     if _is_scalar_list(results):
         arr = np.asarray(results, dtype=float)
         return {
