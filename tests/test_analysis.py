@@ -1408,7 +1408,7 @@ def test_subsample_scalar_dirichlet_energy_structure(additive_landscape):
     """
     out = subsample_analysis(
         landscape=additive_landscape,
-        analysis_fn=lambda L: calculate_ruggedness_dirichlet_energy(L)["total_dirichlet_energy"],
+        analysis_func=lambda L: calculate_ruggedness_dirichlet_energy(L)["total_dirichlet_energy"],
         n_samples=25,
         subsample_node_prop=0.9,
         subsample_edge_prop=0.9,
@@ -1435,7 +1435,7 @@ def test_subsample_dict_dirichlet_energy_aggregation(additive_landscape):
     """
     out = subsample_analysis(
         landscape=additive_landscape,
-        analysis_fn=lambda L: calculate_ruggedness_dirichlet_energy(L, weighted_laplacian=True),
+        analysis_func=lambda L: calculate_ruggedness_dirichlet_energy(L, weighted_laplacian=True),
         n_samples=15,
         subsample_node_prop=0.8,
         subsample_edge_prop=0.8,
@@ -1459,7 +1459,7 @@ def test_subsample_node_fraction_tracks_keep(additive_landscape):
     node_keep = 0.5
     out = subsample_analysis(
         landscape=additive_landscape,
-        analysis_fn=lambda L: L.graph.number_of_nodes(),
+        analysis_func=lambda L: L.graph.number_of_nodes(),
         n_samples=40,
         subsample_node_prop=node_keep,
         subsample_edge_prop=0.9,
@@ -1476,7 +1476,7 @@ def test_subsample_local_dirichlet_mean(additive_landscape):
     """
     out = subsample_analysis(
         landscape=additive_landscape,
-        analysis_fn=lambda L: float(np.mean(list(local_dirichlet_energy_contribution(L).values()))),
+        analysis_func=lambda L: float(np.mean(list(local_dirichlet_energy_contribution(L).values()))),
         n_samples=20,
         subsample_node_prop=0.85,
         subsample_edge_prop=0.9,
@@ -1537,7 +1537,7 @@ def test_sample_posterior_analysis_scalar_output(mock_superscape_for_posterior_a
     analysis_fn = lambda L: L.graph.number_of_nodes()
     results = sample_posterior_graph_analysis(
         superscape,
-        analysis_fn=analysis_fn,
+        analysis_func=analysis_fn,
         n_samples=2 
     )
 
@@ -1563,7 +1563,7 @@ def test_sample_posterior_analysis_dict_output(mock_superscape_for_posterior_ana
 
     results = sample_posterior_graph_analysis(
         superscape,
-        analysis_fn=graph_metrics,
+        analysis_func=graph_metrics,
         n_samples=2
     )
 
