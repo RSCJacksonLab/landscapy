@@ -681,7 +681,14 @@ def test_superscape_from_parallel_construction(
         np.random.rand(3, 10)
     ]
     mock_aligner_instance = MockHierarchicalRJMCMCAligner.return_value
-    mock_aligner_instance.run_alignment.return_value = (nx.DiGraph(), {}) 
+
+    mock_aligner_instance.run_alignment.return_value = (
+        nx.DiGraph(), 
+        {}, 
+        [np.array([[]])],  # Dummy posterior graph sample
+        [{}]               # Dummy posterior mapping sample
+    )
+    
     alignment = load_aligned_seqs(phylo_test_data, moltype="protein")
     sequence_list = alignment_to_base_numpy_sequences(alignment)
     construction_jobs = [

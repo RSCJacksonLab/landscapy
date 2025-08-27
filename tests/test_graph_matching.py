@@ -202,34 +202,53 @@ def test_construct_latent_landscape_with_full_alphabet(mock_align_soft,
     hierarchical aligner's output.
     """
     mock_aligner_instance = MockHierarchicalRJMCMCAligner.return_value
-    
+
     latent_graph = nx.Graph()
     latent_graph.add_nodes_from([0, 1])
-    
+
     mock_mappings = {
         0: np.array([[0.9, 0.1], [0.2, 0.8]]),
         1: np.array([[0.95, 0.05], [0.15, 0.85]])
     }
-    
+
+    # --- THE FIX ---
+    # 1. Define the posterior samples that the aligner should have as attributes.
+    mock_posterior_L = [np.array([[0, 1], [1, 0]])]
+    mock_posterior_mappings = [mock_mappings]
+
+    # 2. Set these as attributes on the mock instance itself. This is what the
+    #    construct_latent_landscape method will access.
+    mock_aligner_instance.full_posterior_L = mock_posterior_L
+    mock_aligner_instance.full_posterior_mappings = mock_posterior_mappings
+    mock_aligner_instance.directed = False  # Ensure the 'directed' attribute is set
+
+    # 3. The run_alignment mock should return only the two values that the
+    #    FitnessSuperscape constructor expects.
     mock_aligner_instance.run_alignment.return_value = (latent_graph, mock_mappings)
-    
+    # --- END OF FIX ---
+
     def dynamic_align_side_effect(sequences, alphabet):
         num_sequences = len(sequences)
         aligned_length = 5
         alphabet_size = len(alphabet)
         aligned_sequences = [np.random.rand(aligned_length, alphabet_size + 1) for _ in range(num_sequences)]
         return (aligned_sequences, -10.0)
-    
+
     mock_align_soft.side_effect = dynamic_align_side_effect
 
-    superscape = FitnessSuperscape(two_landscapes, aligner_params={})
-    superscape.construct_latent_landscape()
+    # The constructor call was passing aligner_params={}, which creates a nested dict.
+    # Use **{} to pass no sampler keyword arguments.
+    superscape = FitnessSuperscape(two_landscapes, **{})
+    
+    # This call will now succeed because the mock aligner object has the attributes it needs.
+    latent_landscape = superscape.construct_latent_landscape()
 
     assert hasattr(superscape, 'latent_landscape')
-    assert superscape.latent_graph.number_of_nodes() == 2
-    latent_node_0_data = superscape.latent_graph.nodes[0]
+    assert latent_landscape.graph.number_of_nodes() == 2
+    latent_node_0_data = latent_landscape.graph.nodes[0]
     assert 'gapped_arr' in latent_node_0_data
     assert latent_node_0_data['gapped_arr'].shape == (5, len(AMINO_ACID_ALPHABET) + 1)
+    
 
 def test_steiner_latent_graph_reconstruction():
     """Tests the steiner graph reconstruction of an observed graph"""

@@ -120,7 +120,13 @@ def mock_superscape_with_posterior(mocker):
 
     mean_graph = nx.complete_graph(num_latent_nodes)
     mean_mappings = {0: mapping1, 1: mapping2}
-    mock_aligner.run_alignment.return_value = (mean_graph, mean_mappings)
+    
+    mock_aligner.run_alignment.return_value = (
+        mean_graph, 
+        mean_mappings, 
+        mock_aligner.full_posterior_L,
+        mock_aligner.full_posterior_mappings
+    )
 
     mocker.patch(
         'fitness_landscape.core.superscape.HierarchicalRJMCMCAligner',
