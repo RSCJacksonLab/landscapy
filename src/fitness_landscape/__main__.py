@@ -42,25 +42,25 @@ def cli():
 @click.option('--anchor-cosine-threshold', required=False, type=float, default=0.99, help='Cosine similarity threshold for auto-anchoring nodes to latent slots.')
 @click.option('--seed', required=False, type=int, default=None, help='Seed for the random number generator to make results reproducible.')
 
-def lin_phylo_landscape(sequences,
-                        output,
-                        fan_alignment,
-                        fan_alignment_window,
-                        fan_alignment_overlap,
-                        directed_landscape,
-                        compute_phylo_embeddings,
-                        embedding_domain,
-                        bernoulli_beta_alpha0,
-                        bernoulli_beta_alpha1,
-                        rjmcmc_alpha,
-                        birth_gamma_prior,
-                        birth_step_prob,
-                        burn_in_samples,
-                        total_samples,
-                        sample_thin,
-                        auto_anchor,
-                        anchor_cosine_threshold,
-                        seed):
+def phylo_superscape(sequences,
+                     output,
+                     fan_alignment,
+                     fan_alignment_window,
+                     fan_alignment_overlap,
+                     directed_landscape,
+                     compute_phylo_embeddings,
+                     embedding_domain,
+                     bernoulli_beta_alpha0,
+                     bernoulli_beta_alpha1,
+                     rjmcmc_alpha,
+                     birth_gamma_prior,
+                     birth_step_prob,
+                     burn_in_samples,
+                     total_samples,
+                     sample_thin,
+                     auto_anchor,
+                     anchor_cosine_threshold,
+                     seed):
     """
     Constructs and aligns phylogenetic fitness landscapes in parallel.
     """
@@ -96,7 +96,7 @@ def lin_phylo_landscape(sequences,
         "sequences": sub_alignment,
         "digraph_type": "phylogenetic",
         # TODO: add embedding_domain as a parameter
-        "_compute_phylo_embeddings": compte_phylo_embeddings,
+        "_compute_phylo_embeddings": compute_phylo_embeddings,
         "embedding_domain": embedding_domain,
     } for sub_alignment in sub_alignments]
 
@@ -122,7 +122,6 @@ def lin_phylo_landscape(sequences,
         **sampler_kwargs
     )
 
-    superscape.construct_latent_landscape()
     superscape.save(Path(output))
 
 if __name__ == '__main__':

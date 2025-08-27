@@ -672,8 +672,6 @@ def test_superscape_from_parallel_construction(
     phylo_test_data: Path
 ):
     """
-    Tests the generalized `from_parallel_construction` factory method to ensure
-    it can build heterogeneous landscapes in parallel.
     """
     mock_embedder_instance = MockESMEmbedder.return_value
     mock_embedder_instance.embed_relaxed_seqs.side_effect = [
@@ -683,12 +681,10 @@ def test_superscape_from_parallel_construction(
     mock_aligner_instance = MockHierarchicalRJMCMCAligner.return_value
 
     mock_aligner_instance.run_alignment.return_value = (
-        nx.DiGraph(), 
-        {}, 
-        [np.array([[]])],  # Dummy posterior graph sample
-        [{}]               # Dummy posterior mapping sample
+        nx.DiGraph(),
+        {}
     )
-    
+
     alignment = load_aligned_seqs(phylo_test_data, moltype="protein")
     sequence_list = alignment_to_base_numpy_sequences(alignment)
     construction_jobs = [
@@ -718,7 +714,7 @@ def test_superscape_from_parallel_construction(
     assert phylo_landscape.graph.number_of_nodes() == 5, "Phylogenetic graph should have tips and ancestors."
     diffusion_landscape = superscape.landscapes[1]
     assert isinstance(diffusion_landscape, DirectedFitnessLandscape)
-    assert diffusion_landscape.graph.number_of_nodes() == 3, "Diffusion graph should only have tip nodes."    
+    assert diffusion_landscape.graph.number_of_nodes() == 3, "Diffusion graph should only have tip nodes."
     MockHierarchicalRJMCMCAligner.assert_called_once()
     
 def test_create_phylo_graph_returns_undirected_graph(phylo_test_data):

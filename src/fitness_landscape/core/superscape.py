@@ -110,7 +110,7 @@ class FitnessSuperscape:
             aligner_params=sampler_kwargs
         )
         # The results are now stored directly, not the aligner object
-        self.latent_graph, self._latent_mappings, _, _ = self._hierarchical_aligner.run_alignment()
+        self.latent_graph, self._latent_mappings, = self._hierarchical_aligner.run_alignment()
         
         # Collect local traces 
         self.local_trace_E = self._hierarchical_aligner.local_energy_traces
@@ -130,6 +130,9 @@ class FitnessSuperscape:
             for node_id in order
         ]
         
+        # Capture self attribute latent landscape for safety. Can be recomputed with diff posterior prob cutoffs.
+        self.latent_landscape = self.construct_latent_landscape(posterior_prob_cutoff=posterior_prob_cutoff)
+
     def construct_latent_landscape(self,
                                    posterior_prob_cutoff: float = 0.2) -> Union[FitnessLandscape, DirectedFitnessLandscape]:
         """

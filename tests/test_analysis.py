@@ -101,7 +101,7 @@ def mock_superscape_with_posterior(mocker):
         landscape2.graph.nodes[node]['ungapped_arr'] = seq.to_one_hot()
 
     mock_aligner = MagicMock()
-    
+
     L_sample1 = np.array([[0, 1, 0], [1, 0, 1], [0, 1, 0]])
     L_sample2 = np.array([[0, 1, 1], [1, 0, 1], [1, 1, 0]])
     mock_aligner.full_posterior_L = [L_sample1, L_sample2]
@@ -120,13 +120,8 @@ def mock_superscape_with_posterior(mocker):
 
     mean_graph = nx.complete_graph(num_latent_nodes)
     mean_mappings = {0: mapping1, 1: mapping2}
-    
-    mock_aligner.run_alignment.return_value = (
-        mean_graph, 
-        mean_mappings, 
-        mock_aligner.full_posterior_L,
-        mock_aligner.full_posterior_mappings
-    )
+
+    mock_aligner.run_alignment.return_value = (mean_graph, mean_mappings)
 
     mocker.patch(
         'fitness_landscape.core.superscape.HierarchicalRJMCMCAligner',
@@ -134,7 +129,7 @@ def mock_superscape_with_posterior(mocker):
     )
 
     superscape = FitnessSuperscape([landscape1, landscape2], **{'burn_in': 1, 'samples': 1})
-    
+
     graph = nx.complete_graph(num_latent_nodes)
     sequences = [SoftSequence(np.random.rand(2, 20), alphabet=PROT_20) for _ in range(num_latent_nodes)]
     for i, seq in enumerate(sequences):
