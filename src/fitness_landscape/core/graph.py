@@ -1498,7 +1498,28 @@ def _ensure_gapped_last(arr: np.ndarray) -> np.ndarray:
     return np.concatenate([arr, gap], axis=1)
 
 
-def compute_edge_mutations_star(G: nx.Graph | nx.DiGraph,
+# Ray parallel workes
+@ray.remote(num_cpus=1)
+def _star_block(u, neighbors, seq_u, seqs_v, alphabet, chunk_size, eps):
+    set_w, set_d, set_s = {}, {}, {}
+    Pu = seq_u.ungapped_arr
+    def chunks(lst, k):
+        if not k: yield lst; return
+        for i in range(0, len(lst), k): yield lst[i:i+k]
+    for chunk_ids in chunks(list(range(len(neighbors))), chunk_size):
+        seqs = [Pu] + [seqs_v[i].ungapped_arr for i in chunk_ids]
+        aligned, _ = align_soft_sequences(sequences=seqs, alphabet=alphabet)
+        Au = np.asarray(aligned[0])
+        for off, idx in enumerate(chunk_ids, start=1):
+            v = neighbors[idx]
+            Av = np.asarray(aligned[off])
+            mut, eff, dist = expected_hamming_from_aligned(Au, Av)
+            set_w[(u, v)] = float(mut)
+            set_d[(u, v)] = float(dist)
+            set_s[(u, v)] = float(-np.log(max(dist, eps)))
+    return set_w, set_d, set_s
+
+def compute_edge_mutations_star_parallel(G: nx.Graph | nx.DiGraph,
                                 *,
                                 alphabet: List = PROT_20,
                                 chunk_size: Optional[int] = None,
@@ -1507,6 +1528,7 @@ def compute_edge_mutations_star(G: nx.Graph | nx.DiGraph,
     Function to compute the expected Hamming distance for each edge
     in a graph via star subgraph computation. Sets edge attributes in place. 
     The complexity is approximately sum_u cost(align([u] + N_u_chunk)).
+    Runs in parallel using Ray orchestration over edges.
 
     Parameters
     ----------
@@ -1523,63 +1545,20 @@ def compute_edge_mutations_star(G: nx.Graph | nx.DiGraph,
     eps : float, default=1e-12
         Small value to avoid division by zero in normalization.
     """
-    
-    # Safety check.
-    if not all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for _, seq in G.nodes(data='sequence')):
-        raise ValueError("All nodes in G must have a `BaseNumpySequence` with `ungapped_arr` attribute and the PROT_20 alphabet.")
-    
-    # record which undirected edges have been computed.
-    done = set()
-
-    set_w = {}
-    set_d = {}
-    set_s = {}
-    
-    nodes = list(G.nodes())
-    for u in nodes:
-        # Gather neighbors needing (u,v)
-        pending_vs = []
-        for v in G.neighbors(u):
-            e = (u, v) if G.is_directed() else tuple(sorted((u, v)))
-            if e in done:
-                continue
-            pending_vs.append(v)
-
-        if not pending_vs:
-            continue
-
-        # chunk helper
-        def _chunks(lst, k):
-            if k is None or k <= 0:
-                yield lst
-            else:
-                for i in range(0, len(lst), k):
-                    yield lst[i:i+k]
-
-        Pu = G.nodes[u]['sequence'].ungapped_arr
-        for chunk in _chunks(pending_vs, chunk_size):
-            seqs = [Pu] + [G.nodes[v]['sequence'].ungapped_arr for v in chunk]
-
-            # Do one MSA for u and its neighbors.
-            # NOTE: Should always be PROT_20 (or a PAML alphabet).
-            aligned, _ = align_soft_sequences(sequences=seqs, alphabet=alphabet)
-
-            Au = np.asarray(aligned[0])
-            for i, v in enumerate(chunk, start=1):
-                Av = np.asarray(aligned[i])
-                mut, eff, dist = expected_hamming_from_aligned(Au, Av)
-                e_u_v = (u, v) if G.is_directed() else tuple(sorted((u, v)))
-                done.add(e_u_v)
-                set_w[(u, v)] = float(mut)
-                set_d[(u, v)] = float(dist)
-                set_s[(u, v)] = float(-np.log(max(dist, eps)))
-
-    if set_w:
-        nx.set_edge_attributes(G, set_w, "weight")
-    if set_d:
-        nx.set_edge_attributes(G, set_d, "distance")
-    if set_s:
-        nx.set_edge_attributes(G, set_s, "sim")
+    tasks = []
+    for u in G.nodes():
+        nbrs = [v for v in G.neighbors(u) if (u < v) or G.is_directed()]  # avoid dup in undirected
+        if not nbrs: continue
+        seqs_v = [G.nodes[v]['sequence'] for v in nbrs]
+        tasks.append(_star_block.remote(u, nbrs, G.nodes[u]['sequence'], seqs_v, alphabet, chunk_size, eps))
+    if not tasks: return
+    # reduce
+    set_w, set_d, set_s = {}, {}, {}
+    for W, D, S in ray.get(tasks):
+        set_w.update(W); set_d.update(D); set_s.update(S)
+    nx.set_edge_attributes(G, set_w, "weight")
+    nx.set_edge_attributes(G, set_d, "distance")
+    nx.set_edge_attributes(G, set_s, "sim")
 
 def attach_expected_hamming_to_edges(G: nx.Graph | nx.DiGraph,
                                      aligned: Sequence[np.ndarray],
