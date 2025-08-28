@@ -1,3 +1,5 @@
+import os
+
 from pydantic import (
     BaseModel,
     Field,
@@ -584,6 +586,8 @@ class FitnessSuperscape:
                                    constructor_type: Literal['undirected', 'directed'],
                                    construction_jobs: List[Dict[str, Any]],
                                    posterior_prob_cutoff: float = 0.1,
+                                   _meta_cpu_chains: int = os.cpu_count(),
+                                   _show_progress: bool = True,
                                    **sampler_kwargs: Any) -> "FitnessSuperscape":
         """
         A flexible factory method to create a FitnessSuperscape by
@@ -647,7 +651,11 @@ class FitnessSuperscape:
         return cls(
             landscapes=landscapes,
             posterior_prob_cutoff=posterior_prob_cutoff,
-            **sampler_kwargs
+            _meta_cpu_chains=_meta_cpu_chains,
+            _show_progress = _show_progress,
+            **sampler_kwargs,
+            
+
         )
 
     # TODO: shard with FAISS and retrieve subgraph with cosine match to

@@ -8,11 +8,15 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 from ..utils import cosine_similarity_matrix
 import faiss
+from tqdm import tqdm
+import os
+import inspect
 
 
 @ray.remote
 def run_local_alignment_task(cluster_subgraphs: List[Union[nx.Graph, nx.DiGraph]],
-                             aligner_params: Dict) -> Tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray], Dict[int, list]]:
+                             aligner_params: Dict,
+                             _local_cpu_chains: int) -> Tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray], Dict[int, list]]:
     """
     Executes the local RJMCMC alignment for a cluster of subgraphs.
     This is a Ray remote task to parallelize the local alignments.
@@ -23,7 +27,9 @@ def run_local_alignment_task(cluster_subgraphs: List[Union[nx.Graph, nx.DiGraph]
         A list of subgraphs representing a cluster of nodes.
     aligner_params : Dict
         Parameters for the RJMCMCAligner.
-    
+    _local_cpu_chains : int
+        The number of chains to run in each parallel RJMCMC object.
+
     Returns
     -------
     Tuple[nx.Graph or nx.DiGraph, Dict[int, np.ndarray], Dict[int, list]]
@@ -42,12 +48,12 @@ def run_local_alignment_task(cluster_subgraphs: List[Union[nx.Graph, nx.DiGraph]
         The local aligner number of edges of sampling steps. 
     """
     
-    # Default to a single CPU process if not found in params.
-    num_chains = aligner_params.pop("num_chains", 1)
+    # Make parameters safe for RJMCMC init.
+    aligner_params = _filter_kwargs_for_init(RJMCMCAligner, dict(aligner_params))
     
+    # Init and run chains in parallel.
     local_aligner = RJMCMCAligner(graphs=cluster_subgraphs, **aligner_params)
-    
-    local_aligner.sample(num_chains=num_chains)
+    local_aligner.sample(num_chains=_local_cpu_chains)
     
     blueprint = local_aligner.latent_blueprint_graph()
     node_mapping = local_aligner.get_node_to_latent_mapping()
@@ -57,6 +63,16 @@ def run_local_alignment_task(cluster_subgraphs: List[Union[nx.Graph, nx.DiGraph]
     
     return blueprint, node_mapping, node_order, local_aligner.trace_E, local_aligner.trace_NL, local_aligner.trace_edges, local_aligner._stored_L, local_aligner._stored_pi
 
+
+def _filter_kwargs_for_init(cls, kwargs: Dict) -> Dict:
+    """
+    Drop kwargs not accepted by cls.__init__.
+    """
+    sig = inspect.signature(cls.__init__)
+    allowed = set(sig.parameters.keys())
+    # ignore `self`
+    allowed.discard("self")
+    return {k: v for k, v in kwargs.items() if k in allowed}
 
 class HierarchicalRJMCMCAligner:
     """
@@ -84,7 +100,12 @@ class HierarchicalRJMCMCAligner:
                  aligner_params: dict,
                  local_cluster_threshold: float = 0.85,
                  global_bridge_threshold: float = 0.5,
-                 emb_key: str = 'emb_arr') -> None:
+                 emb_key: str = 'emb_arr',
+                 _local_cpu_chains: int = (os.cpu_count()//10 if os.cpu_count()//10 > 1 else 1),
+                 _meta_cpu_chains: int = os.cpu_count(),
+                 _local_desc: str = "Local alignments",
+                 _show_progress: bool = False
+                 ) -> None:
         
         
         self.original_graphs = graphs
@@ -94,6 +115,13 @@ class HierarchicalRJMCMCAligner:
         self.emb_key = emb_key
         self.K = len(graphs)
         self.directed = any(isinstance(g, nx.DiGraph) for g in graphs)
+        
+        # Parallel settings and reporting
+        self._local_desc = _local_desc
+        self._local_cpu_chains = _local_cpu_chains
+        self._meta_cpu_chains = _meta_cpu_chains
+        self._show_progress = _show_progress
+
         # Update aligner parameters with directed flag.
         if 'directed' not in self.aligner_params:
             self.aligner_params['directed'] = self.directed
@@ -120,8 +148,7 @@ class HierarchicalRJMCMCAligner:
         self.meta_nl_trace = []
         self.meta_edges_trace = []
 
-    def run_alignment(self,
-                      num_chains_per_task: int=1) -> Tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray]]:
+    def run_alignment(self) -> Tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray]]:
         """
         Executes the full, two-level hierarchical alignment process.
 
@@ -133,10 +160,13 @@ class HierarchicalRJMCMCAligner:
             - A mapping of original graph nodes to latent space nodes.
         """
         # Local Alignments
-        local_results = self._run_local_alignments(num_chains_per_task=num_chains_per_task)
+        
+        # Paralleliztion at level of both hierarchical orchestration and RJMCMC class (self._local_cpu_chains.)
+        local_results = self._run_local_alignments(num_chains_per_task=self._local_cpu_chains)
 
         # Global Meta-Alignment
-        meta_blueprint, meta_mappings = self._run_global_meta_alignment(local_results, num_chains_per_task=num_chains_per_task)
+        # Parallelization at level of RJMCMC class and self._meta_cpu_chains.
+        meta_blueprint, meta_mappings = self._run_global_meta_alignment(local_results)
 
         # Collect full posterior samples.
         self._reconstruct_and_store_full_posterior(local_results, meta_blueprint, meta_mappings)
@@ -225,54 +255,72 @@ class HierarchicalRJMCMCAligner:
             - 'node_order': The order of nodes as seen by the aligner.
         """
         clusters = self._create_clusters()
-        
+
         futures = []
-        for cluster_info in clusters:
-            
-            # Gracefully handle directed and undirected graphs.
+
+        # keep a stable index for each cluster (preserve order on output)
+        for cluster_idx, cluster_info in enumerate(clusters):
             graph_constructor = nx.DiGraph if self.directed else nx.Graph
             subgraphs = [graph_constructor() for _ in range(self.K)]
-            
+
             for k, node_id in cluster_info["node_backrefs"]:
                 node_data = self.original_graphs[k].nodes[node_id]
                 subgraphs[k].add_node(node_id, **node_data)
-            
+
             for k in range(self.K):
                 original_subgraph = self.original_graphs[k].subgraph(subgraphs[k].nodes())
                 subgraphs[k].add_edges_from(original_subgraph.edges())
-            
+
             params = self.aligner_params.copy()
-            # Random seed.
-            params['seed'] = np.random.randint(1e6)
+            params['seed'] = int(np.random.randint(1e6))
             params['directed'] = self.directed
             params['num_chains'] = num_chains_per_task
-            
-            num_cpus_needed = 1 + num_chains_per_task
-            futures.append(
-                run_local_alignment_task.options(num_cpus=num_cpus_needed).remote(subgraphs, params)
-            )
-        
-        # Collect result
-        ray_results = ray.get(futures)
-        for i, (blueprint, node_mapping, node_order, trace_E, trace_NL, trace_edges, stored_L, stored_pi) in enumerate(ray_results):
-            clusters[i]['blueprint'] = blueprint
-            clusters[i]['node_mapping'] = node_mapping
-            clusters[i]['node_order'] = node_order
 
-            # Store posterior samples for local alignments
-            self.local_posterior_L.append(stored_L)
-            self.local_posterior_pi.append(stored_pi)
-            
-            # Store traces.
-            self.local_energy_traces[i] = trace_E
-            self.local_nl_traces[i] = trace_NL
-            self.local_edges_traces[i] = trace_edges
-        
-        return clusters
+            num_cpus_needed = 1 + num_chains_per_task
+            obj_ref = run_local_alignment_task.options(num_cpus=num_cpus_needed).remote(subgraphs, params, self._local_cpu_chains)
+            futures.append(obj_ref)
+
+        # Prepare output container in input order
+        results_in_order: List[Dict] = [dict(clusters[i]) for i in range(len(clusters))]
+
+        # Map ObjectRef : cluster_idx.
+        ref_to_idx: Dict[ray.ObjectRef, int] = {ref: i for i, ref in enumerate(futures)}
+        pending = set(futures)
+
+        with tqdm(total=len(pending),
+                desc=self._local_desc,
+                disable=not self._show_progress) as pbar:
+            while pending:
+                done, pending = ray.wait(list(pending), num_returns=1, timeout=None)
+                ref = done[0]
+                idx = ref_to_idx[ref]
+                try:
+                    (blueprint, node_mapping, node_order,
+                    trace_E, trace_NL, trace_edges,
+                    stored_L, stored_pi) = ray.get(ref)
+                except Exception as e:
+                    raise RuntimeError(f"Local alignment failed for cluster {idx}") from e
+
+                # Store into the stable slot
+                results_in_order[idx]['blueprint'] = blueprint
+                results_in_order[idx]['node_mapping'] = node_mapping
+                results_in_order[idx]['node_order'] = node_order
+
+                # posterior samples for local alignments
+                self.local_posterior_L.append(stored_L)
+                self.local_posterior_pi.append(stored_pi)
+
+                # traces
+                self.local_energy_traces[idx] = trace_E
+                self.local_nl_traces[idx] = trace_NL
+                self.local_edges_traces[idx] = trace_edges
+
+                pbar.update(1)
+
+        return results_in_order
 
     def _run_global_meta_alignment(self,
-                                   local_results: List[Dict],
-                                   num_chains_per_task: int = 1) -> Tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray]]:
+                                   local_results: List[Dict]) -> Tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray]]:
         """
         Method to run the global meta-alignment across clusters of
         nodes.
@@ -333,7 +381,7 @@ class HierarchicalRJMCMCAligner:
             return meta_blueprint, meta_mappings
         
         meta_aligner = RJMCMCAligner(graphs=meta_graphs, **self.aligner_params)
-        meta_aligner.sample(num_chains=num_chains_per_task)
+        meta_aligner.sample(num_chains=self._meta_cpu_chains)
 
         # Store posterior samples for the meta-alignment
         self.meta_posterior_L = meta_aligner._stored_L

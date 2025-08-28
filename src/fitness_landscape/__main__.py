@@ -40,7 +40,12 @@ def cli():
 @click.option('--sample-thin', required=False, type=int, default=50, help='Thinning interval for the RJMCMC sampler.')
 @click.option('--auto-anchor', required=False, is_flag=True, default=True, help='Boolean flag to auto-anchor nodes to latent slots by cosine similarity.')
 @click.option('--anchor-cosine-threshold', required=False, type=float, default=0.99, help='Cosine similarity threshold for auto-anchoring nodes to latent slots.')
+@click.option('--embedding-domain', required=False, type=str, default='ohe', help='The embedding domain to use for sequence embeddings. Options are "plm" for protein language model embeddings or "ohe" for one-hot encoded embeddings.')
 @click.option('--seed', required=False, type=int, default=None, help='Seed for the random number generator to make results reproducible.')
+
+# RJMCMC cpu chains
+@click.option('--meta-cpu-chains', required=False, type=int, default=os.cpu_count(), help='Number of CPU chains to use for the meta-alignment step in hierarchical alignment.')
+@click.option('--local-cpu-chains', required=False, type=int, default=(os.cpu_count()//10 if os.cpu_count()//10 > 1 else 1), help='Number of CPU chains to use for each parallel local alignment chain.')
 
 def phylo_superscape(sequences,
                      output,
@@ -60,7 +65,9 @@ def phylo_superscape(sequences,
                      sample_thin,
                      auto_anchor,
                      anchor_cosine_threshold,
-                     seed):
+                     seed,
+                     meta_cpu_chains,
+                     local_cpu_chains):
     """
     Constructs and aligns phylogenetic fitness landscapes in parallel.
     """
@@ -95,11 +102,9 @@ def phylo_superscape(sequences,
     construction_jobs = [{
         "sequences": sub_alignment,
         "digraph_type": "phylogenetic",
-        # TODO: add embedding_domain as a parameter
         "_compute_phylo_embeddings": compute_phylo_embeddings,
         "embedding_domain": embedding_domain,
     } for sub_alignment in sub_alignments]
-
 
     bernoulli_beta = BernoulliBeta(alpha0=bernoulli_beta_alpha0, alpha1=bernoulli_beta_alpha1)
     
@@ -114,11 +119,13 @@ def phylo_superscape(sequences,
         "auto_anchor": auto_anchor,
         "cosine_anchor_threshold": anchor_cosine_threshold,
         "seed": seed,
+        "local_cpu_chains": local_cpu_chains,
     }
 
     superscape = FitnessSuperscape.from_parallel_construction(
         constructor_type='undirected' if not directed_landscape else 'phylogenetic',
         construction_jobs=construction_jobs,
+        _meta_cpu_chains=meta_cpu_chains,
         **sampler_kwargs
     )
 
