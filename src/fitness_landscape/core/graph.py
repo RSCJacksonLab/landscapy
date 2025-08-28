@@ -1519,7 +1519,7 @@ def _star_block(u, neighbors, seq_u, seqs_v, alphabet, chunk_size, eps):
             set_s[(u, v)] = float(-np.log(max(dist, eps)))
     return set_w, set_d, set_s
 
-def compute_edge_mutations_star_parallel(G: nx.Graph | nx.DiGraph,
+def compute_edge_mutations_star(G: nx.Graph | nx.DiGraph,
                                 *,
                                 alphabet: List = PROT_20,
                                 chunk_size: Optional[int] = None,
