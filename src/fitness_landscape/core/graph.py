@@ -17,6 +17,7 @@ from softalign.soft_alignment import align_soft_sequences
 from scipy.sparse import csr_matrix
 from scipy.sparse import coo_matrix
 import faiss
+import ray
 
 _BaseSequence = [BaseNumpySequence, BinarySequence, SoftSequence]
 
@@ -1155,6 +1156,17 @@ def create_phylo_graph(sequences: Union[Path, ArrayAlignment],
     compute_edge_mutations_star(G=graph)
     return graph
 
+# Remote ray function for evol alignment.
+@ray.remote
+def _score_pair(i, j, seq_i, seq_j, tau, Q):
+
+    Ai = seq_i.posterior if isinstance(seq_i, SoftSequence) else seq_i.to_one_hot()
+    Aj = seq_j.posterior if isinstance(seq_j, SoftSequence) else seq_j.to_one_hot()
+    aligned, _ = align_soft_sequences(sequences=[Ai, Aj], alphabet=PROT_20)
+    score = calculate_gapped_soft_score(aligned_seq1=aligned[0], aligned_seq2=aligned[1], q=Q)
+    
+    return i, j, float(np.exp(score / tau))
+
 def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                                              embeddings: np.ndarray,
                                              replacement_matrix: np.ndarray = lg,
@@ -1169,10 +1181,12 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                                              t: int = 5,
                                              tau: float = 1.0,
                                              connectivity_threshold: float = 1e-4,
+                                             cpus: int = 1,
                                              **kwargs) -> nx.Graph:
     """
     Constructs a diffusion graph by scoring standard alignments with an
-    symmetric equilibrium replacement matrix.
+    symmetric equilibrium replacement matrix. Runs in parallel with ray
+    orechestration.
 
     Parameters
     ----------
@@ -1226,6 +1240,10 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     
     tau : float, default=1.0
         The temperature parameter used to smooth the distance kernel.
+
+    cpus : int, default=1.0
+        The number of CPUs to paralellise the kernel alignment and
+        distance computation over.
 
     Returns
     -------
@@ -1284,22 +1302,17 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
 
     kernel_matrix = np.zeros((n_sequences, n_sequences))
 
-    for i, j in pairs_to_align:
-        seq_i = sequences[i]
-        arr_i = seq_i.posterior if isinstance(seq_i, SoftSequence) else seq_i.to_one_hot()
-
-        seq_j = sequences[j]
-        arr_j = seq_j.posterior if isinstance(seq_j, SoftSequence) else seq_j.to_one_hot()
-
-        alignment, _ = align_soft_sequences(sequences=[arr_i, arr_j], alphabet=PROT_20)
-
-        score = calculate_gapped_soft_score(aligned_seq1=alignment[0],
-                                            aligned_seq2=alignment[1],
-                                            q=replacement_matrix)
-
-        kernel_value = np.exp(score / tau)
-        kernel_matrix[i, j] = kernel_value
-        kernel_matrix[j, i] = kernel_value # Explicitly symmetrize
+    # Init ray for parallel computing.
+    if not ray.is_initialized():
+        ray.init()
+    
+    # Compute in parallel.
+    refs = [_score_pair.options(num_cpus=cpus).remote(i, j, sequences[i], sequences[j], tau, replacement_matrix)
+            for (i, j) in pairs_to_align]
+    
+    for i, j, kv in ray.get(refs):
+        kernel_matrix[i, j] = kv
+        kernel_matrix[j, i] = kv
 
     np.fill_diagonal(kernel_matrix, 0)
 
