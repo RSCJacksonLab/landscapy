@@ -194,8 +194,42 @@ class BaseNumpySequence:
 
         if mapping is None:
             mapping = {sym: i for i, sym in enumerate(self.alphabet)}
-        
-        idxs = np.array([mapping[str(s)] for s in self._np], dtype=int)
+
+        # Make mapping robust to case and common gap synonyms
+        if isinstance(mapping, dict):
+            norm_map = dict(mapping)
+            # Bridge '-' and 'gap' if only one is present
+            if 'gap' in norm_map and '-' not in norm_map:
+                norm_map['-'] = norm_map['gap']
+            if '-' in norm_map and 'gap' not in norm_map:
+                norm_map['gap'] = norm_map['-']
+            # Add lowercase/uppercase aliases for alphabetic symbols
+            for k, v in list(norm_map.items()):
+                if isinstance(k, str) and k:
+                    # Avoid duplicating special tokens like 'gap'
+                    if k not in {'gap', '-'}:
+                        norm_map.setdefault(k.lower(), v)
+                        norm_map.setdefault(k.upper(), v)
+            mapping = norm_map
+
+        # Look up indices with normalization for string symbols
+        def _lookup(sym) -> int:
+            s = str(sym)
+            # Try direct, then case-insensitive
+            if s in mapping:
+                return mapping[s]
+            s_up = s.upper()
+            if s_up in mapping:
+                return mapping[s_up]
+            s_lo = s.lower()
+            if s_lo in mapping:
+                return mapping[s_lo]
+            # Common gap alt
+            if s == '.' and 'gap' in mapping:
+                return mapping['gap']
+            raise KeyError(s)
+
+        idxs = np.array([_lookup(s) for s in self._np], dtype=int)
         mat = np.zeros((len(self), len(mapping)), dtype=int)
         mat[np.arange(len(self)), idxs] = 1
         return mat
@@ -219,7 +253,34 @@ class BaseNumpySequence:
         if mapping is None:
             mapping = {sym: i for i, sym in enumerate(self.alphabet)}
 
-        return np.array([mapping[str(s)] for s in self.ndarray], dtype=int)
+        # Mirror the normalization used in to_one_hot
+        if isinstance(mapping, dict):
+            norm_map = dict(mapping)
+            if 'gap' in norm_map and '-' not in norm_map:
+                norm_map['-'] = norm_map['gap']
+            if '-' in norm_map and 'gap' not in norm_map:
+                norm_map['gap'] = norm_map['-']
+            for k, v in list(norm_map.items()):
+                if isinstance(k, str) and k and k not in {'gap', '-'}:
+                    norm_map.setdefault(k.lower(), v)
+                    norm_map.setdefault(k.upper(), v)
+            mapping = norm_map
+
+        def _lookup(sym) -> int:
+            s = str(sym)
+            if s in mapping:
+                return mapping[s]
+            s_up = s.upper()
+            if s_up in mapping:
+                return mapping[s_up]
+            s_lo = s.lower()
+            if s_lo in mapping:
+                return mapping[s_lo]
+            if s == '.' and 'gap' in mapping:
+                return mapping['gap']
+            raise KeyError(s)
+
+        return np.array([_lookup(s) for s in self.ndarray], dtype=int)
 
     def to_str(self) -> str:
         """

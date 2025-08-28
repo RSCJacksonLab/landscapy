@@ -3,10 +3,10 @@ import click
 import os
 import json
 from pathlib import Path
-from .core.superscape import FitnessSuperscape
-from .core.landscape import DirectedFitnessLandscape
-from .utils import moving_window_alignment
-from .graph_matching.latent_alignment import BernoulliBeta
+from fitness_landscape.core.superscape import FitnessSuperscape
+from fitness_landscape.core.landscape import DirectedFitnessLandscape
+from fitness_landscape.utils import moving_window_alignment
+from fitness_landscape.graph_matching.latent_alignment import BernoulliBeta
 from cogent3 import load_aligned_seqs
 
 @click.group()
@@ -101,7 +101,7 @@ def phylo_superscape(sequences,
 
     construction_jobs = [{
         "sequences": sub_alignment,
-        "digraph_type": "phylogenetic",
+        "graph_type": "phylogenetic",
         "_compute_phylo_embeddings": compute_phylo_embeddings,
         "embedding_domain": embedding_domain,
     } for sub_alignment in sub_alignments]
@@ -130,6 +130,8 @@ def phylo_superscape(sequences,
     )
 
     superscape.save(Path(output))
+
+
 
 if __name__ == '__main__':
     cli()
