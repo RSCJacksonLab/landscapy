@@ -59,7 +59,8 @@ class EmbNodeModel(BaseModel):
         return v
 
 # Parallel landscape constructor private function.
-@ray.remote(num_gpus=1 if torch.cuda.is_available() else 0)
+# Parallel steps are spawned within the outer superscape loop.
+@ray.remote(num_cpus=1)
 def _create_landscape_task(
     constructor_class: Union[FitnessLandscape, DirectedFitnessLandscape],
     sequences: Union[Path, ArrayAlignment, List[BaseNumpySequence]],
@@ -501,7 +502,6 @@ class FitnessSuperscape:
         """
         return [obj.graph for obj in landscapes]
 
-
     # Delegate tensor methods to latent graph FitnessLandscape class.
     def to_graph_tensor(self) -> 'Data':
         """
@@ -586,7 +586,6 @@ class FitnessSuperscape:
                                    constructor_type: Literal['undirected', 'directed'],
                                    construction_jobs: List[Dict[str, Any]],
                                    posterior_prob_cutoff: float = 0.1,
-                                   _meta_cpu_chains: int = os.cpu_count(),
                                    _show_progress: bool = True,
                                    **sampler_kwargs: Any) -> "FitnessSuperscape":
         """
@@ -642,7 +641,10 @@ class FitnessSuperscape:
 
             # Same base class to instantiate across all parallel runs.
             job['constructor_class'] = landscape_class
-            futures.append(_create_landscape_task.remote(**job))
+            
+            # Only request GPUs if the embedding domain is explicitly `plm`.
+            num_gpus = parent_gpus = 1 if job.get("embedding_domain") == "plm" else 0
+            futures.append(_create_landscape_task.options(num_gpus=num_gpus).remote(**job))
 
         # Retrieve the results
         landscapes = ray.get(futures)
@@ -651,11 +653,8 @@ class FitnessSuperscape:
         return cls(
             landscapes=landscapes,
             posterior_prob_cutoff=posterior_prob_cutoff,
-            _meta_cpu_chains=_meta_cpu_chains,
             _show_progress = _show_progress,
             **sampler_kwargs,
-            
-
         )
 
     # TODO: shard with FAISS and retrieve subgraph with cosine match to

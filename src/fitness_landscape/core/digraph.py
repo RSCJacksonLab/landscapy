@@ -30,7 +30,7 @@ from ..embedding.particle_sampler import (
     ESMEmbedder
 )
 from softalign.soft_alignment import align_soft_sequences
-
+import ray
 
 def create_phylo_digraph(sequences: Union[Path, ArrayAlignment],
                          replacement_matrix: List[str] = ['NQ.pfam'],
@@ -71,6 +71,17 @@ def create_phylo_digraph(sequences: Union[Path, ArrayAlignment],
     compute_edge_mutations_star(G=digraph)
     return digraph
 
+# Remote ray function for evol alignment.
+@ray.remote
+def _score_pair(i, j, seq_i, seq_j, tau, Q):
+
+    Ai = seq_i.posterior if isinstance(seq_i, SoftSequence) else seq_i.to_one_hot()
+    Aj = seq_j.posterior if isinstance(seq_j, SoftSequence) else seq_j.to_one_hot()
+    aligned, _ = align_soft_sequences(sequences=[Ai, Aj], alphabet=PROT_20)
+    score = calculate_gapped_soft_score(aligned_seq1=aligned[0], aligned_seq2=aligned[1], q=Q)
+    
+    return i, j, float(np.exp(score / tau))
+
 #TODO: Add emergence time masking.
 def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
                                              embeddings: np.ndarray = None,
@@ -86,6 +97,7 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
                                              t: int = 5,
                                              tau: float = 1.0,
                                              connectivity_threshold: float = 1e-4,
+                                             cpus: int = 1,
                                              **kwargs) -> nx.DiGraph:
     """
     Constructs a diffusion graph by scoring standard alignments with an
@@ -139,6 +151,10 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
     
     tau : float, default=1.0
         The temperature parameter used to smooth the distance kernel.
+    
+    cpus : int, default=1.0
+        The number of CPUs to paralellise the kernel alignment and
+        distance computation over.
 
     Returns
     -------
@@ -207,25 +223,16 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
     # Make kernel matrix
     kernel_matrix = np.zeros((n_sequences, n_sequences))
     
-    # Iterate through pairs of sequences to align
-    for i, j in pairs_to_align:
-        # Get sequence arrays, handling both SoftSequence and BaseNumpySequence
-        seq_i = sequences[i]
-        arr_i = seq_i.posterior if isinstance(seq_i, SoftSequence) else seq_i.to_one_hot()
-
-        seq_j = sequences[j]
-        arr_j = seq_j.posterior if isinstance(seq_j, SoftSequence) else seq_j.to_one_hot()
-
-                
-        alignment, _ = align_soft_sequences(sequences=[arr_i, arr_j],
-                                            alphabet=PROT_20)
-        
-        score = calculate_gapped_soft_score(aligned_seq1 = alignment[0],
-                                            aligned_seq2 = alignment[1],
-                                            q = replacement_matrix)
-        
-        # Tau controls "sharpness" of kernel distances.
-        kernel_matrix[i, j] = np.exp(score / tau)
+    # Init ray
+    if not ray.is_initialized():
+        ray.init()
+    
+    # Compute in parallel.
+    refs = [_score_pair.options(num_cpus=cpus).remote(i, j, sequences[i], sequences[j], tau, replacement_matrix)
+            for (i, j) in pairs_to_align]
+    
+    for i, j, kv in ray.get(refs):
+        kernel_matrix[i, j] = kv
 
     # Proceed with diffusion and graph construction (same as before)
     np.fill_diagonal(kernel_matrix, 0)
