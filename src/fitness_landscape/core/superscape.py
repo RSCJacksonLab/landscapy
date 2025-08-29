@@ -702,6 +702,9 @@ class FitnessSuperscape:
                                    construction_jobs: List[Dict[str, Any]],
                                    posterior_prob_cutoff: float = 0.1,
                                    _show_progress: bool = True,
+                                   _construct_checkpoint_dir: Union[str, Path, None] = None,
+                                   _construct_checkpoint_interval: int = 300,
+                                   _construct_resume_checkpoint: Union[str, Path, None] = None,
                                    **sampler_kwargs: Any) -> "FitnessSuperscape":
         """
         A flexible factory method to create a FitnessSuperscape by
@@ -747,6 +750,27 @@ class FitnessSuperscape:
             else DirectedFitnessLandscape
         )
 
+        # Optional checkpointing
+        ckpt_path = None
+        last_ckpt = 0.0
+        if _construct_checkpoint_dir:
+            ckpt_dir = Path(_construct_checkpoint_dir)
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            ckpt_path = ckpt_dir / "superscape_construction.ckpt.pkl"
+
+        # Resume support
+        landscapes: List[Union[FitnessLandscape, DirectedFitnessLandscape, None]] = [None] * len(construction_jobs)
+        remaining_idx = list(range(len(construction_jobs)))
+        if _construct_resume_checkpoint:
+            try:
+                with open(_construct_resume_checkpoint, 'rb') as f:
+                    state = pickle.load(f)
+                if isinstance(state, dict) and 'landscapes' in state and len(state['landscapes']) == len(construction_jobs):
+                    landscapes = state['landscapes']
+                    remaining_idx = [i for i, x in enumerate(landscapes) if x is None]
+            except Exception:
+                pass
+
         futures = []
         for job in construction_jobs:
             if 'sequences' not in job:
@@ -767,9 +791,8 @@ class FitnessSuperscape:
         import logging as _logging, time as _time
         _logger = _logging.getLogger('fitness_landscape')
         total = len(futures)
-        pending = set(futures)
+        pending = set(futures[i] for i in remaining_idx)
         done_count = 0
-        landscapes = [None] * total
         ref_to_index = {ref: i for i, ref in enumerate(futures)}
         t_last = _time.perf_counter()
         try:
@@ -789,6 +812,23 @@ class FitnessSuperscape:
                 done_count += 1
                 if _show_progress:
                     _logger.info('parallel progress: %d/%d completed', done_count, total)
+                # checkpoint
+                if ckpt_path and now - last_ckpt >= _construct_checkpoint_interval:
+                    try:
+                        with open(ckpt_path, 'wb') as f:
+                            pickle.dump({
+                                'landscapes': landscapes,
+                                'jobs': construction_jobs,
+                                'constructor_type': constructor_type,
+                                'sampler_kwargs': sampler_kwargs,
+                                'done_count': done_count,
+                                'ts': now,
+                            }, f)
+                        last_ckpt = now
+                        if _show_progress:
+                            _logger.info('checkpoint written: %s', ckpt_path)
+                    except Exception:
+                        pass
             else:
                 # heartbeat
                 if _show_progress:

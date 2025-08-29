@@ -104,7 +104,10 @@ class HierarchicalRJMCMCAligner:
                  _local_cpu_chains: int = (os.cpu_count()//10 if os.cpu_count()//10 > 1 else 1),
                  _meta_cpu_chains: int = os.cpu_count(),
                  _local_desc: str = "Local alignments",
-                 _show_progress: bool = False
+                 _show_progress: bool = False,
+                 _checkpoint_dir: str | None = None,
+                 _checkpoint_interval: int = 300,
+                 _resume_checkpoint: str | None = None
                  ) -> None:
         
         
@@ -122,6 +125,9 @@ class HierarchicalRJMCMCAligner:
         self._local_cpu_chains = _local_cpu_chains
         self._meta_cpu_chains = _meta_cpu_chains
         self._show_progress = _show_progress
+        self._checkpoint_dir = _checkpoint_dir
+        self._checkpoint_interval = _checkpoint_interval
+        self._resume_checkpoint = _resume_checkpoint
 
         # Update aligner parameters with directed flag.
         if 'directed' not in self.aligner_params:
@@ -258,9 +264,24 @@ class HierarchicalRJMCMCAligner:
         clusters = self._create_clusters()
 
         futures = []
+        # Resume support: load existing results if provided
+        completed: dict[int, Dict] = {}
+        if self._resume_checkpoint:
+            try:
+                import pickle as _pickle
+                with open(self._resume_checkpoint, 'rb') as f:
+                    ck = _pickle.load(f)
+                if isinstance(ck, dict) and 'local_results' in ck:
+                    for idx, res in ck['local_results'].items():
+                        if isinstance(idx, int):
+                            completed[idx] = res
+            except Exception:
+                pass
 
         # keep a stable index for each cluster (preserve order on output)
         for cluster_idx, cluster_info in enumerate(clusters):
+            if cluster_idx in completed:
+                continue
             graph_constructor = nx.DiGraph if self.directed else nx.Graph
             subgraphs = [graph_constructor() for _ in range(self.K)]
 
@@ -283,6 +304,9 @@ class HierarchicalRJMCMCAligner:
 
         # Prepare output container in input order
         results_in_order: List[Dict] = [dict(clusters[i]) for i in range(len(clusters))]
+        # seed any resumed results into output container
+        for idx, res in completed.items():
+            results_in_order[idx].update(res)
 
         # Map ObjectRef : cluster_idx.
         ref_to_idx: Dict[ray.ObjectRef, int] = {ref: i for i, ref in enumerate(futures)}
@@ -317,6 +341,25 @@ class HierarchicalRJMCMCAligner:
                 self.local_edges_traces[idx] = trace_edges
 
                 pbar.update(1)
+
+                # checkpoint locals after each result
+                if self._checkpoint_dir:
+                    try:
+                        import pickle as _pickle, time as _time
+                        os.makedirs(self._checkpoint_dir, exist_ok=True)
+                        path = os.path.join(self._checkpoint_dir, 'hier_local.ckpt.pkl')
+                        local_pack = {}
+                        for i, r in enumerate(results_in_order):
+                            if 'blueprint' in r:
+                                local_pack[i] = {
+                                    'blueprint': r['blueprint'],
+                                    'node_mapping': r.get('node_mapping'),
+                                    'node_order': r.get('node_order'),
+                                }
+                        with open(path, 'wb') as f:
+                            _pickle.dump({'local_results': local_pack, 'ts': _time.time()}, f)
+                    except Exception:
+                        pass
 
         return results_in_order
 
