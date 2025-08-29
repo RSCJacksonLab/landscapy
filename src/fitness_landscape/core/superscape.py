@@ -65,17 +65,32 @@ def _create_landscape_task(
     constructor_class: Union[FitnessLandscape, DirectedFitnessLandscape],
     sequences: Union[Path, ArrayAlignment, List[BaseNumpySequence]],
     fitness_layers: Dict[str, BaseFitnessLayer] = None,
+    _job_id: int | None = None,
+    _total_jobs: int | None = None,
+    _log_progress: bool = False,
     **kwargs: Any
 ) -> Union[FitnessLandscape, DirectedFitnessLandscape]:
     """
     A generalized Ray remote task that calls the `from_sequences` method
     of a specified landscape class.
     """
-    return constructor_class.from_sequences(
-        sequences=sequences,
-        fitness_layers=fitness_layers,
-        **kwargs
-    )
+    import logging as _logging, time as _time
+    _logger = _logging.getLogger('fitness_landscape')
+    if _log_progress:
+        _logger.info('[job %s/%s] start', _job_id, _total_jobs)
+    ts = _time.perf_counter()
+    try:
+        result = constructor_class.from_sequences(
+            sequences=sequences,
+            fitness_layers=fitness_layers,
+            **kwargs
+        )
+        if _log_progress:
+            _logger.info('[job %s/%s] complete in %.2fs', _job_id, _total_jobs, _time.perf_counter()-ts)
+        return result
+    except Exception as e:
+        msg = f"[job {_job_id}/{_total_jobs}] construction failed: {e}"
+        raise RuntimeError(msg) from e
 
 class FitnessSuperscape:
     """
@@ -100,6 +115,10 @@ class FitnessSuperscape:
         
         self.landscapes = landscapes
         self._landscape_graphs = self._extract_graphs(landscapes=self.landscapes)
+
+        # Ensure all graphs have per-node embeddings. If missing, compute a
+        # compact, length-invariant composition embedding from sequences.
+        self._ensure_node_embeddings(self._landscape_graphs)
 
         # Validate data types in the graph.
         self._validate_embeddings(self._landscape_graphs)
@@ -136,6 +155,70 @@ class FitnessSuperscape:
         # Capture self attribute latent landscape for safety. Can be recomputed with diff posterior prob cutoffs.
         self.latent_landscape = self.construct_latent_landscape(posterior_prob_cutoff=posterior_prob_cutoff)
 
+    @staticmethod
+    def _ensure_node_embeddings(graphs: list[Union[nx.Graph, nx.DiGraph]], *, alphabet: List[str] = PROT_20) -> None:
+        """
+        Attach fallback node embeddings if 'emb_arr' is missing.
+
+        Uses a simple composition vector over the provided alphabet (default PROT_20),
+        computed as the per-position mean of a (L, A) soft/hard representation.
+        This is length-invariant and robust for clustering.
+        """
+        A = len(alphabet)
+        alpha_index = {str(a).upper(): i for i, a in enumerate(alphabet)}
+
+        def comp_from_ungapped(arr: np.ndarray) -> np.ndarray:
+            x = np.asarray(arr, dtype=np.float64)
+            # Accept (L, A) or (L, A+1); drop gap if present
+            if x.ndim != 2:
+                return None
+            C = x.shape[1]
+            if C == A + 1:
+                x = x[:, :A]
+            if x.shape[1] != A:
+                return None
+            row_sum = x.sum(axis=1, keepdims=True)
+            row_sum[row_sum <= 0.0] = 1.0
+            x = x / row_sum
+            v = x.mean(axis=0)
+            s = float(v.sum())
+            return (v / s) if s > 0 else np.full(A, 1.0 / A)
+
+        def comp_from_sequence(seq) -> np.ndarray:
+            # SoftSequence: use ungapped posterior
+            if hasattr(seq, 'ungapped_arr'):
+                v = comp_from_ungapped(seq.ungapped_arr)
+                if v is not None:
+                    return v
+            # BaseNumpySequence: build frequency vector over alphabet
+            arr = getattr(seq, 'to_array', lambda: None)()
+            if arr is None:
+                return np.full(A, 1.0 / A)
+            counts = np.zeros(A, dtype=np.float64)
+            total = 0
+            for s in arr:
+                j = alpha_index.get(str(s).upper(), None)
+                if j is not None:
+                    counts[j] += 1.0
+                    total += 1
+            if total <= 0:
+                return np.full(A, 1.0 / A)
+            return counts / total
+
+        for G in graphs:
+            for _, data in G.nodes(data=True):
+                if 'emb_arr' in data and isinstance(data['emb_arr'], np.ndarray) and data['emb_arr'].ndim == 1:
+                    continue
+                # Try ungapped arrays first
+                if 'ungapped_arr' in data:
+                    emb = comp_from_ungapped(data['ungapped_arr'])
+                    if emb is not None:
+                        data['emb_arr'] = emb
+                        continue
+                # Fallback to sequence-based composition
+                if 'sequence' in data:
+                    data['emb_arr'] = comp_from_sequence(data['sequence'])
+
     def construct_latent_landscape(self,
                                    posterior_prob_cutoff: float = 0.2) -> Union[FitnessLandscape, DirectedFitnessLandscape]:
         """
@@ -157,7 +240,12 @@ class FitnessSuperscape:
             The constructed latent fitness landscape.
         """
         if not self._hierarchical_aligner.full_posterior_L:
-            raise RuntimeError("No posterior samples available to construct the landscape.")
+            # Fallback: use the deterministic result returned by run_alignment()
+            # This occurs when the meta-stage produced no edges / no posterior sampling.
+            # Build the latent landscape directly from the stored latent_graph and mappings.
+            graph = self.latent_graph
+            mappings = self._latent_mappings
+            return self._build_landscape_from_graph_and_mappings(graph, mappings)
 
         posterior_L = self._hierarchical_aligner.full_posterior_L
         posterior_mappings = self._hierarchical_aligner.full_posterior_mappings
@@ -206,9 +294,34 @@ class FitnessSuperscape:
             order = self._node_orders[k]
             for node_id in order:
                 data = L.graph.nodes[node_id]
-                if 'ungapped_arr' not in data:
-                    raise ValueError(f"Node {node_id!r} missing 'ungapped_arr' for superscape.")
-                all_ungapped_arrs.append(data['ungapped_arr'])
+                # Prefer precomputed 'ungapped_arr' but derive on-the-fly from sequence if missing
+                arr = data.get('ungapped_arr', None)
+                if arr is None:
+                    seq = data.get('sequence', None)
+                    if seq is None:
+                        raise ValueError(f"Node {node_id!r} missing 'sequence' for superscape.")
+                    # SoftSequence and BaseNumpySequence expose a robust ungapped_arr
+                    if hasattr(seq, 'ungapped_arr'):
+                        arr = seq.ungapped_arr
+                    else:
+                        # As a last resort, convert any available gapped_arr by dropping gap and renormalising
+                        gapped = data.get('gapped_arr', None)
+                        if gapped is not None:
+                            import numpy as _np
+                            g = _np.asarray(gapped, dtype=_np.float64)
+                            if g.ndim != 2 or g.shape[1] < 2:
+                                raise ValueError(f"Node {node_id!r} has invalid gapped_arr shape {g.shape}")
+                            aa = g[:, :-1]
+                            rs = aa.sum(axis=1, keepdims=True)
+                            rs[rs <= 0.0] = 1.0
+                            arr = aa / rs
+                        else:
+                            # Fall back to one-hot
+                            if hasattr(seq, 'to_one_hot'):
+                                arr = seq.to_one_hot()
+                            else:
+                                raise ValueError(f"Node {node_id!r} lacks ungapped/gapped arrays and to_one_hot")
+                all_ungapped_arrs.append(arr)
 
         all_lengths = [len(seq) for landscape in self.landscapes for seq in landscape.sequences]
         default_length = int(np.median(all_lengths)) if all_lengths else 1
@@ -229,7 +342,7 @@ class FitnessSuperscape:
             if len(contributor_indices) == 0:
                 uniform_probability = 1.0 / len(self.alphabet)
                 uniform_posterior = np.full((default_length, len(self.alphabet)), uniform_probability)
-                ambiguous_sequence = SoftSequence(uniform_posterior, self.alphabet)
+                ambiguous_sequence = SoftSequence(uniform_posterior, alphabet=self.alphabet)
                 latent_sequences.append(ambiguous_sequence)
                 gapped_arr = np.zeros((default_length, len(self.alphabet) + 1))
                 gapped_arr[:, :-1] = uniform_posterior
@@ -237,9 +350,10 @@ class FitnessSuperscape:
                 graph.nodes[latent_node_idx]['ungapped_arr'] = uniform_posterior
                 continue
 
-            ungapped_arrs_to_align = [all_ungapped_arrs[i] for i in contributor_indices]
+            ungapped_arrs_to_align = [np.ascontiguousarray(np.asarray(all_ungapped_arrs[i], dtype=np.float64)) for i in contributor_indices]
             contributor_probs = prob_col[contributor_indices]
-            aligned_arrays, score = align_soft_sequences(sequences=ungapped_arrs_to_align, alphabet=self.alphabet)
+            _res = align_soft_sequences(sequences=ungapped_arrs_to_align, alphabet=self.alphabet)
+            aligned_arrays = _res[0] if isinstance(_res, tuple) else _res
             aligned_tensor = np.array(aligned_arrays)
             total_prob_for_node = np.sum(contributor_probs) + 1e-12
             weighted_sum_posterior = np.einsum('i,ija->ja', contributor_probs, aligned_tensor)
@@ -364,14 +478,15 @@ class FitnessSuperscape:
                 # Handle cases where a latent node has no contributors in a sample
                 uniform_probability = 1.0 / len(self.alphabet)
                 uniform_posterior = np.full((default_length, len(self.alphabet)), uniform_probability)
-                ambiguous_sequence = SoftSequence(uniform_posterior, self.alphabet)
+                ambiguous_sequence = SoftSequence(uniform_posterior, alphabet=self.alphabet)
                 latent_sequences.append(ambiguous_sequence)
                 continue
 
             ungapped_arrs_to_align = [all_ungapped_arrs[i] for i in contributor_indices]
             contributor_probs = prob_col[contributor_indices]
 
-            aligned_arrays, _ = align_soft_sequences(sequences=ungapped_arrs_to_align, alphabet=self.alphabet)
+            _res = align_soft_sequences(sequences=[np.ascontiguousarray(np.asarray(a, dtype=np.float64)) for a in ungapped_arrs_to_align], alphabet=self.alphabet)
+            aligned_arrays = _res[0] if isinstance(_res, tuple) else _res
             aligned_tensor = np.array(aligned_arrays)
             
             total_prob_for_node = np.sum(contributor_probs) + 1e-12
@@ -642,12 +757,47 @@ class FitnessSuperscape:
             # Same base class to instantiate across all parallel runs.
             job['constructor_class'] = landscape_class
             
-            # Only request GPUs if the embedding domain is explicitly `plm`.
-            num_gpus = parent_gpus = 1 if job.get("embedding_domain") == "plm" else 0
+            # Only request GPUs if PLM embeddings are actually being computed.
+            wants_plm = job.get("embedding_domain") == "plm"
+            wants_compute = bool(job.get("_compute_phylo_embeddings", False) or job.get("_compute_embeddings", False))
+            num_gpus = 1 if (wants_plm and wants_compute) else 0
             futures.append(_create_landscape_task.options(num_gpus=num_gpus).remote(**job))
 
-        # Retrieve the results
-        landscapes = ray.get(futures)
+        # Retrieve the results with progress logging
+        import logging as _logging, time as _time
+        _logger = _logging.getLogger('fitness_landscape')
+        total = len(futures)
+        pending = set(futures)
+        done_count = 0
+        landscapes = [None] * total
+        ref_to_index = {ref: i for i, ref in enumerate(futures)}
+        t_last = _time.perf_counter()
+        try:
+            import psutil as _psutil  # optional
+        except Exception:
+            _psutil = None
+        while pending:
+            done, pending = ray.wait(list(pending), num_returns=1, timeout=30.0)
+            now = _time.perf_counter()
+            if done:
+                ref = done[0]
+                idx = ref_to_index[ref]
+                try:
+                    landscapes[idx] = ray.get(ref)
+                except Exception as e:
+                    raise
+                done_count += 1
+                if _show_progress:
+                    _logger.info('parallel progress: %d/%d completed', done_count, total)
+            else:
+                # heartbeat
+                if _show_progress:
+                    rss = ''
+                    if _psutil is not None:
+                        p = _psutil.Process()
+                        rss_bytes = p.memory_info().rss
+                        rss = f" rss={rss_bytes/1e9:.2f}GB"
+                    _logger.info('parallel heartbeat: %d/%d completed%s', done_count, total, rss)
 
         # Initialize the FitnessSuperscape with the final list of landscapes
         return cls(

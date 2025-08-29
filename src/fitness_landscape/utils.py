@@ -11,6 +11,68 @@ from softalign.soft_alignment import align_soft_sequences
 from ._const import ALPHABET_21, PROT_20
 from cogent3 import ArrayAlignment, make_aligned_seqs, ArrayAlignment 
 
+def sanitize_alignment(aln: ArrayAlignment,
+                       *,
+                       legal_amino_acids: list[str] | None = None,
+                       gap_char: str = '-') -> ArrayAlignment:
+    """
+    Sanitize an aligned protein FASTA by enforcing only canonical 20 amino acids
+    and the gap character. Any illegal or unknown symbol is replaced with a gap.
+
+    Parameters
+    ----------
+    aln : ArrayAlignment
+        The input alignment (protein sequences expected).
+    legal_amino_acids : list[str], optional
+        List of allowed amino acids. Defaults to the canonical 20.
+    gap_char : str, default='-'
+        The gap character to enforce. '.' is treated as a gap.
+
+    Ensures sequence IDs are unique by appending a numeric suffix when duplicates are found.
+
+    Returns
+    -------
+    ArrayAlignment
+        A new alignment object with illegal symbols replaced by gaps and all
+        residue letters uppercased.
+    """
+    if legal_amino_acids is None:
+        legal_amino_acids = list("ACDEFGHIKLMNPQRSTVWY")
+
+    legal = set(legal_amino_acids)
+    # include gap
+    legal_with_gap = legal | {gap_char}
+
+    def _clean_char(ch: str) -> str:
+        if ch == '.':
+            return gap_char
+        up = ch.upper()
+        return up if up in legal_with_gap else gap_char
+
+    # Build dict unique_name -> cleaned sequence
+    cleaned = {}
+    used_names: set[str] = set()
+
+    def _unique_name(name: str) -> str:
+        base = str(name).strip() or 'seq'
+        base = base.replace(' ', '_')
+        if base not in used_names:
+            used_names.add(base)
+            return base
+        i = 1
+        while f"{base}_{i}" in used_names:
+            i += 1
+        new = f"{base}_{i}"
+        used_names.add(new)
+        return new
+
+    for name in aln.names:
+        s = str(aln.get_gapped_seq(name))
+        unique = _unique_name(name)
+        cleaned[unique] = ''.join(_clean_char(c) for c in s)
+
+    return make_aligned_seqs(cleaned, moltype='protein')
+
 def cosine_similarity_matrix(A, B):
     """
     Computes cosine similarity between two matrices of vectors.
@@ -767,4 +829,3 @@ def check_full_hamming(landscape: 'FitnessLandscape',
         lex_perm=lex_perm,
         codes=codes
     )
-

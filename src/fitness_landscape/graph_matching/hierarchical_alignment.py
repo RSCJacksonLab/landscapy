@@ -109,7 +109,8 @@ class HierarchicalRJMCMCAligner:
         
         
         self.original_graphs = graphs
-        self.aligner_params = aligner_params
+        # Filter params to what RJMCMCAligner.__init__ accepts (drops private flags like _show_progress)
+        self.aligner_params = _filter_kwargs_for_init(RJMCMCAligner, dict(aligner_params))
         self.local_thresh = local_cluster_threshold
         self.global_thresh = global_bridge_threshold
         self.emb_key = emb_key
