@@ -53,6 +53,12 @@ def cli():
 @click.option('--log-file', required=False, type=click.Path(), help='Path to write a detailed log file for this run.')
 @click.option('--log-level', required=False, type=click.Choice(['DEBUG','INFO','WARNING','ERROR']), default='INFO', help='Log level for the detailed log file.')
 @click.option('--log-progress', is_flag=True, default=False, help='Enable verbose progress logging within constructors.')
+@click.option('--log-prefix', required=False, type=str, help='Basename for auto log filename when --log-file is not provided. Defaults to an informative, unique name.')
+
+# Checkpointing (enabled by default for CLI runs unless disabled via env)
+@click.option('--checkpoint-dir', required=False, type=click.Path(), help='Directory to write construction/alignment checkpoints. Defaults to <output_dir>/<output_stem>_ckpt.')
+@click.option('--checkpoint-interval', required=False, type=int, default=300, help='Checkpoint interval in seconds during parallel construction.')
+@click.option('--resume-checkpoint', required=False, type=click.Path(), help='Resume from a previous construction checkpoint file (superscape_construction.ckpt.pkl or hier_local.ckpt.pkl).')
 
 # RJMCMC cpu chains
 @click.option('--meta-cpu-chains', required=False, type=int, default=os.cpu_count(), help='Number of CPU chains to use for the meta-alignment step in hierarchical alignment.')
@@ -84,13 +90,28 @@ def phylo_superscape(sequences,
                      sequential_construction,
                      log_file,
                      log_level,
-                     log_progress):
+                     log_progress,
+                     log_prefix,
+                     checkpoint_dir,
+                     checkpoint_interval,
+                     resume_checkpoint):
     """
     Constructs and aligns phylogenetic fitness landscapes in parallel.
     """
     
     # Configure logging if requested
     logger = logging.getLogger('fitness_landscape')
+    # If no explicit log file, derive an informative unique name next to the output path
+    if not log_file:
+        ts = time.strftime('%Y%m%d-%H%M%S')
+        seq_base = os.path.basename(sequences.rstrip('/'))
+        out_p = Path(output)
+        base_dir = out_p.parent
+        default_prefix = log_prefix or 'phylo_superscape'
+        # Include directed flag, sequence source, and PID for uniqueness
+        flavor = 'directed' if directed_landscape else 'undirected'
+        log_name = f"{default_prefix}_{flavor}_{seq_base}_{ts}_{os.getpid()}.log"
+        log_file = str(base_dir / log_name)
     if log_file:
         logger.setLevel(getattr(logging, log_level))
         fh = logging.FileHandler(log_file)
@@ -177,7 +198,20 @@ def phylo_superscape(sequences,
         "cosine_anchor_threshold": anchor_cosine_threshold,
         "seed": seed,
         "local_cpu_chains": local_cpu_chains,
+        # propagate checkpointing into hierarchical aligner
+        "_checkpoint_dir": None,  # filled below
+        "_checkpoint_interval": checkpoint_interval,
+        "_resume_checkpoint": resume_checkpoint,
     }
+
+    # Default checkpoint directory (for CLI runs) if not explicitly provided
+    if checkpoint_dir:
+        ckpt_dir = Path(checkpoint_dir)
+    else:
+        out_p = Path(output)
+        ckpt_dir = out_p.parent / f"{out_p.stem}_ckpt"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    sampler_kwargs["_checkpoint_dir"] = str(ckpt_dir)
 
     # Optionally avoid Ray during per-alignment construction (stability for IQ-TREE)
     if sequential_construction:
@@ -211,6 +245,9 @@ def phylo_superscape(sequences,
             construction_jobs=construction_jobs,
             _meta_cpu_chains=meta_cpu_chains,
             _show_progress=log_progress,
+            _construct_checkpoint_dir=str(ckpt_dir),
+            _construct_checkpoint_interval=checkpoint_interval,
+            _construct_resume_checkpoint=resume_checkpoint,
             **sampler_kwargs
         )
 
