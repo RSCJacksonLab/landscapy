@@ -65,7 +65,8 @@ class ASRConstructor:
                 ancestral_states: Table = None,
                 model_fitting: bool = False,
                 replacement_matrix: List = ['NQ.pfam'],
-                _reconstruct_ancestral_states=True) -> None:
+                _reconstruct_ancestral_states=True,
+                _log_progress: bool = False) -> None:
 
         # Load alignment
         if isinstance(alignment, Path):
@@ -80,6 +81,7 @@ class ASRConstructor:
         
         # Construct alignment header list.
         self.tip_names = self.alignment.names
+        self._log_progress = _log_progress
 
         # Construct boolean gap alignment.
         self._boolean_gap_alignment = self.alignment.get_gap_array()
@@ -139,6 +141,17 @@ class ASRConstructor:
         if not hasattr(self, 'alignment'):
             raise ValueError('expected alignment attribute.')
         
+        # Reduce thread contention for external libs (IQ-TREE, BLAS) inside Ray workers
+        import os as _os
+        _os.environ.setdefault('OMP_NUM_THREADS', '1')
+        _os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+        _os.environ.setdefault('MKL_NUM_THREADS', '1')
+        _os.environ.setdefault('NUMEXPR_NUM_THREADS', '1')
+
+        import logging as _logging
+        _logger = _logging.getLogger('fitness_landscape')
+        if self._log_progress:
+            _logger.info('ASR.build_tree: start (models=%s, fit=%s)', replacement_matrix, model_fitting)
         if _model_override is not None:
             # String necessary - not `Model` class.
             model = _model_override
@@ -154,11 +167,72 @@ class ASRConstructor:
                 raise ValueError('Expected only single replacement matrix.')
             model = Model(AaModel(replacement_matrix[0]))
 
-        phylogenetic_tree = piqtree.build_tree(
-            self.alignment, 
-            model
-        )
+        # Try building the tree; on failure, fall back progressively
+        # Run IQ-TREE in an isolated working directory to avoid file collisions across workers.
+        # If the environment variable 'FITNESS_LANDSCAPE_IQTREE_LOG_DIR' is set, we create
+        # a persistent subdirectory there and keep logs; otherwise we use a TemporaryDirectory.
+        import tempfile as _tempfile
+        import contextlib as _ctx
+        import os as _os2
+        import time as _time
+        import uuid as _uuid
+
+        @_ctx.contextmanager
+        def _isolated_workdir():
+            cwd = _os2.getcwd()
+            base = _os2.environ.get('FITNESS_LANDSCAPE_IQTREE_LOG_DIR', '').strip()
+            if base:
+                # Persistent log dir
+                _os2.makedirs(base, exist_ok=True)
+                sub = _os2.path.join(base, f"iqtree_job_{int(_time.time())}_{_uuid.uuid4().hex}")
+                _os2.makedirs(sub, exist_ok=True)
+                _os2.environ.setdefault('IQTREE_CACHEDIR', sub)
+                _os2.chdir(sub)
+                try:
+                    yield sub
+                finally:
+                    _os2.chdir(cwd)
+            else:
+                # Ephemeral temp dir (auto-removed on exit)
+                with _tempfile.TemporaryDirectory(prefix="iqtree_job_") as td:
+                    _os2.environ.setdefault('IQTREE_CACHEDIR', td)
+                    _os2.chdir(td)
+                    try:
+                        yield td
+                    finally:
+                        _os2.chdir(cwd)
+
+        def _try_build(_model, *_):
+            with _isolated_workdir():
+                return piqtree.build_tree(self.alignment, _model)
+
+        try:
+            phylogenetic_tree = _try_build(model)
+        except Exception as e:
+            # Fallback 1: if model_fitting was requested or multiple models provided,
+            # retry with first provided matrix without fitting.
+            try:
+                fallback_model = None
+                if replacement_matrix:
+                    # Accept both plain strings or Model(AaModel(...)) forms
+                    first = replacement_matrix[0]
+                    fallback_model = Model(AaModel(first)) if not isinstance(first, Model) else first
+                else:
+                    fallback_model = Model(AaModel('LG'))
+                phylogenetic_tree = _try_build(fallback_model)
+            except Exception as e2:
+                # Provide actionable error to user
+                raise RuntimeError(
+                    "Failed to build phylogenetic tree via IQ-TREE (piqtree). "
+                    "Tried model fitting and a simple fallback model. "
+                    "Consider: (1) reducing threads (OMP_NUM_THREADS=1), "
+                    "(2) providing a precomputed tree to ASRConstructor, or "
+                    "(3) using model_fitting=False with a single well-supported matrix (e.g., ['LG'])."
+                ) from e2
+
         self.phylogenetic_tree = phylogenetic_tree
+        if self._log_progress:
+            _logger.info('ASR.build_tree: complete')
 
     def reconstruct_ancestral_states(self,
                                     model_name: str = "WG01") -> None: #Default to WAG
@@ -171,10 +245,16 @@ class ASRConstructor:
         model_name : str, default=`WG01`
             The name of the substitution model. WG01 denotes the WAG matrix.
         """
+        import logging as _logging
+        _logger = _logging.getLogger('fitness_landscape')
+        if self._log_progress:
+            _logger.info('ASR.reconstruct_ancestral_states: start (model=%s)', model_name)
         model_app = get_app("model", model_name, tree=self.phylogenetic_tree)
         model_result = model_app(self.alignment)
         asr_app = get_app("ancestral_states")
         self.asr_posterior_arr = asr_app(model_result)
+        if self._log_progress:
+            _logger.info('ASR.reconstruct_ancestral_states: complete')
 
     def _two_state_transition_probs(self,
                                     branch_length: float,
@@ -319,6 +399,10 @@ class ASRConstructor:
         if graph_type != 'undirected' and graph_type != 'directed':
             raise ValueError(f"Expected `graph_type` parameter to be `directed` or `undirected`, found {graph_type}")
         
+        import logging as _logging
+        _logger = _logging.getLogger('fitness_landscape')
+        if self._log_progress:
+            _logger.info('ASR.construct_dag: start (graph_type=%s)', graph_type)
         G = (nx.Graph() if graph_type == 'undirected' else nx.DiGraph())
         
         for child, parent in self.phylogenetic_tree.child_parent_map().items():
@@ -371,4 +455,6 @@ class ASRConstructor:
             G.nodes[anc].update(
                 sequence=soft_seq,
                 gapped_arr=gapped_post,)
+        if self._log_progress:
+            _logger.info('ASR.construct_dag: complete (nodes=%d, edges=%d)', G.number_of_nodes(), G.number_of_edges())
         return G

@@ -77,7 +77,11 @@ def _score_pair(i, j, seq_i, seq_j, tau, Q):
 
     Ai = seq_i.posterior if isinstance(seq_i, SoftSequence) else seq_i.to_one_hot()
     Aj = seq_j.posterior if isinstance(seq_j, SoftSequence) else seq_j.to_one_hot()
-    aligned, _ = align_soft_sequences(sequences=[Ai, Aj], alphabet=PROT_20)
+    # Ensure float inputs for stability in softalign
+    Ai = np.ascontiguousarray(np.asarray(Ai, dtype=np.float64))
+    Aj = np.ascontiguousarray(np.asarray(Aj, dtype=np.float64))
+    _res = align_soft_sequences(sequences=[Ai, Aj], alphabet=PROT_20)
+    aligned = _res[0] if isinstance(_res, tuple) else _res
     score = calculate_gapped_soft_score(aligned_seq1=aligned[0], aligned_seq2=aligned[1], q=Q)
     
     return i, j, float(np.exp(score / tau))

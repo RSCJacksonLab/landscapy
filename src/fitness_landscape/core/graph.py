@@ -587,8 +587,8 @@ def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
         nx.set_edge_attributes(G, { (u, v): float(-np.log(max(d["distance"] / max(L, 1), eps)))
                                     for u, v, d in G.edges(data=True) }, "sim")
     # Attach edge attributes - ONLY if 20 amino acids.
-    else:
-        compute_edge_mutations_star(G=G)
+    # else:
+    #     compute_edge_mutations_star(G=G)
 
     return G
 
@@ -744,9 +744,9 @@ def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
             nx.set_edge_attributes(G, { (u, v): float(-np.log(max(h / max(L, 1), eps)))
                                         for (u, v), h in min_hamming.items() }, "sim")
 
-    else:
-        # Compute exat Hamming distances.
-        compute_edge_mutations_star(G=G)
+    # else:
+    #     # Compute exat Hamming distances.
+    #     compute_edge_mutations_star(G=G)
     return G
 
 def create_knn_graph(sequences: List[BaseNumpySequence],
@@ -922,8 +922,8 @@ def create_tda_graph(sequences: List[BaseNumpySequence],
 
     
     # Attach edge attributes.    
-    if all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for seq in sequences):
-        compute_edge_mutations_star(G=G)
+    # if all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for seq in sequences):
+    #     compute_edge_mutations_star(G=G)
     return G
 
 def _reweight_graph_by_simplices(G: nx.Graph,
@@ -1115,13 +1115,14 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         G.nodes[i]['sequence'] = seq
         
     # Attach edge attributes.    
-    if all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for seq in sequences):
-        compute_edge_mutations_star(G=G)
+    # if all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for seq in sequences):
+    #     compute_edge_mutations_star(G=G)
     return G
 
 def create_phylo_graph(sequences: Union[Path, ArrayAlignment],
                        replacement_matrix: List[str] = ['LG'],
-                       model_fitting: bool = True) -> nx.DiGraph:
+                       model_fitting: bool = True,
+                       _log_progress: bool = False) -> nx.DiGraph:
     """
     Factory function to create an undirected graph using phylogenetic
     inference and ancestral sequence reconstruction (with an 
@@ -1148,12 +1149,13 @@ def create_phylo_graph(sequences: Union[Path, ArrayAlignment],
     """
     constructor = ASRConstructor(sequences,
                                  replacement_matrix = replacement_matrix,
-                                 model_fitting = model_fitting)
+                                 model_fitting = model_fitting,
+                                 _log_progress=_log_progress)
     
     graph = constructor.construct_dag(graph_type='undirected')
     
     # Attach edge attributes.    
-    compute_edge_mutations_star(G=graph)
+    compute_edge_mutations_star(G=graph, _log_progress=_log_progress)
     return graph
 
 # Remote ray function for evol alignment.
@@ -1162,7 +1164,11 @@ def _score_pair(i, j, seq_i, seq_j, tau, Q):
 
     Ai = seq_i.posterior if isinstance(seq_i, SoftSequence) else seq_i.to_one_hot()
     Aj = seq_j.posterior if isinstance(seq_j, SoftSequence) else seq_j.to_one_hot()
-    aligned, _ = align_soft_sequences(sequences=[Ai, Aj], alphabet=PROT_20)
+    # Ensure float inputs for stability in softalign
+    Ai = np.ascontiguousarray(np.asarray(Ai, dtype=np.float64))
+    Aj = np.ascontiguousarray(np.asarray(Aj, dtype=np.float64))
+    _res = align_soft_sequences(sequences=[Ai, Aj], alphabet=PROT_20)
+    aligned = _res[0] if isinstance(_res, tuple) else _res
     score = calculate_gapped_soft_score(aligned_seq1=aligned[0], aligned_seq2=aligned[1], q=Q)
     
     return i, j, float(np.exp(score / tau))
@@ -1337,8 +1343,8 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         graph.nodes[i]['sequence'] = seq
 
     # Attach edge attributes.    
-    if all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for seq in sequences):
-        compute_edge_mutations_star(G=graph)
+    # if all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for seq in sequences):
+    #     compute_edge_mutations_star(G=graph)
     return graph
     
 def expected_hamming_from_aligned(aligned_or_A: Sequence[np.ndarray] | np.ndarray,
@@ -1501,14 +1507,43 @@ def _ensure_gapped_last(arr: np.ndarray) -> np.ndarray:
 # Ray parallel workes
 @ray.remote(num_cpus=1)
 def _star_block(u, neighbors, seq_u, seqs_v, alphabet, chunk_size, eps):
+    # Limit thread usage inside each Ray worker to avoid oversubscription
+    import os as _os
+    _os.environ.setdefault('OMP_NUM_THREADS', '1')
+    _os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+    _os.environ.setdefault('MKL_NUM_THREADS', '1')
+    _os.environ.setdefault('NUMEXPR_NUM_THREADS', '1')
+
+    A = len(alphabet)
+    def _sanitize(arr: np.ndarray) -> np.ndarray:
+        x = np.ascontiguousarray(np.asarray(arr, dtype=np.float64))
+        # If gapped channel included, drop it for alignment with ungapped alphabet
+        if x.ndim == 2 and x.shape[1] == A + 1:
+            x = x[:, :A]
+        if x.ndim != 2 or x.shape[1] != A:
+            raise ValueError(f"Expected (L,{A}) array for alignment; got {x.shape}")
+        # Replace NaNs and renormalise rows to sum 1
+        x = np.where(np.isnan(x), 0.0, x)
+        row_sum = x.sum(axis=1, keepdims=True)
+        zero_mask = (row_sum <= 0.0)
+        if np.any(zero_mask):
+            x[zero_mask, :] = 1.0 / A
+            row_sum[zero_mask] = 1.0
+        x = x / row_sum
+        return x
+
     set_w, set_d, set_s = {}, {}, {}
-    Pu = seq_u.ungapped_arr
+    Pu = _sanitize(seq_u.ungapped_arr)
     def chunks(lst, k):
-        if not k: yield lst; return
+        if not k:
+            k = 8
         for i in range(0, len(lst), k): yield lst[i:i+k]
     for chunk_ids in chunks(list(range(len(neighbors))), chunk_size):
-        seqs = [Pu] + [seqs_v[i].ungapped_arr for i in chunk_ids]
-        aligned, _ = align_soft_sequences(sequences=seqs, alphabet=alphabet)
+        seqs = [Pu] + [_sanitize(seqs_v[i].ungapped_arr) for i in chunk_ids]
+        # Cast to float64 contiguous to avoid dtype issues in softalign
+        seqs = [np.ascontiguousarray(np.asarray(s, dtype=np.float64)) for s in seqs]
+        _res = align_soft_sequences(sequences=seqs, alphabet=alphabet)
+        aligned = _res[0] if isinstance(_res, tuple) else _res
         Au = np.asarray(aligned[0])
         for off, idx in enumerate(chunk_ids, start=1):
             v = neighbors[idx]
@@ -1522,13 +1557,15 @@ def _star_block(u, neighbors, seq_u, seqs_v, alphabet, chunk_size, eps):
 def compute_edge_mutations_star(G: nx.Graph | nx.DiGraph,
                                 *,
                                 alphabet: List = PROT_20,
-                                chunk_size: Optional[int] = None,
-                                eps: float = 1e-12) -> None:
+                                chunk_size: Optional[int] = 8,
+                                eps: float = 1e-12,
+                                _log_progress: bool = False) -> None:
     """
-    Function to compute the expected Hamming distance for each edge
-    in a graph via star subgraph computation. Sets edge attributes in place. 
-    The complexity is approximately sum_u cost(align([u] + N_u_chunk)).
-    Runs in parallel using Ray orchestration over edges.
+    Compute expected Hamming distance per edge using star subgraphs, sequentially.
+
+    This sequential implementation avoids Ray workers to mitigate native segfaults
+    in highly parallel soft alignment. It preserves chunked star alignment to 
+    reduce redundant work and memory usage.
 
     Parameters
     ----------
@@ -1536,29 +1573,66 @@ def compute_edge_mutations_star(G: nx.Graph | nx.DiGraph,
         The graph to compute expected Hamming distances for.
     
     alphabet : List, default=PROT_20
-        The alphabet used for alignment. Should be PROT_20 or a PAML alphabet.
+        The ungapped alphabet used for alignment.
 
-    chunk_size : Optional[int], default=None
-        If set, process neighbors in chunks of this size to save memory.
-        If None, process all neighbors at once.
+    chunk_size : Optional[int], default=8
+        Process neighbors in chunks of this size to reduce memory. If falsy, uses 8.
     
     eps : float, default=1e-12
         Small value to avoid division by zero in normalization.
     """
-    tasks = []
-    for u in G.nodes():
-        nbrs = [v for v in G.neighbors(u) if (u < v) or G.is_directed()]  # avoid dup in undirected
-        if not nbrs: continue
-        seqs_v = [G.nodes[v]['sequence'] for v in nbrs]
-        tasks.append(_star_block.remote(u, nbrs, G.nodes[u]['sequence'], seqs_v, alphabet, chunk_size, eps))
-    if not tasks: return
-    # reduce
+    A = len(alphabet)
+
+    def _sanitize(arr: np.ndarray) -> np.ndarray:
+        x = np.ascontiguousarray(np.asarray(arr, dtype=np.float64))
+        if x.ndim == 2 and x.shape[1] == A + 1:
+            x = x[:, :A]
+        if x.ndim != 2 or x.shape[1] != A:
+            raise ValueError(f"Expected (L,{A}) array for alignment; got {x.shape}")
+        x = np.where(np.isnan(x), 0.0, x)
+        row_sum = x.sum(axis=1, keepdims=True)
+        zero_mask = (row_sum <= 0.0)
+        if np.any(zero_mask):
+            x[zero_mask, :] = 1.0 / A
+            row_sum[zero_mask] = 1.0
+        x = x / row_sum
+        return x
+
+    def _chunks(lst, k):
+        k = 8 if not k or k <= 0 else k
+        for i in range(0, len(lst), k):
+            yield lst[i:i+k]
+
+    import logging as _logging
+    _logger = _logging.getLogger('fitness_landscape')
+    if _log_progress:
+        _logger.info('compute_edge_mutations_star: start (nodes=%d, edges=%d, chunk=%s)', G.number_of_nodes(), G.number_of_edges(), chunk_size)
     set_w, set_d, set_s = {}, {}, {}
-    for W, D, S in ray.get(tasks):
-        set_w.update(W); set_d.update(D); set_s.update(S)
-    nx.set_edge_attributes(G, set_w, "weight")
-    nx.set_edge_attributes(G, set_d, "distance")
-    nx.set_edge_attributes(G, set_s, "sim")
+
+    for u in G.nodes():
+        # Avoid duplicate pairs in undirected graphs
+        nbrs = [v for v in G.neighbors(u) if (u < v) or G.is_directed()]
+        if not nbrs:
+            continue
+        Pu = _sanitize(G.nodes[u]['sequence'].ungapped_arr)
+        for chunk_ids in _chunks(list(range(len(nbrs))), chunk_size):
+            seqs = [Pu] + [_sanitize(G.nodes[nbrs[i]]['sequence'].ungapped_arr) for i in chunk_ids]
+            aligned, _ = align_soft_sequences(sequences=seqs, alphabet=alphabet)
+            Au = np.asarray(aligned[0])
+            for off, idx in enumerate(chunk_ids, start=1):
+                v = nbrs[idx]
+                Av = np.asarray(aligned[off])
+                mut, eff, dist = expected_hamming_from_aligned(Au, Av)
+                set_w[(u, v)] = float(mut)
+                set_d[(u, v)] = float(dist)
+                set_s[(u, v)] = float(-np.log(max(dist, eps)))
+
+    if set_w:
+        nx.set_edge_attributes(G, set_w, "weight")
+        nx.set_edge_attributes(G, set_d, "distance")
+        nx.set_edge_attributes(G, set_s, "sim")
+    if _log_progress:
+        _logger.info('compute_edge_mutations_star: complete')
 
 def attach_expected_hamming_to_edges(G: nx.Graph | nx.DiGraph,
                                      aligned: Sequence[np.ndarray],

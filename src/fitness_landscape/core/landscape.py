@@ -873,9 +873,10 @@ class FitnessLandscape:
                                                                     batch_size=batch_size)
                 elif embedding_domain == 'ohe':
                     embeddings, _ = _encode_multiallele(sequences)
-                
+                # leave as computed
             else:
-                raise ValueError(f"Expected `embedding_domain` to be either `plm` or `ohe`, found {embedding_domain}")
+                # Allow proceeding without embeddings; Superscape can attach fallbacks later
+                embeddings = None
 
             final_embeddings = embeddings if attach_embeddings else None
             
@@ -1266,10 +1267,18 @@ class DirectedFitnessLandscape(FitnessLandscape):
                     raise ValueError(f"Embeddings expected embeddings shape {len(sequences)} in dim 0, found {embeddings.shape[0]}. Forgot ancestral sequences in precomputed embeddings?")
             
             elif _compute_phylo_embeddings:
-                embeddings = _compute_embeddings_from_sequences(sequences,
-                                                                model_name=model_name,
-                                                                device=device,
-                                                                batch_size=batch_size)
+                if embedding_domain == 'plm':
+                    embeddings = _compute_embeddings_from_sequences(sequences,
+                                                                    model_name=model_name,
+                                                                    device=device,
+                                                                    batch_size=batch_size)
+                elif embedding_domain == 'ohe':
+                    embeddings, _ = _encode_multiallele(sequences)
+                else:
+                    raise ValueError(f"embedding_domain must be 'plm' or 'ohe', got {embedding_domain!r}")
+            else:
+                # Allow proceeding without embeddings; Superscape can attach fallbacks later
+                embeddings = None
         
             final_embeddings = embeddings if attach_embeddings else None
             
