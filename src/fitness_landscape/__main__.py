@@ -7,7 +7,7 @@ import logging
 import time
 from fitness_landscape.core.superscape import FitnessSuperscape
 from fitness_landscape.core.landscape import DirectedFitnessLandscape
-from fitness_landscape.utils import moving_window_alignment
+from fitness_landscape.utils import moving_window_alignment, sanitize_alignment
 from fitness_landscape.graph_matching.latent_alignment import BernoulliBeta
 from cogent3 import load_aligned_seqs
 import pickle
@@ -113,6 +113,7 @@ def phylo_superscape(sequences,
         for fasta_file in fasta_files:
             alignment_path = os.path.join(sequences, fasta_file)
             alignment = load_aligned_seqs(alignment_path, moltype='protein')
+            alignment = sanitize_alignment(alignment)
             logger.info(f'Loaded alignment from {alignment_path}')
             
             if fan_alignment:
@@ -124,6 +125,7 @@ def phylo_superscape(sequences,
 
     else: 
         alignment = load_aligned_seqs(sequences, moltype='protein')
+        alignment = sanitize_alignment(alignment)
         logger.info(f'Loaded alignment from {sequences}')
         if fan_alignment:
             if not all([fan_alignment_window, fan_alignment_overlap]):

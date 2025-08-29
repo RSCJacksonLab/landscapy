@@ -28,6 +28,7 @@ from .._const import (
     PROT_20,
     ALPHABET_21
 )
+from ..utils import sanitize_alignment
 
 class ASRConstructor:
     """
@@ -79,6 +80,8 @@ class ASRConstructor:
         else:
             raise ValueError("Alignment must be either Path or Alignment.")
         
+        # Sanitize to canonical AA + gap
+        self.alignment = sanitize_alignment(self.alignment)
         # Construct alignment header list.
         self.tip_names = self.alignment.names
         self._log_progress = _log_progress

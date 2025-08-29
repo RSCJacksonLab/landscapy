@@ -852,7 +852,9 @@ class FitnessLandscape:
         if graph_type == 'phylogenetic':
 
             # Keep alignment for phylo and ASR.
-            alignment = load_aligned_seqs(sequences) if isinstance(sequences, Path) else sequences
+            alignment = load_aligned_seqs(sequences, moltype='protein') if isinstance(sequences, Path) else sequences
+            from ..utils import sanitize_alignment
+            alignment = sanitize_alignment(alignment)
 
             # Reconstruct phylogeny and ancestral states.
             graph = create_phylo_graph(alignment, **kwargs)
@@ -1253,7 +1255,9 @@ class DirectedFitnessLandscape(FitnessLandscape):
         if digraph_type == 'phylogenetic':
 
             # Keep alignment for phylo and ASR.
-            alignment = load_aligned_seqs(sequences) if isinstance(sequences, Path) else sequences
+            alignment = load_aligned_seqs(sequences, moltype='protein') if isinstance(sequences, Path) else sequences
+            from ..utils import sanitize_alignment
+            alignment = sanitize_alignment(alignment)
 
             # Reconstruct phylogeny and ancestral states.
             digraph = create_phylo_digraph(alignment, **kwargs)
