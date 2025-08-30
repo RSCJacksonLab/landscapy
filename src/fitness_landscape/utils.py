@@ -597,24 +597,60 @@ def fasta_to_prot20_sequences(filepath: str | Path) -> List[BaseNumpySequence]:
         List of ungapped, PROT_20 sequences.
     """
     p = Path(filepath)
+    # Pre-validate raw characters: forbid any non-canonical residues
+    try:
+        raw_chars: set[str] = set()
+        with open(p, 'r') as fh:
+            for line in fh:
+                if not line or line.startswith('>'):
+                    continue
+                raw_chars.update(ch.upper() for ch in line.strip())
+        # ignore common gap/dot placeholders
+        raw_chars.discard('-')
+        raw_chars.discard('.')
+        illegal = {ch for ch in raw_chars if ch and ch not in set(PROT_20)}
+        if illegal:
+            raise ValueError(f"Non-canonical residues {sorted(illegal)} present in FASTA; expected only PROT_20: {PROT_20}")
+    except FileNotFoundError:
+        raise
     # Try alignment path first
     try:
         aln = load_aligned_seqs(str(p), moltype='protein')
         aln = sanitize_alignment(aln)
         return alignment_to_base_numpy_sequences(aln, alphabet=PROT_20)
     except Exception:
-        # Fallback to unaligned sequences
-        from .core.sequence import read_from_fasta
-        seqs = read_from_fasta(p, moltype='protein')
+        # Fallback to unaligned: manually parse FASTA to allow stripping '.'/'-'
         legal = set(PROT_20)
+        names: list[str] = []
+        seqs_raw: list[str] = []
+        current_name = None
+        current_seq = []
+        with open(p, 'r') as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith('>'):
+                    if current_name is not None:
+                        names.append(current_name)
+                        seqs_raw.append(''.join(current_seq))
+                    current_name = line[1:].strip() or 'seq'
+                    current_seq = []
+                else:
+                    current_seq.append(line)
+            # finalize last
+            if current_name is not None:
+                names.append(current_name)
+                seqs_raw.append(''.join(current_seq))
+
         out: list[BaseNumpySequence] = []
-        for s in seqs:
-            s_id = getattr(s, 'id', None)
-            s_str = s.to_str().replace('-', '').replace('.', '')
-            bad = {ch for ch in set(s_str.upper()) if ch not in legal}
+        for name, s in zip(names, seqs_raw):
+            # strip gaps/dots and uppercase
+            s_str = s.replace('-', '').replace('.', '').upper()
+            bad = {ch for ch in set(s_str) if ch not in legal}
             if bad:
-                raise ValueError(f"Non-canonical residues {sorted(bad)} found in sequence {s_id!r}; expected only PROT_20: {PROT_20}")
-            out.append(BaseNumpySequence.from_string(s_str, alphabet=PROT_20, moltype='protein', sequence_id=s_id))
+                raise ValueError(f"Non-canonical residues {sorted(bad)} found in sequence {name!r}; expected only PROT_20: {PROT_20}")
+            out.append(BaseNumpySequence.from_string(s_str, alphabet=PROT_20, moltype='protein', sequence_id=name))
         return out
 
 def moving_window_alignment(alignment: ArrayAlignment,

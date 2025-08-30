@@ -1247,6 +1247,10 @@ class DirectedFitnessLandscape(FitnessLandscape):
             The constructed directed fitness landscape object.
         """
 
+        # Allow alias 'digraph' to match other entry points
+        if 'digraph' in kwargs:
+            digraph_type = str(kwargs.pop('digraph'))
+
         embedding_based_digraphs = {'diffusion_nq'}
 
         # pop kwargs that will break constructor_kwargs
