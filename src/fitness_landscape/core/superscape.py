@@ -46,6 +46,18 @@ import torch
 import pickle
 
 
+class NullAligner:
+    """
+    Lightweight, top-level placeholder aligner used when a Superscape
+    is built from a single landscape and no hierarchical alignment is
+    required. Exists at module scope so instances are picklable.
+    """
+    def __init__(self, *, directed: bool = False):
+        self.full_posterior_L = []
+        self.full_posterior_mappings = []
+        self.directed = directed
+
+
 class EmbNodeModel(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     emb_arr: np.ndarray = Field(..., repr=False)
@@ -124,6 +136,35 @@ class FitnessSuperscape:
         self._validate_embeddings(self._landscape_graphs)
         # Validate and set the common alphabet across all landscapes.
         self.alphabet = self._validate_and_set_alphabet(self.landscapes)
+
+        # Fast-path: if there is only one landscape, skip hierarchical alignment
+        # and treat the single graph as the latent graph with identity mapping.
+        if len(self._landscape_graphs) == 1:
+            G0 = self._landscape_graphs[0]
+            # identity mapping from original nodes to latent nodes
+            n0 = G0.number_of_nodes()
+            import numpy as _np
+            self.latent_graph = G0.copy()
+            self._latent_mappings = {0: _np.eye(n0, dtype=float)}
+
+            # Provide a minimal, picklable aligner-like object
+            import networkx as _nx
+            self._hierarchical_aligner = NullAligner(directed=isinstance(G0, _nx.DiGraph))
+            # empty traces
+            self.local_energy_traces = {}
+            self.local_nl_traces = {}
+            self.local_edges_traces = {}
+            self.meta_energy_trace = []
+            self.meta_nl_trace = []
+            self.meta_edges_trace = []
+
+            # Canonical node order and back refs
+            self._node_orders = [list(self.landscapes[0].graph.nodes())]
+            self.back_reference = [(0, node_id) for node_id in self._node_orders[0]]
+
+            # Construct latent landscape object and return
+            self.latent_landscape = self.construct_latent_landscape(posterior_prob_cutoff=posterior_prob_cutoff)
+            return
 
         # Run RJMCMC sampling using the hierachical aligner (scales in linear time).
         # and not the RJMCMC aligner (scales in O(N^2K^2) time).
