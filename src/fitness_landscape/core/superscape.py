@@ -46,6 +46,18 @@ import torch
 import pickle
 
 
+class NullAligner:
+    """
+    Lightweight, top-level placeholder aligner used when a Superscape
+    is built from a single landscape and no hierarchical alignment is
+    required. Exists at module scope so instances are picklable.
+    """
+    def __init__(self, *, directed: bool = False):
+        self.full_posterior_L = []
+        self.full_posterior_mappings = []
+        self.directed = directed
+
+
 class EmbNodeModel(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     emb_arr: np.ndarray = Field(..., repr=False)
@@ -124,6 +136,35 @@ class FitnessSuperscape:
         self._validate_embeddings(self._landscape_graphs)
         # Validate and set the common alphabet across all landscapes.
         self.alphabet = self._validate_and_set_alphabet(self.landscapes)
+
+        # Fast-path: if there is only one landscape, skip hierarchical alignment
+        # and treat the single graph as the latent graph with identity mapping.
+        if len(self._landscape_graphs) == 1:
+            G0 = self._landscape_graphs[0]
+            # identity mapping from original nodes to latent nodes
+            n0 = G0.number_of_nodes()
+            import numpy as _np
+            self.latent_graph = G0.copy()
+            self._latent_mappings = {0: _np.eye(n0, dtype=float)}
+
+            # Provide a minimal, picklable aligner-like object
+            import networkx as _nx
+            self._hierarchical_aligner = NullAligner(directed=isinstance(G0, _nx.DiGraph))
+            # empty traces
+            self.local_energy_traces = {}
+            self.local_nl_traces = {}
+            self.local_edges_traces = {}
+            self.meta_energy_trace = []
+            self.meta_nl_trace = []
+            self.meta_edges_trace = []
+
+            # Canonical node order and back refs
+            self._node_orders = [list(self.landscapes[0].graph.nodes())]
+            self.back_reference = [(0, node_id) for node_id in self._node_orders[0]]
+
+            # Construct latent landscape object and return
+            self.latent_landscape = self.construct_latent_landscape(posterior_prob_cutoff=posterior_prob_cutoff)
+            return
 
         # Run RJMCMC sampling using the hierachical aligner (scales in linear time).
         # and not the RJMCMC aligner (scales in O(N^2K^2) time).
@@ -705,6 +746,7 @@ class FitnessSuperscape:
                                    _construct_checkpoint_dir: Union[str, Path, None] = None,
                                    _construct_checkpoint_interval: int = 300,
                                    _construct_resume_checkpoint: Union[str, Path, None] = None,
+                                   _parent_task_cpus: float = 1.0,
                                    **sampler_kwargs: Any) -> "FitnessSuperscape":
         """
         A flexible factory method to create a FitnessSuperscape by
@@ -783,9 +825,15 @@ class FitnessSuperscape:
             
             # Only request GPUs if PLM embeddings are actually being computed.
             wants_plm = job.get("embedding_domain") == "plm"
+            # detect embedding computation flags across constructors
             wants_compute = bool(job.get("_compute_phylo_embeddings", False) or job.get("_compute_embeddings", False))
+            # evol_diffusion path computes embeddings internally if embedding_domain='plm'
+            if not wants_compute and job.get("graph_type") == "evol_diffusion" and wants_plm:
+                wants_compute = True
             num_gpus = 1 if (wants_plm and wants_compute) else 0
-            futures.append(_create_landscape_task.options(num_gpus=num_gpus).remote(**job))
+            futures.append(
+                _create_landscape_task.options(num_gpus=num_gpus, num_cpus=_parent_task_cpus).remote(**job)
+            )
 
         # Retrieve the results with progress logging
         import logging as _logging, time as _time

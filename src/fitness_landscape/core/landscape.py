@@ -7,7 +7,15 @@ from torch_geometric.utils import from_networkx
 from typing import List, Union, Dict, Any, Iterable, Literal,  Protocol, runtime_checkable, Hashable, Union, Tuple, Mapping, Callable, Optional
 from dataclasses import dataclass
 from .sequence import BaseNumpySequence, make_sequence
-from .graph import create_diffusion_emb_graph, create_hamming_graph, create_tda_graph, create_knn_graph, _encode_multiallele, create_phylo_graph
+from .graph import (
+    create_diffusion_emb_graph,
+    create_hamming_graph,
+    create_tda_graph,
+    create_knn_graph,
+    _encode_multiallele,
+    create_phylo_graph,
+    create_evol_diffusion_graph,
+)
 from .digraph import create_phylo_digraph, create_evol_diffusion_digraph, create_particle_filter_digraph
 from .fitness import NumericFitness, CategoricalFitness, BaseFitnessLayer, ProbabilisticCategoricalFitness
 from abc import ABC, abstractmethod
@@ -779,7 +787,7 @@ class FitnessLandscape:
     def from_sequences(cls,
                        sequences: List[BaseNumpySequence],
                        fitness_layers: Dict[str, BaseFitnessLayer] = None,
-                       graph_type: Literal['hamming', 'knn', 'tda', 'diffusion'] = 'hamming',
+                       graph_type: Literal['hamming', 'knn', 'tda', 'diffusion', 'evol_diffusion'] = 'hamming',
                        embeddings: np.ndarray = None,
                        embedding_domain: Literal['plm', 'ohe'] = 'ohe',
                        attach_embeddings: bool = True,
@@ -832,7 +840,7 @@ class FitnessLandscape:
         FitnessLandscape
             The constructed fitness landscape object.
         """
-        embedding_based_graphs = {'tda', 'diffusion'}
+        embedding_based_graphs = {'tda', 'diffusion', 'evol_diffusion'}
 
         # pop kwargs that will break constructor_kwargs
         emb_arr_key = kwargs.pop('emb_arr_key', 'emb_arr')
@@ -845,7 +853,8 @@ class FitnessLandscape:
             'hamming': create_hamming_graph,
             'knn': create_knn_graph,
             'tda': create_tda_graph,
-            'diffusion': create_diffusion_emb_graph
+            'diffusion': create_diffusion_emb_graph,
+            'evol_diffusion': create_evol_diffusion_graph,
         }
 
         # Phylogenetic reconstruction requires specific types
@@ -857,7 +866,8 @@ class FitnessLandscape:
             alignment = sanitize_alignment(alignment)
 
             # Reconstruct phylogeny and ancestral states.
-            graph = create_phylo_graph(alignment, **kwargs)
+            nested = bool(kwargs.pop('_nested_construction_parallel', False))
+            graph = create_phylo_graph(alignment, _nested_parallel=nested, **kwargs)
             
             # Collect sequences from the constructed graph (NOT the alignment).
             sequences = [node[1]['sequence'] for node in graph.nodes(data=True)]
@@ -1260,7 +1270,8 @@ class DirectedFitnessLandscape(FitnessLandscape):
             alignment = sanitize_alignment(alignment)
 
             # Reconstruct phylogeny and ancestral states.
-            digraph = create_phylo_digraph(alignment, **kwargs)
+            nested = bool(kwargs.pop('_nested_construction_parallel', False))
+            digraph = create_phylo_digraph(alignment, _nested_parallel=nested, **kwargs)
             
             # Collect sequences from the constructed graph (NOT the alignment).
             sequences = [node[1]['sequence'] for node in digraph.nodes(data=True)]
