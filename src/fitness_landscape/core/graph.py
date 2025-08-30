@@ -10,7 +10,7 @@ from sklearn.metrics.pairwise import euclidean_distances, rbf_kernel
 from sklearn.neighbors import NearestNeighbors
 from sklearn.metrics.pairwise import euclidean_distances
 from pathlib import Path
-from cogent3 import ArrayAlignment
+from cogent3.core.alignment import Alignment
 from .._const import PROT_20
 from ..utils import calculate_gapped_soft_score
 from softalign.soft_alignment import align_soft_sequences
@@ -95,7 +95,7 @@ def _build_hamming_csr_binary(sequences: list[BinarySequence]) -> csr_matrix:
     A = csr_matrix((data, (rows, cols)), shape=(n, n))
     return A
 
-def create_hamming_graph_binary(sequences: list[BinarySequence]) -> nx.Graph:
+def create_hamming_graph_binary(sequences: list[BinarySequence], *, _compute_hamming_edges: bool = True) -> nx.Graph:
     """
     Function to build a undirected Hamming graph using efficiency bit
     wise (XOR) operations. 
@@ -119,11 +119,10 @@ def create_hamming_graph_binary(sequences: list[BinarySequence]) -> nx.Graph:
     for i, seq in enumerate(sequences):
         G.nodes[i]['sequence'] = seq
         
-    # Convert to non-matrix form and autodetect for Hamming diffs.
-    aligned_arr = [s.to_array() for s in sequences]
-
-    # Stamp standardised edge attributes to graph.
-    attach_expected_hamming_to_edges(G, aligned_arr)
+    # Optionally attach standardised Hamming edge attributes
+    if _compute_hamming_edges:
+        aligned_arr = [s.to_array() for s in sequences]
+        attach_expected_hamming_to_edges(G, aligned_arr)
     
     return G
 
@@ -238,7 +237,7 @@ def _build_hamming_csr_multiallele_masked(sequences: list[BaseNumpySequence]) ->
     
     return A
 
-def create_hamming_graph_multiallele(sequences: list[BaseNumpySequence]) -> nx.Graph:
+def create_hamming_graph_multiallele(sequences: list[BaseNumpySequence], *, _compute_hamming_edges: bool = True) -> nx.Graph:
     """
     Function to create a Hamming graph using B-radix encoded sequence
     masking to identify Hamming neighbors. 
@@ -263,16 +262,17 @@ def create_hamming_graph_multiallele(sequences: list[BaseNumpySequence]) -> nx.G
     if len(sequences) == 0 or G.number_of_nodes() == 0 or G.number_of_edges() == 0:
         return G
         
-    aligned_arr = [s.to_array() for s in sequences]
-    
-    # Stamp standardised edge attributes to graph.
-    attach_expected_hamming_to_edges(G, aligned_arr)
+    if _compute_hamming_edges:
+        aligned_arr = [s.to_array() for s in sequences]
+        attach_expected_hamming_to_edges(G, aligned_arr)
     
     return G
 
 # Main public method
 def create_hamming_graph(sequences: List[BaseNumpySequence],
-                         _backend: Literal['auto', 'binary_xor', 'masked'] = 'auto') -> nx.Graph:
+                         _backend: Literal['auto', 'binary_xor', 'masked'] = 'auto',
+                         *,
+                         _compute_hamming_edges: bool = True) -> nx.Graph:
     """
     Create a Hamming graph from sequences and fitness values. In a
     Hamming graph, nodes represent sequences and edges connect
@@ -310,9 +310,9 @@ def create_hamming_graph(sequences: List[BaseNumpySequence],
     if _backend == "binary_xor":
         if not is_binary:
             raise ValueError("backend='binary_xor' requires binary sequences {0,1}.")
-        return create_hamming_graph_binary(sequences)
+        return create_hamming_graph_binary(sequences, _compute_hamming_edges=_compute_hamming_edges)
     elif _backend == "masked":
-        return create_hamming_graph_multiallele(sequences)
+        return create_hamming_graph_multiallele(sequences, _compute_hamming_edges=_compute_hamming_edges)
     else:
         raise ValueError(f"Unknown `_backend`: {_backend}")
 
@@ -760,7 +760,8 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
                      hnsw_M: int = 32,
                      tiebuffer: int = 128,
                      tie_policy: Literal['all', 'min_index', 'random'] = 'all',
-                     seed : int = None) -> nx.Graph:
+                     seed : int = None,
+                     _compute_hamming_edges: bool = True) -> nx.Graph:
     """
     Function to create a k-nearest neighbor network graph from
     sequences, using an efficient backend algorithm. 
@@ -827,7 +828,7 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
         backend = 'faiss' if n >= 5000 else 'balltree'
 
     if backend == 'faiss':
-        return _create_knn_graph_faiss(
+        G = _create_knn_graph_faiss(
             sequences, k,
             index_type=index_type,
             metric=faiss_metric,
@@ -839,13 +840,21 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
             seed=seed
         )
     elif backend == 'balltree':
-        return _create_knn_graph_balltree(sequences,
+        G = _create_knn_graph_balltree(sequences,
                                           k, 
                                           tie_policy=tie_policy,
                                           tiebuffer=tiebuffer,
                                           seed=seed)
     else:
         raise ValueError(f"Unsupported backend {backend!r}. Expected `auto`, `faiss`, or `balltree`.")
+    # Optionally compute expected Hamming distances if available
+    if _compute_hamming_edges and all(
+        hasattr(seq, "ungapped_arr") and getattr(seq, "ungapped_arr", None) is not None
+        and getattr(seq, "alphabet", None) == PROT_20
+        for seq in sequences
+    ):
+        compute_edge_mutations_star(G=G)
+    return G
 
 def create_tda_graph(sequences: List[BaseNumpySequence],
                      embeddings: np.ndarray,
@@ -980,6 +989,8 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
                                hnsw_M: int = 32,
                                t: int = 5,
                                connectivity_threshold: float = 1e-4,
+                               *,
+                               _compute_hamming_edges: bool = True,
                                **kwargs) -> nx.Graph:
     """
     Function to construct a graph based on expected diffusion
@@ -1113,17 +1124,26 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         
     for i, seq in enumerate(sequences):
         G.nodes[i]['sequence'] = seq
-        
-    # Attach edge attributes.    
-    # if all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for seq in sequences):
-    #     compute_edge_mutations_star(G=G)
+    
+    # Optionally compute expected Hamming distances if available
+    if _compute_hamming_edges and all(
+        hasattr(seq, "ungapped_arr") and getattr(seq, "ungapped_arr", None) is not None
+        and getattr(seq, "alphabet", None) == PROT_20
+        for seq in sequences
+    ):
+        compute_edge_mutations_star(G=G)
     return G
 
-def create_phylo_graph(sequences: Union[Path, ArrayAlignment],
+def create_phylo_graph(sequences: Union[Path, Alignment],
                        replacement_matrix: List[str] = ['LG'],
                        model_fitting: bool = True,
                        _log_progress: bool = False,
-                       _nested_parallel: bool = False) -> nx.DiGraph:
+                       _nested_parallel: bool = False,
+                       *,
+                       _compute_hamming_edges: bool = True,
+                       _lightweight_nodes: bool = False,
+                       _hard_ancestors: bool = False,
+                       **kwargs) -> nx.DiGraph:
     """
     Factory function to create an undirected graph using phylogenetic
     inference and ancestral sequence reconstruction (with an 
@@ -1154,9 +1174,20 @@ def create_phylo_graph(sequences: Union[Path, ArrayAlignment],
                                  _log_progress=_log_progress)
     
     graph = constructor.construct_dag(graph_type='undirected')
+
+    # Optionally strip heavy arrays and collapse ancestors to hard sequences
+    if _lightweight_nodes or _hard_ancestors:
+        from .sequence import SoftSequence, BaseNumpySequence
+        for node, data in list(graph.nodes(data=True)):
+            if _lightweight_nodes:
+                data.pop('gapped_arr', None)
+            if _hard_ancestors and isinstance(data.get('sequence'), SoftSequence):
+                hard_str = ''.join(map(str, data['sequence'].to_array()))
+                data['sequence'] = BaseNumpySequence.from_string(hard_str, alphabet=PROT_20, moltype='protein', sequence_id=str(node))
     
-    # Attach edge attributes.    
-    compute_edge_mutations_star(G=graph, _log_progress=_log_progress, _nested_parallel=_nested_parallel)
+    # Attach edge attributes (serial by default to avoid nested Ray OOM)
+    if _compute_hamming_edges:
+        compute_edge_mutations_star(G=graph, _log_progress=_log_progress, _nested_parallel=_nested_parallel)
     return graph
 
 # Remote ray function for evol alignment.
@@ -1189,6 +1220,8 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                                              tau: float = 1.0,
                                              connectivity_threshold: float = 1e-4,
                                              cpus: int = 1,
+                                             *,
+                                             _compute_hamming_edges: bool = True,
                                              **kwargs) -> nx.Graph:
     """
     Constructs a diffusion graph by scoring standard alignments with an
@@ -1343,9 +1376,13 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     for i, seq in enumerate(sequences):
         graph.nodes[i]['sequence'] = seq
 
-    # Attach edge attributes.    
-    # if all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for seq in sequences):
-    #     compute_edge_mutations_star(G=graph)
+    # Optionally compute expected Hamming distances if available
+    if _compute_hamming_edges and all(
+        hasattr(seq, "ungapped_arr") and getattr(seq, "ungapped_arr", None) is not None
+        and getattr(seq, "alphabet", None) == PROT_20
+        for seq in sequences
+    ):
+        compute_edge_mutations_star(G=graph)
     return graph
     
 def expected_hamming_from_aligned(aligned_or_A: Sequence[np.ndarray] | np.ndarray,

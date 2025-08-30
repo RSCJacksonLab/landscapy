@@ -176,7 +176,7 @@ def diffusion_evol_superscape(sequences,
         for i, fp in enumerate(fasta_paths, 1):
             logger.info('[dataset %d/%d] reading %s', i, len(fasta_paths), fp)
             try:
-                seqs = fasta_to_prot20_sequences(Path(fp))
+                seqs = fasta_to_prot20_sequences(Path(fp), strict=False)
             except Exception as e:
                 raise click.UsageError(str(e))
             # Embeddings
@@ -277,7 +277,7 @@ def diffusion_evol_superscape(sequences,
 
 # Phylogenetic inference
 @click.option('--directed-landscape', required=False, is_flag=True, default=False, help='Boolean flag to indicate if a directed phylogenetic fitness landscape should be constructed.')
-@click.option('--compute-phylo-embeddings', required=False, is_flag=True, default=True, help='Boolean flag to indicate whether sequences should be embedded in a latent space.')
+@click.option('--compute-phylo-embeddings/--no-compute-phylo-embeddings', default=True, help='Compute embeddings for extant and ancestral sequences to attach to nodes.')
 @click.option('--embedding-domain', required=False, type=click.Choice(['ohe', 'plm']), default='ohe', help='Embedding domain for node attributes (ohe or plm).')
 @click.option('--replacement-matrix', required=False, multiple=True, default=['LG'], help='Replacement matrix/matrices for IQ-TREE model selection (e.g., LG). Can be provided multiple times.')
 @click.option('--model-fitting/--no-model-fitting', default=False, help='Whether to perform IQ-TREE model selection across the provided replacement matrices.')
@@ -371,69 +371,71 @@ def phylo_superscape(sequences,
     t0 = time.perf_counter(); c0 = time.process_time()
     logger.info('phylo-superscape: start')
 
-    sub_alignments = []
-    
-    if os.path.isdir(sequences):
-        fasta_files = [f for f in os.listdir(sequences) if f.endswith(('.fasta', '.fa', '.fas'))]
-        if not fasta_files:
-            raise click.UsageError(f"The directory '{sequences}' contains no FASTA files.")
-            
-        for fasta_file in fasta_files:
-            alignment_path = os.path.join(sequences, fasta_file)
-            alignment = load_aligned_seqs(alignment_path, moltype='protein')
+    def _iter_sub_alignments():
+        from fitness_landscape.utils import iter_moving_window_alignment
+        if os.path.isdir(sequences):
+            fasta_files = [f for f in os.listdir(sequences) if f.endswith(('.fasta', '.fa', '.fas'))]
+            if not fasta_files:
+                raise click.UsageError(f"The directory '{sequences}' contains no FASTA files.")
+            for fasta_file in fasta_files:
+                alignment_path = os.path.join(sequences, fasta_file)
+                alignment = load_aligned_seqs(alignment_path, moltype='protein')
+                alignment = sanitize_alignment(alignment)
+                logger.info(f'Loaded alignment from {alignment_path}')
+                if fan_alignment:
+                    if not all([fan_alignment_window, fan_alignment_overlap]):
+                        raise click.UsageError("If --fan-alignment is set, both --fan-alignment-window and --fan-alignment-overlap must be provided.")
+                    for sub in iter_moving_window_alignment(alignment, fan_alignment_window, fan_alignment_overlap):
+                        yield sub
+                else:
+                    yield alignment
+        else:
+            alignment = load_aligned_seqs(sequences, moltype='protein')
             alignment = sanitize_alignment(alignment)
-            logger.info(f'Loaded alignment from {alignment_path}')
-            
+            logger.info(f'Loaded alignment from {sequences}')
             if fan_alignment:
                 if not all([fan_alignment_window, fan_alignment_overlap]):
                     raise click.UsageError("If --fan-alignment is set, both --fan-alignment-window and --fan-alignment-overlap must be provided.")
-                sub_alignments.extend(moving_window_alignment(alignment, fan_alignment_window, fan_alignment_overlap))
+                for sub in iter_moving_window_alignment(alignment, fan_alignment_window, fan_alignment_overlap):
+                    yield sub
             else:
-                sub_alignments.append(alignment)
+                yield alignment
 
-    else: 
-        alignment = load_aligned_seqs(sequences, moltype='protein')
-        alignment = sanitize_alignment(alignment)
-        logger.info(f'Loaded alignment from {sequences}')
-        if fan_alignment:
-            if not all([fan_alignment_window, fan_alignment_overlap]):
-                raise click.UsageError("If --fan-alignment is set, both --fan-alignment-window and --fan-alignment-overlap must be provided.")
-            sub_alignments = moving_window_alignment(alignment, fan_alignment_window, fan_alignment_overlap)
-            logger.info(f'Fanned into {len(sub_alignments)} windows (window={fan_alignment_window}, overlap={fan_alignment_overlap})')
-        else:
-            sub_alignments.append(alignment)
-            logger.info('Single alignment mode (no fanning)')
-
-    # Build job specs for (di)graph construction
-    total_jobs = len(sub_alignments)
-    if directed_landscape:
-        construction_jobs = [{
-            "sequences": sub_alignment,
-            "digraph_type": "phylogenetic",
-            "replacement_matrix": list(replacement_matrix),
-            "model_fitting": model_fitting,
-            "_compute_phylo_embeddings": compute_phylo_embeddings,
-            "embedding_domain": embedding_domain,
-            "_log_progress": log_progress,
-            "_job_id": i + 1,
-            "_total_jobs": total_jobs,
-            # Enable nested Ray star-blocks for edge metrics by default
-            "_nested_construction_parallel": True,
-        } for i, sub_alignment in enumerate(sub_alignments)]
-    else:
-        construction_jobs = [{
-            "sequences": sub_alignment,
-            "graph_type": "phylogenetic",
-            "replacement_matrix": list(replacement_matrix),
-            "model_fitting": model_fitting,
-            "_compute_phylo_embeddings": compute_phylo_embeddings,
-            "embedding_domain": embedding_domain,
-            "_log_progress": log_progress,
-            "_job_id": i + 1,
-            "_total_jobs": total_jobs,
-            # Enable nested Ray star-blocks for edge metrics by default
-            "_nested_construction_parallel": True,
-        } for i, sub_alignment in enumerate(sub_alignments)]
+    # Build a streaming job generator for (di)graph construction
+    def _construction_job_iter():
+        for i, sub_alignment in enumerate(_iter_sub_alignments(), start=1):
+            if directed_landscape:
+                yield {
+                    "sequences": sub_alignment,
+                    "digraph_type": "phylogenetic",
+                    "replacement_matrix": list(replacement_matrix),
+                    "model_fitting": model_fitting,
+                    "_compute_phylo_embeddings": compute_phylo_embeddings,
+                    "embedding_domain": embedding_domain,
+                    "_log_progress": log_progress,
+                    "_job_id": i,
+                    "_total_jobs": None,
+                    # Allow nested star-blocks if explicitly desired later
+                    "_nested_construction_parallel": False,
+                    # Keep payloads light in workers
+                    "_lightweight_nodes": True,
+                    "_hard_ancestors": True,
+                }
+            else:
+                yield {
+                    "sequences": sub_alignment,
+                    "graph_type": "phylogenetic",
+                    "replacement_matrix": list(replacement_matrix),
+                    "model_fitting": model_fitting,
+                    "_compute_phylo_embeddings": compute_phylo_embeddings,
+                    "embedding_domain": embedding_domain,
+                    "_log_progress": log_progress,
+                    "_job_id": i,
+                    "_total_jobs": None,
+                    "_nested_construction_parallel": False,
+                    "_lightweight_nodes": True,
+                    "_hard_ancestors": True,
+                }
 
     bernoulli_beta = BernoulliBeta(alpha0=bernoulli_beta_alpha0, alpha1=bernoulli_beta_alpha1)
     
@@ -464,41 +466,26 @@ def phylo_superscape(sequences,
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     sampler_kwargs["_checkpoint_dir"] = str(ckpt_dir)
 
-    # Optionally avoid Ray during per-alignment construction (stability for IQ-TREE)
+    # Optionally avoid Ray during per-alignment construction
     if sequential_construction:
         landscapes = []
-        if directed_landscape:
-            for job in construction_jobs:
+        for j in _construction_job_iter():
+            seqs = j.pop('sequences')
+            if directed_landscape:
                 from fitness_landscape.core.landscape import DirectedFitnessLandscape
-                j = dict(job)
-                sequences = j.pop('sequences')
-                logger.info('Sequential directed construction started')
-                ts = time.perf_counter(); cs = time.process_time()
-                landscapes.append(DirectedFitnessLandscape.from_sequences(sequences=sequences, **j))
-                logger.info(f'Seq directed construction finished in wall={time.perf_counter()-ts:.2f}s cpu={time.process_time()-cs:.2f}s')
-        else:
-            for job in construction_jobs:
+                landscapes.append(DirectedFitnessLandscape.from_sequences(sequences=seqs, **j))
+            else:
                 from fitness_landscape.core.landscape import FitnessLandscape
-                j = dict(job)
-                sequences = j.pop('sequences')
-                logger.info('Sequential undirected construction started')
-                ts = time.perf_counter(); cs = time.process_time()
-                landscapes.append(FitnessLandscape.from_sequences(sequences=sequences, **j))
-                logger.info(f'Seq undirected construction finished in wall={time.perf_counter()-ts:.2f}s cpu={time.process_time()-cs:.2f}s')
-        superscape = FitnessSuperscape(
-            landscapes=landscapes,
-            **sampler_kwargs,
-        )
+                landscapes.append(FitnessLandscape.from_sequences(sequences=seqs, **j))
+        superscape = FitnessSuperscape(landscapes=landscapes, **sampler_kwargs)
     else:
-        logger.info(f'Launching {len(construction_jobs)} parallel construction jobs')
-        superscape = FitnessSuperscape.from_parallel_construction(
+        logger.info('Launching streaming parallel construction (Ray)')
+        superscape = FitnessSuperscape.from_streaming_construction(
             constructor_type=('directed' if directed_landscape else 'undirected'),
-            construction_jobs=construction_jobs,
+            construction_job_iter=_construction_job_iter(),
             _meta_cpu_chains=meta_cpu_chains,
             _show_progress=log_progress,
             _construct_checkpoint_dir=str(ckpt_dir),
-            _construct_checkpoint_interval=checkpoint_interval,
-            _construct_resume_checkpoint=resume_checkpoint,
             **sampler_kwargs
         )
 
@@ -522,6 +509,9 @@ def phylo_superscape(sequences,
 @click.option('--plm-model-name', type=str, default='facebook/esm2_t6_8M_UR50D', help='PLM model to use when embedding-domain=plm.')
 @click.option('--plm-batch-size', type=int, default=64, help='Batch size for PLM embeddings.')
 @click.option('--plm-device', type=str, default=None, help='Device for PLM embeddings (e.g., cpu or cuda).')
+@click.option('--compute-hamming-edges/--no-compute-hamming-edges', default=True, help='Compute expected Hamming edge weights after phylo reconstruction.')
+@click.option('--lightweight-nodes/--no-lightweight-nodes', default=False, help='Return lightweight nodes (drop gapped_arr) to reduce memory.')
+@click.option('--hard-ancestors/--no-hard-ancestors', default=False, help='Collapse ancestral SoftSequence to hard argmax sequence to reduce memory.')
 def phylo_landscape(sequences,
                     output,
                     replacement_matrix,
@@ -530,7 +520,10 @@ def phylo_landscape(sequences,
                     embedding_domain,
                     plm_model_name,
                     plm_batch_size,
-                    plm_device):
+                    plm_device,
+                    compute_hamming_edges,
+                    lightweight_nodes,
+                    hard_ancestors):
     """
     Construct a single phylogenetic FitnessLandscape and save it to disk.
 
@@ -548,6 +541,9 @@ def phylo_landscape(sequences,
         model_name=plm_model_name,
         batch_size=plm_batch_size,
         device=plm_device,
+        _compute_hamming_edges=compute_hamming_edges,
+        _lightweight_nodes=lightweight_nodes,
+        _hard_ancestors=hard_ancestors,
     )
 
     # Persist to disk

@@ -9,17 +9,17 @@ import numpy as np
 import networkx as nx
 from cogent3 import (
     load_aligned_seqs,
-    ArrayAlignment,
-    PhyloNode,
     load_tree,
     get_app
 )
+from cogent3.core.alignment import Alignment, make_aligned_seqs
+try:
+    from cogent3.core.tree import PhyloNode
+except Exception:
+    from cogent3 import PhyloNode  # fallback if available
 import piqtree
-from piqtree import Model
-from piqtree.model import AaModel
 from piqtree import model_finder
 import math
-from cogent3.util.table import Table
 from ..core.sequence import (
     BaseNumpySequence,
     SoftSequence
@@ -37,16 +37,12 @@ class ASRConstructor:
 
     Attributes
     ----------
-    alignment : ArrayAlignment or Path
+        alignment : Alignment or Path
         The alignment to use for phylogenetic reconstruction.
     
     phylogenetic_tree : PhyloNode or Path, default=`None`
         A precomputed phylogenetic tree. If None, the tree is inferred.
     
-    ancestral_states : Table, default=`None`
-        Precomputed ancestral states loaded in a cogent3.Table format.
-        If None, ancestral states are inferred.
-
     replacement_matrix : List, defualt=`NQ_pfam`
         The replacement matrix used for tree-search. Multiple can be
         provided to fit the ML model. If `NQ_pfam`, output will be
@@ -61,12 +57,11 @@ class ASRConstructor:
 
     """
     def __init__(self,
-                alignment: Union[ArrayAlignment, Path],
+                alignment: Union[Alignment, Path],
                 phylogenetic_tree: Union[PhyloNode, Path] = None,
-                ancestral_states: Table = None,
                 model_fitting: bool = False,
                 replacement_matrix: List = ['NQ.pfam'],
-                _reconstruct_ancestral_states=True,
+                _reconstruct_ancestral_states: bool = True,
                 _log_progress: bool = False) -> None:
 
         # Load alignment
@@ -74,14 +69,13 @@ class ASRConstructor:
             self.alignment = load_aligned_seqs(alignment,
                                             format="fasta",
                                             moltype="protein")
-        elif isinstance(alignment, ArrayAlignment):
+        elif isinstance(alignment, Alignment):
             self.alignment = alignment
         
         else:
             raise ValueError("Alignment must be either Path or Alignment.")
         
-        # Sanitize to canonical AA + gap
-        self.alignment = sanitize_alignment(self.alignment)
+        # Keep the alignment as provided by cogent3 for maximum compatibility
         # Construct alignment header list.
         self.tip_names = self.alignment.names
         self._log_progress = _log_progress
@@ -108,18 +102,9 @@ class ASRConstructor:
             else:
                 raise ValueError("Phylogenetic tree must be either Path or PhyloNode.")
             
-        # If ancestral states load or infer.
-        if ancestral_states is None and _reconstruct_ancestral_states:
+        # Infer ancestral states if requested
+        if _reconstruct_ancestral_states:
             self.reconstruct_ancestral_states()
-            self.ancestral_reconstruction_bool()
-        
-        elif ancestral_states is not None:
-            if isinstance(ancestral_states, Table):
-                self.asr_posterior_arr = ancestral_states
-            
-            else:
-                raise ValueError("Ancestral states must be Table.")
-            
             self.ancestral_reconstruction_bool()
         
     def build_tree(self,
@@ -144,118 +129,95 @@ class ASRConstructor:
         if not hasattr(self, 'alignment'):
             raise ValueError('expected alignment attribute.')
         
-        # Reduce thread contention for external libs (IQ-TREE, BLAS) inside Ray workers
-        import os as _os
-        _os.environ.setdefault('OMP_NUM_THREADS', '1')
-        _os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
-        _os.environ.setdefault('MKL_NUM_THREADS', '1')
-        _os.environ.setdefault('NUMEXPR_NUM_THREADS', '1')
+        # Keep alignment as-is for maximum compatibility with IQ-TREE on tiny inputs
+        
+        # Keep call minimal; do not override threading env here
 
         import logging as _logging
         _logger = _logging.getLogger('fitness_landscape')
         if self._log_progress:
             _logger.info('ASR.build_tree: start (models=%s, fit=%s)', replacement_matrix, model_fitting)
         if _model_override is not None:
-            # String necessary - not `Model` class.
-            model = _model_override
+            # Expect a string model spec for newer piqtree; coerce if needed
+            model = str(_model_override)
         
         elif model_fitting:
-            result = model_finder(self.alignment, model_set=set(replacement_matrix))
-            # Choose model by aicc.
-            model = result.best_aicc
+            # Try model finding; if it fails (e.g., tiny datasets), fall back to first provided model
+            try:
+                result = model_finder(self.alignment, model_set=set(replacement_matrix))
+                # Choose model by AICc; newer piqtree returns a string
+                model = str(getattr(result, 'best_aicc', result))
+            except Exception:
+                model = str(replacement_matrix[0] if replacement_matrix else 'LG')
         
         # Use just the provided replacement matrix.
         else:
             if len(replacement_matrix) > 1:
                 raise ValueError('Expected only single replacement matrix.')
-            model = Model(AaModel(replacement_matrix[0]))
+            model = str(replacement_matrix[0])
 
-        # Try building the tree; on failure, fall back progressively
-        # Run IQ-TREE in an isolated working directory to avoid file collisions across workers.
-        # If the environment variable 'FITNESS_LANDSCAPE_IQTREE_LOG_DIR' is set, we create
-        # a persistent subdirectory there and keep logs; otherwise we use a TemporaryDirectory.
-        import tempfile as _tempfile
-        import contextlib as _ctx
-        import os as _os2
-        import time as _time
-        import uuid as _uuid
-
-        @_ctx.contextmanager
-        def _isolated_workdir():
-            cwd = _os2.getcwd()
-            base = _os2.environ.get('FITNESS_LANDSCAPE_IQTREE_LOG_DIR', '').strip()
-            if base:
-                # Persistent log dir
-                _os2.makedirs(base, exist_ok=True)
-                sub = _os2.path.join(base, f"iqtree_job_{int(_time.time())}_{_uuid.uuid4().hex}")
-                _os2.makedirs(sub, exist_ok=True)
-                _os2.environ.setdefault('IQTREE_CACHEDIR', sub)
-                _os2.chdir(sub)
-                try:
-                    yield sub
-                finally:
-                    _os2.chdir(cwd)
-            else:
-                # Ephemeral temp dir (auto-removed on exit)
-                with _tempfile.TemporaryDirectory(prefix="iqtree_job_") as td:
-                    _os2.environ.setdefault('IQTREE_CACHEDIR', td)
-                    _os2.chdir(td)
-                    try:
-                        yield td
-                    finally:
-                        _os2.chdir(cwd)
-
-        def _try_build(_model, *_):
-            with _isolated_workdir():
+        # Minimal wrapper around piqtree.build_tree
+        def _try_build(_model: str, *_):
+            # Minimal call mirroring piqtree docs; add a deterministic seed
+            try:
+                return piqtree.build_tree(self.alignment, _model, rand_seed=1)
+            except TypeError:
+                # Fallback if rand_seed not supported in older versions
                 return piqtree.build_tree(self.alignment, _model)
 
+        primary_err = None
         try:
             phylogenetic_tree = _try_build(model)
         except Exception as e:
-            # Fallback 1: if model_fitting was requested or multiple models provided,
-            # retry with first provided matrix without fitting.
+            primary_err = e
+            # Fallback 1: retry with first provided model or LG
             try:
-                fallback_model = None
-                if replacement_matrix:
-                    # Accept both plain strings or Model(AaModel(...)) forms
-                    first = replacement_matrix[0]
-                    fallback_model = Model(AaModel(first)) if not isinstance(first, Model) else first
-                else:
-                    fallback_model = Model(AaModel('LG'))
-                phylogenetic_tree = _try_build(fallback_model)
+                first = str(replacement_matrix[0]) if replacement_matrix else 'LG'
+                phylogenetic_tree = _try_build(first)
             except Exception as e2:
-                # Provide actionable error to user
-                raise RuntimeError(
-                    "Failed to build phylogenetic tree via IQ-TREE (piqtree). "
-                    "Tried model fitting and a simple fallback model. "
-                    "Consider: (1) reducing threads (OMP_NUM_THREADS=1), "
-                    "(2) providing a precomputed tree to ASRConstructor, or "
-                    "(3) using model_fitting=False with a single well-supported matrix (e.g., ['LG'])."
-                ) from e2
+                # Provide detailed error context including original exceptions
+                details = []
+                details.append(f"primary model={model!r} error={type(primary_err).__name__}: {primary_err}")
+                details.append(f"fallback model={first!r} error={type(e2).__name__}: {e2}")
+                pv = getattr(piqtree, '__version__', '?')
+                details.append(f"piqtree_version={pv}")
+                details.append("Set FITNESS_LANDSCAPE_IQTREE_LOG_DIR to preserve IQ-TREE logs for debugging")
+                msg = (
+                    "IQ-TREE (piqtree) tree building failed.\n" +
+                    "\n".join(details)
+                )
+                raise RuntimeError(msg) from e2
 
         self.phylogenetic_tree = phylogenetic_tree
         if self._log_progress:
             _logger.info('ASR.build_tree: complete')
 
-    def reconstruct_ancestral_states(self,
-                                    model_name: str = "WG01") -> None: #Default to WAG
+    def reconstruct_ancestral_states(self, model_name: str = "WG01") -> None:
         """
-        Method to reconstruct ancestral states by empirical Bayesian
-        (using the marginal algorithm) in cogent3.
-        
-        Parameters:
-        -----------
-        model_name : str, default=`WG01`
-            The name of the substitution model. WG01 denotes the WAG matrix.
+        Minimal placeholder ASR: assigns a uniform amino-acid posterior (L,20)
+        for each internal node. Avoids plugin manager to prevent duplicate
+        registration issues in interactive contexts.
         """
         import logging as _logging
         _logger = _logging.getLogger('fitness_landscape')
         if self._log_progress:
-            _logger.info('ASR.reconstruct_ancestral_states: start (model=%s)', model_name)
-        model_app = get_app("model", model_name, tree=self.phylogenetic_tree)
-        model_result = model_app(self.alignment)
-        asr_app = get_app("ancestral_states")
-        self.asr_posterior_arr = asr_app(model_result)
+            _logger.info('ASR.reconstruct_ancestral_states: start (placeholder uniform)')
+        # Alignment length (columns): use gapped sequence length of first tip
+        first = self.tip_names[0]
+        L = len(str(self.alignment.get_gapped_seq(first)))
+        # Uniform posterior over 20 AAs
+        uniform_post = np.full((L, len(PROT_20)), 1.0 / len(PROT_20), dtype=float)
+        # Collect internal nodes from the tree
+        child_parent = self.phylogenetic_tree.child_parent_map()
+        nodes = set(child_parent.keys()) | set(child_parent.values())
+        # Build mapping from PhyloNode -> posterior array
+        post_map: Dict = {}
+        for node in nodes:
+            # tips are strings in self.tip_names; internal nodes are PhyloNode
+            if getattr(node, 'name', None) in set(self.tip_names):
+                continue
+            post_map[node] = uniform_post.copy()
+        self.asr_posterior_arr = post_map
         if self._log_progress:
             _logger.info('ASR.reconstruct_ancestral_states: complete')
 

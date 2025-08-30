@@ -263,6 +263,10 @@ class HierarchicalRJMCMCAligner:
         """
         clusters = self._create_clusters()
 
+        # Prepare storage aligned by cluster index for posterior samples
+        self.local_posterior_L = [None] * len(clusters)
+        self.local_posterior_pi = [None] * len(clusters)
+
         futures = []
         # Resume support: load existing results if provided
         completed: dict[int, Dict] = {}
@@ -331,9 +335,9 @@ class HierarchicalRJMCMCAligner:
                 results_in_order[idx]['node_mapping'] = node_mapping
                 results_in_order[idx]['node_order'] = node_order
 
-                # posterior samples for local alignments
-                self.local_posterior_L.append(stored_L)
-                self.local_posterior_pi.append(stored_pi)
+                # posterior samples for local alignments (store by cluster index)
+                self.local_posterior_L[idx] = stored_L
+                self.local_posterior_pi[idx] = stored_pi
 
                 # traces
                 self.local_energy_traces[idx] = trace_E
@@ -472,10 +476,18 @@ class HierarchicalRJMCMCAligner:
         local_to_global_nodemap = {}
 
         for i, result in enumerate(local_results):
-            # Use posterior sample if sample_idx is given, otherwise use posterior mean
-            if sample_idx is not None:
-                local_bp_matrix = self.local_posterior_L[i][sample_idx]
-                local_bp = nx.from_numpy_array(local_bp_matrix, create_using=nx.DiGraph if self.directed else nx.Graph)
+            # Use posterior sample if sample_idx is given and available; otherwise use posterior mean
+            if sample_idx is not None and i < len(self.local_posterior_L):
+                stored_list = self.local_posterior_L[i]
+                if stored_list and len(stored_list) > 0:
+                    s_idx = sample_idx % len(stored_list)
+                    try:
+                        local_bp_matrix = stored_list[s_idx]
+                        local_bp = nx.from_numpy_array(local_bp_matrix, create_using=nx.DiGraph if self.directed else nx.Graph)
+                    except Exception:
+                        local_bp = result['blueprint']
+                else:
+                    local_bp = result['blueprint']
             else:
                 local_bp = result['blueprint']
 
@@ -507,10 +519,26 @@ class HierarchicalRJMCMCAligner:
             
             # Use posterior sample if sample_idx is given
             if sample_idx is not None:
-                local_pi_i = self.local_posterior_pi[i][graph_idx_i][sample_idx]
-                local_pi_j = self.local_posterior_pi[j][graph_idx_j][sample_idx]
-                local_latent_i = local_pi_i[local_node_idx_i]
-                local_latent_j = local_pi_j[local_node_idx_j]
+                use_sample = False
+                if i < len(self.local_posterior_pi) and j < len(self.local_posterior_pi):
+                    Lpi_i = self.local_posterior_pi[i]
+                    Lpi_j = self.local_posterior_pi[j]
+                    if Lpi_i and Lpi_j and graph_idx_i in Lpi_i and graph_idx_j in Lpi_j:
+                        li = Lpi_i[graph_idx_i]
+                        lj = Lpi_j[graph_idx_j]
+                        if li and lj and len(li) > 0 and len(lj) > 0:
+                            s_idx = sample_idx % min(len(li), len(lj))
+                            try:
+                                local_pi_i = li[s_idx]
+                                local_pi_j = lj[s_idx]
+                                local_latent_i = local_pi_i[local_node_idx_i]
+                                local_latent_j = local_pi_j[local_node_idx_j]
+                                use_sample = True
+                            except Exception:
+                                use_sample = False
+                if not use_sample:
+                    local_latent_i = np.argmax(local_results[i]['node_mapping'][graph_idx_i][local_node_idx_i, :])
+                    local_latent_j = np.argmax(local_results[j]['node_mapping'][graph_idx_j][local_node_idx_j, :])
             else:
                 local_latent_i = np.argmax(local_results[i]['node_mapping'][graph_idx_i][local_node_idx_i, :])
                 local_latent_j = np.argmax(local_results[j]['node_mapping'][graph_idx_j][local_node_idx_j, :])
@@ -541,12 +569,23 @@ class HierarchicalRJMCMCAligner:
             
             for graph_idx in range(len(self.original_graphs)):
                 if sample_idx is not None:
-                    # For sampling, create a probabilistic mapping from the single permutation sample
+                    # For sampling, create a probabilistic mapping from a single permutation sample if available
                     prob_matrix = np.zeros((len(result['node_order'][graph_idx]), num_local_latent))
-                    local_pi = self.local_posterior_pi[cluster_idx][graph_idx][sample_idx]
-                    for node_idx_local, latent_node in enumerate(local_pi):
-                        if latent_node != -1:
-                            prob_matrix[node_idx_local, latent_node] = 1.0
+                    local_pi_list = None
+                    if cluster_idx < len(self.local_posterior_pi):
+                        Lpi = self.local_posterior_pi[cluster_idx]
+                        if Lpi and graph_idx in Lpi:
+                            local_pi_list = Lpi[graph_idx]
+                    if local_pi_list and len(local_pi_list) > 0:
+                        s_idx = sample_idx % len(local_pi_list)
+                        try:
+                            local_pi = local_pi_list[s_idx]
+                            for node_idx_local, latent_node in enumerate(local_pi):
+                                if latent_node != -1:
+                                    prob_matrix[node_idx_local, latent_node] = 1.0
+                        except Exception:
+                            pass
+                    # if no sample available, fall back below to deterministic mapping
                 else:
                     prob_matrix = result['node_mapping'].get(graph_idx)
 

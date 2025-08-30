@@ -22,7 +22,8 @@ from abc import ABC, abstractmethod
 from ..utils import _compute_embeddings_from_sequences, alignment_to_base_numpy_sequences
 import inspect
 from collections import defaultdict
-from cogent3 import ArrayAlignment, load_aligned_seqs
+from cogent3 import load_aligned_seqs
+from cogent3.core.alignment import Alignment
 from pathlib import Path
 import warnings
 from .._const import PROT_20
@@ -878,13 +879,21 @@ class FitnessLandscape:
                     raise ValueError(f"Embeddings expected embeddings shape {len(sequences)} in dim 0, found {embeddings.shape[0]}. Forgot ancestral sequences in precomputed embeddings?")
             
             elif _compute_phylo_embeddings:
+                # Only compute embeddings when safe; many phylo nodes have
+                # variable ungapped lengths, which breaks fixed-length OHE.
                 if embedding_domain == 'plm':
                     embeddings = _compute_embeddings_from_sequences(sequences,
                                                                     model_name=model_name,
                                                                     device=device,
                                                                     batch_size=batch_size)
                 elif embedding_domain == 'ohe':
-                    embeddings, _ = _encode_multiallele(sequences)
+                    # Guard: require uniform lengths for OHE stacking
+                    seq_lengths = {len(s) for s in sequences}
+                    if len(seq_lengths) == 1:
+                        embeddings, _ = _encode_multiallele(sequences)
+                    else:
+                        # Skip OHE embeddings to avoid shape errors
+                        embeddings = None
                 # leave as computed
             else:
                 # Allow proceeding without embeddings; Superscape can attach fallbacks later
@@ -1080,7 +1089,7 @@ class FitnessLandscape:
 
     @classmethod
     def from_alignment(cls,
-                       alignment: ArrayAlignment | Path,
+                       alignment: Alignment | Path,
                        *,
                        fitness_layers: dict[str, BaseFitnessLayer] | None = None,
                        attach_embeddings: bool = True,
@@ -1099,7 +1108,7 @@ class FitnessLandscape:
 
         Parameters
         ----------
-        alignment : ArrayAlignment or Path
+        alignment : Alignment or Path
             The alignment object or path to an alignment file.
         
         fitness_layers : dict[str, BaseFitnessLayer], optional
@@ -1192,7 +1201,7 @@ class DirectedFitnessLandscape(FitnessLandscape):
     # Custom constructor methods.
     @classmethod
     def from_sequences(cls,
-                       sequences: Union[List[BaseNumpySequence], ArrayAlignment, Path],
+                       sequences: Union[List[BaseNumpySequence], Alignment, Path],
                        fitness_layers: Dict[str, BaseFitnessLayer] = None,
                        digraph_type: Literal['phylogenetic', 'diffusion_nq', 'particle_filter'] = 'phylogenetic',
                        embeddings: np.ndarray = None,
@@ -1292,7 +1301,11 @@ class DirectedFitnessLandscape(FitnessLandscape):
                                                                     device=device,
                                                                     batch_size=batch_size)
                 elif embedding_domain == 'ohe':
-                    embeddings, _ = _encode_multiallele(sequences)
+                    seq_lengths = {len(s) for s in sequences}
+                    if len(seq_lengths) == 1:
+                        embeddings, _ = _encode_multiallele(sequences)
+                    else:
+                        embeddings = None
                 else:
                     raise ValueError(f"embedding_domain must be 'plm' or 'ohe', got {embedding_domain!r}")
             else:
@@ -1364,7 +1377,7 @@ class DirectedFitnessLandscape(FitnessLandscape):
 
     @classmethod
     def build(cls,
-              sequences: list[BaseNumpySequence] | ArrayAlignment | Path,
+              sequences: list[BaseNumpySequence] | Alignment | Path,
               *,
               digraph: str | nx.DiGraph = "phylogenetic",
               fitness_layers: dict[str, BaseFitnessLayer] | None = None,
@@ -1383,7 +1396,7 @@ class DirectedFitnessLandscape(FitnessLandscape):
 
         Parameters
         ----------
-        sequences : list[BaseNumpySequence] | ArrayAlignment | Path
+        sequences : list[BaseNumpySequence] | Alignment | Path
             List of sequences or an alignment to build the landscape from.
 
         digraph : str or nx.DiGraph, default=`"phylogenetic"`
@@ -1464,7 +1477,7 @@ class DirectedFitnessLandscape(FitnessLandscape):
         if dtype not in ctor_map:
             raise ValueError(f"Unknown digraph type {dtype!r}. Options: {list(ctor_map)}")
 
-        seqs = sequences if not isinstance(sequences, (Path, ArrayAlignment)) else alignment_to_base_numpy_sequences(sequences)
+        seqs = sequences if not isinstance(sequences, (Path, Alignment)) else alignment_to_base_numpy_sequences(sequences)
         # resolve embeddings if needed 
         E, extra = _resolve_embeddings_for_graph(
             seqs, "diffusion", embeddings, embedding_domain,
