@@ -551,5 +551,130 @@ def phylo_landscape(sequences,
         pickle.dump(landscape, f)
 
 
+
+@cli.command()
+# Reading/writing
+@click.option('--sequences', required=True, type=click.Path(exists=True), help='Path to the input FASTA file.')
+@click.option('--output', required=True, type=click.Path(), help='Path to save the serialized FitnessLandscape object (.pkl).')
+
+# Diffusion graph parameters
+@click.option('--k', type=int, default=50, show_default=True, help='kNN neighbors for pre-filtering.')
+@click.option('--t', type=int, default=5, show_default=True, help='Diffusion power (steps).')
+@click.option('--tau', type=float, default=1.0, show_default=True, help='Score temperature for kernel conversion.')
+@click.option('--connectivity-threshold', type=float, default=1e-4, show_default=True, help='Connectivity threshold for diffused matrix.')
+@click.option('--backend', type=click.Choice(['auto','faiss','balltree']), default='auto', show_default=True, help='kNN backend.')
+@click.option('--index-type', type=click.Choice(['hnsw','flat','ivf']), default='hnsw', show_default=True, help='FAISS index type.')
+@click.option('--faiss-metric', type=click.Choice(['ip','l2']), default='ip', show_default=True, help='FAISS metric (ip recommended).')
+@click.option('--include-self', is_flag=True, default=False, help='Include self edges in kNN graph.')
+@click.option('--use-gpu', is_flag=True, default=False, help='Use GPU for FAISS (if available for selected index).')
+@click.option('--hnsw-M', 'hnsw_m', type=int, default=32, show_default=True, help='HNSW M parameter.')
+@click.option('--cpus', type=int, default=1, show_default=True, help='CPUs per scoring task (used internally).')
+
+# Embeddings
+@click.option('--compute-embeddings/--no-compute-embeddings', default=True, help='Compute node embeddings (ohe or plm).')
+@click.option('--embedding-domain', type=click.Choice(['ohe','plm']), default='ohe', show_default=True, help='Embedding domain for node attributes.')
+@click.option('--plm-model-name', type=str, default='facebook/esm2_t6_8M_UR50D', show_default=True, help='PLM model when embedding-domain=plm.')
+@click.option('--plm-batch-size', type=int, default=64, show_default=True, help='Batch size for PLM embeddings.')
+@click.option('--plm-device', type=str, default=None, help='Device for PLM embeddings (e.g., cpu or cuda).')
+
+# Logging
+@click.option('--log-file', type=click.Path(), default=None, help='Optional log file path.')
+@click.option('--log-level', type=click.Choice(['DEBUG','INFO','WARNING','ERROR']), default='INFO', show_default=True)
+@click.option('--log-progress', is_flag=True, default=False, help='Enable verbose progress logging.')
+@click.option('--log-prefix', type=str, default=None, help='If --log-file not provided, derive a log filename using this prefix next to --output.')
+def evol_diffusion_landscape(sequences,
+                             output,
+                             k,
+                             t,
+                             tau,
+                             connectivity_threshold,
+                             backend,
+                             index_type,
+                             faiss_metric,
+                             include_self,
+                             use_gpu,
+                             hnsw_m,
+                             cpus,
+                             compute_embeddings,
+                             embedding_domain,
+                             plm_model_name,
+                             plm_batch_size,
+                             plm_device,
+                             log_file,
+                             log_level,
+                             log_progress,
+                             log_prefix):
+    """
+    Construct a single evolutionary diffusion FitnessLandscape and save it to disk.
+
+    This is analogous to phylo-landscape but uses the diffusion/evolutionary
+    scoring over a provided embedding space (OHE or PLM) and kNN prefiltering.
+    """
+    # Logger (derive filename from prefix if requested and not explicitly provided)
+    logger = logging.getLogger('fitness_landscape')
+    if not log_file and log_prefix:
+        ts = time.strftime('%Y%m%d-%H%M%S')
+        seq_base = os.path.basename(str(sequences).rstrip('/'))
+        out_p = Path(output)
+        base_dir = out_p.parent
+        log_name = f"{log_prefix}_{seq_base}_{ts}_{os.getpid()}.log"
+        log_file = str(base_dir / log_name)
+    if log_file:
+        logger.setLevel(getattr(logging, log_level))
+        fh = logging.FileHandler(log_file)
+        fh.setLevel(getattr(logging, log_level))
+        fmt = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+        fh.setFormatter(fmt)
+        if not any(isinstance(h, logging.FileHandler) and getattr(h, 'baseFilename', None) == fh.baseFilename for h in logger.handlers):
+            logger.addHandler(fh)
+    t0 = time.perf_counter(); c0 = time.process_time()
+    logger.info('evol-diffusion-landscape: start')
+
+    # Read sequences (lenient sanitation to avoid early failures)
+    try:
+        seqs = fasta_to_prot20_sequences(Path(sequences), strict=False)
+    except Exception as e:
+        raise click.UsageError(str(e))
+
+    if not seqs:
+        raise click.UsageError('No sequences parsed from FASTA input.')
+
+    # Embeddings
+    if not compute_embeddings:
+        raise click.UsageError('--no-compute-embeddings is not supported for this constructor; provide embeddings or enable computation.')
+
+    if embedding_domain == 'ohe':
+        from fitness_landscape.core.graph import _encode_multiallele
+        E, _ = _encode_multiallele(seqs)
+    else:
+        E = _compute_embeddings_from_sequences(seqs, model_name=plm_model_name, batch_size=plm_batch_size, device=plm_device)
+
+    logger.info('embeddings shape=%s', getattr(E, 'shape', None))
+
+    # Build diffusion-evolution graph
+    G = create_evol_diffusion_graph(
+        sequences=seqs,
+        embeddings=E,
+        k=k,
+        t=t,
+        tau=tau,
+        connectivity_threshold=connectivity_threshold,
+        backend=backend,
+        index_type=index_type,
+        faiss_metric=faiss_metric,
+        include_self=include_self,
+        use_gpu=use_gpu,
+        hnsw_M=hnsw_m,
+        cpus=cpus,
+    )
+
+    landscape = FitnessLandscape.from_graph(G)
+
+    # Save
+    with open(output, 'wb') as f:
+        pickle.dump(landscape, f)
+    logger.info('Landscape saved to %s', output)
+    logger.info('evol-diffusion-landscape: end wall=%.2fs cpu=%.2fs', time.perf_counter()-t0, time.process_time()-c0)
+
 if __name__ == '__main__':
     cli()
