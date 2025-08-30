@@ -37,7 +37,7 @@ import networkx as nx
 from softalign.soft_alignment import align_soft_sequences
 import ray
 from pathlib import Path
-from cogent3 import ArrayAlignment
+from cogent3.core.alignment import Alignment
 from ..utils import (
     PROT_20,
     alignment_to_base_numpy_sequences
@@ -75,7 +75,7 @@ class EmbNodeModel(BaseModel):
 @ray.remote(num_cpus=1)
 def _create_landscape_task(
     constructor_class: Union[FitnessLandscape, DirectedFitnessLandscape],
-    sequences: Union[Path, ArrayAlignment, List[BaseNumpySequence]],
+    sequences: Union[Path, Alignment, List[BaseNumpySequence]],
     fitness_layers: Dict[str, BaseFitnessLayer] = None,
     _job_id: int | None = None,
     _total_jobs: int | None = None,
@@ -791,7 +791,10 @@ class FitnessSuperscape:
             An instance containing the parallel-constructed landscapes.
         """
         if not ray.is_initialized():
-            ray.init()
+            try:
+                ray.init(object_spilling_directory="/tmp/ray_spill")
+            except Exception:
+                ray.init()
 
         landscape_class = (
             FitnessLandscape if constructor_type == 'undirected'
@@ -924,3 +927,120 @@ class FitnessSuperscape:
     # the query vector. Current method scales O(N^2) over exhaustive
     # graph alignment (even with anchoring): subgraphing will scale
     # linearly.
+
+    @classmethod
+    def from_streaming_construction(cls,
+                                    constructor_type: Literal['undirected', 'directed'],
+                                    construction_job_iter,
+                                    posterior_prob_cutoff: float = 0.1,
+                                    _show_progress: bool = True,
+                                    _construct_checkpoint_dir: Union[str, Path, None] = None,
+                                    _meta_cpu_chains: int | None = None,
+                                    _parent_task_cpus: float = 1.0,
+                                    **sampler_kwargs: Any) -> "FitnessSuperscape":
+        """
+        Streaming variant of parallel construction. Consumes an iterator of
+        job dictionaries and limits concurrency to `_meta_cpu_chains` to keep
+        memory usage bounded. Useful for very large numbers of windows where
+        materializing all jobs is expensive.
+        """
+        if not ray.is_initialized():
+            try:
+                ray.init(object_spilling_directory="/tmp/ray_spill")
+            except Exception:
+                ray.init()
+
+        landscape_class = (
+            FitnessLandscape if constructor_type == 'undirected'
+            else DirectedFitnessLandscape
+        )
+
+        # Optional checkpointing directory
+        ckpt_path = None
+        if _construct_checkpoint_dir:
+            ckpt_dir = Path(_construct_checkpoint_dir)
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            ckpt_path = ckpt_dir / "superscape_construction.ckpt.pkl"
+
+        # Submit jobs in a sliding window
+        import logging as _logging, time as _time
+        _logger = _logging.getLogger('fitness_landscape')
+        max_inflight = int(_meta_cpu_chains) if _meta_cpu_chains and _meta_cpu_chains > 0 else (os.cpu_count() or 1)
+        inflight: dict[Any, int] = {}
+        landscapes: list[Union[FitnessLandscape, DirectedFitnessLandscape]] = []
+        job_index = 0
+        last_ckpt = 0.0
+
+        def _submit_next(batch=1):
+            nonlocal job_index
+            submitted = 0
+            while submitted < batch and len(inflight) < max_inflight:
+                try:
+                    job = next(construction_job_iter)
+                except StopIteration:
+                    return submitted
+                # inject class and defaults
+                job = dict(job)
+                job['constructor_class'] = landscape_class
+                job.setdefault('_compute_hamming_edges', False)
+                wants_plm = job.get("embedding_domain") == "plm"
+                wants_compute = bool(job.get("_compute_phylo_embeddings", False) or job.get("_compute_embeddings", False))
+                if not wants_compute and job.get("graph_type") == "evol_diffusion" and wants_plm:
+                    wants_compute = True
+                num_gpus = 1 if (wants_plm and wants_compute) else 0
+                # assign job id
+                job.setdefault('_job_id', job_index + 1)
+                job.setdefault('_total_jobs', None)
+                ref = _create_landscape_task.options(num_gpus=num_gpus, num_cpus=_parent_task_cpus).remote(**job)
+                inflight[ref] = job_index
+                job_index += 1
+                submitted += 1
+            return submitted
+
+        # Prime submissions
+        _submit_next(batch=max_inflight)
+
+        try:
+            import psutil as _psutil
+        except Exception:
+            _psutil = None
+
+        while inflight:
+            done, _ = ray.wait(list(inflight.keys()), num_returns=1, timeout=30.0)
+            now = _time.perf_counter()
+            if done:
+                ref = done[0]
+                idx = inflight.pop(ref)
+                try:
+                    L = ray.get(ref)
+                except Exception as e:
+                    raise
+                landscapes.append(L)
+                if _show_progress:
+                    _logger.info('stream progress: %d completed', len(landscapes))
+                _submit_next(batch=1)
+                # lightweight checkpoint
+                if ckpt_path and now - last_ckpt >= 300:
+                    try:
+                        with open(ckpt_path, 'wb') as f:
+                            pickle.dump({'landscapes': landscapes, 'done_count': len(landscapes), 'ts': now}, f)
+                        last_ckpt = now
+                        if _show_progress:
+                            _logger.info('checkpoint written: %s', ckpt_path)
+                    except Exception:
+                        pass
+            else:
+                if _show_progress:
+                    rss = ''
+                    if _psutil is not None:
+                        p = _psutil.Process()
+                        rss_bytes = p.memory_info().rss
+                        rss = f" rss={rss_bytes/1e9:.2f}GB"
+                    _logger.info('stream heartbeat: %d completed%s', len(landscapes), rss)
+
+        return cls(
+            landscapes=landscapes,
+            posterior_prob_cutoff=posterior_prob_cutoff,
+            _show_progress=_show_progress,
+            **sampler_kwargs,
+        )

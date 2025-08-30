@@ -40,3 +40,22 @@ __all__ = [
     'ProbabilisticCategoricalFitness'
     'FitnessSuperscape'
 ]
+
+# Compatibility patch for cogent3 MolType.make_seq positional API changes
+try:
+    from cogent3.core.moltype import MolType
+except Exception:
+    MolType = None
+
+if MolType is not None:
+    _orig_make_seq = MolType.make_seq
+    def _compat_make_seq(self, *args, **kwargs):
+        # Newer cogent3 requires keyword-only; support old positional form
+        if args and 'seq' not in kwargs and 'data' not in kwargs:
+            # accommodate either 'seq' or 'data' keyword accepted by versions
+            try:
+                return _orig_make_seq(self, seq=args[0], **kwargs)
+            except TypeError:
+                return _orig_make_seq(self, data=args[0], **kwargs)
+        return _orig_make_seq(self, **kwargs)
+    MolType.make_seq = _compat_make_seq

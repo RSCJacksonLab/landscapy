@@ -2,12 +2,14 @@ from pathlib import Path
 from typing import Union, Dict, List, Literal
 import numpy as np
 import networkx as nx
-from cogent3 import load_aligned_seqs, ArrayAlignment, PhyloNode, load_tree, get_app
+from cogent3 import load_aligned_seqs, load_tree, get_app
+from cogent3.core.alignment import Alignment
+try:
+    from cogent3.core.tree import PhyloNode
+except Exception:
+    from cogent3 import PhyloNode
 import piqtree
-from piqtree import Model
-from piqtree.model import AaModel
 import math
-from cogent3.util.table import Table
 from .sequence import SoftSequence, BaseNumpySequence
 from .._const import ALPHABET_21, PROT_20
 from ..phylo._sub_matrices import nq_pfam
@@ -32,13 +34,15 @@ from ..embedding.particle_sampler import (
 from softalign.soft_alignment import align_soft_sequences
 import ray
 
-def create_phylo_digraph(sequences: Union[Path, ArrayAlignment],
+def create_phylo_digraph(sequences: Union[Path, Alignment],
                          replacement_matrix: List[str] = ['NQ.pfam'],
                          model_fitting: bool = True,
                          _log_progress: bool = False,
                          _nested_parallel: bool = False,
                          *,
                          _compute_hamming_edges: bool = True,
+                         _lightweight_nodes: bool = False,
+                         _hard_ancestors: bool = False,
                          **kwargs) -> nx.DiGraph:
     """
     Factory function to create a Directed acyclic graph using
@@ -72,6 +76,16 @@ def create_phylo_digraph(sequences: Union[Path, ArrayAlignment],
                                  _log_progress=_log_progress)
     # Construct digraph with `graph_type` flag.
     digraph = constructor.construct_dag(graph_type='directed')
+
+    # Optionally strip heavy arrays and collapse ancestors to hard sequences
+    if _lightweight_nodes or _hard_ancestors:
+        from .sequence import SoftSequence, BaseNumpySequence
+        for node, data in list(digraph.nodes(data=True)):
+            if _lightweight_nodes:
+                data.pop('gapped_arr', None)
+            if _hard_ancestors and isinstance(data.get('sequence'), SoftSequence):
+                hard_str = ''.join(map(str, data['sequence'].to_array()))
+                data['sequence'] = BaseNumpySequence.from_string(hard_str, alphabet=PROT_20, moltype='protein', sequence_id=str(node))
     
     # Attach edge attributes.
     if _compute_hamming_edges:

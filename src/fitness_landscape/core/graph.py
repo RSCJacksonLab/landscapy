@@ -10,7 +10,7 @@ from sklearn.metrics.pairwise import euclidean_distances, rbf_kernel
 from sklearn.neighbors import NearestNeighbors
 from sklearn.metrics.pairwise import euclidean_distances
 from pathlib import Path
-from cogent3 import ArrayAlignment
+from cogent3.core.alignment import Alignment
 from .._const import PROT_20
 from ..utils import calculate_gapped_soft_score
 from softalign.soft_alignment import align_soft_sequences
@@ -1134,13 +1134,15 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         compute_edge_mutations_star(G=G)
     return G
 
-def create_phylo_graph(sequences: Union[Path, ArrayAlignment],
+def create_phylo_graph(sequences: Union[Path, Alignment],
                        replacement_matrix: List[str] = ['LG'],
                        model_fitting: bool = True,
                        _log_progress: bool = False,
                        _nested_parallel: bool = False,
                        *,
                        _compute_hamming_edges: bool = True,
+                       _lightweight_nodes: bool = False,
+                       _hard_ancestors: bool = False,
                        **kwargs) -> nx.DiGraph:
     """
     Factory function to create an undirected graph using phylogenetic
@@ -1172,6 +1174,16 @@ def create_phylo_graph(sequences: Union[Path, ArrayAlignment],
                                  _log_progress=_log_progress)
     
     graph = constructor.construct_dag(graph_type='undirected')
+
+    # Optionally strip heavy arrays and collapse ancestors to hard sequences
+    if _lightweight_nodes or _hard_ancestors:
+        from .sequence import SoftSequence, BaseNumpySequence
+        for node, data in list(graph.nodes(data=True)):
+            if _lightweight_nodes:
+                data.pop('gapped_arr', None)
+            if _hard_ancestors and isinstance(data.get('sequence'), SoftSequence):
+                hard_str = ''.join(map(str, data['sequence'].to_array()))
+                data['sequence'] = BaseNumpySequence.from_string(hard_str, alphabet=PROT_20, moltype='protein', sequence_id=str(node))
     
     # Attach edge attributes (serial by default to avoid nested Ray OOM)
     if _compute_hamming_edges:

@@ -9,22 +9,22 @@ from .core.sequence import BaseNumpySequence, SoftSequence
 from dataclasses import dataclass
 from softalign.soft_alignment import align_soft_sequences
 from ._const import ALPHABET_21, PROT_20
-from cogent3 import ArrayAlignment, make_aligned_seqs, ArrayAlignment 
+from cogent3.core.alignment import Alignment, make_aligned_seqs
 from cogent3 import load_aligned_seqs
 from pathlib import Path
 from .core.sequence import BaseNumpySequence
 
-def sanitize_alignment(aln: ArrayAlignment,
+def sanitize_alignment(aln: Alignment,
                        *,
                        legal_amino_acids: list[str] | None = None,
-                       gap_char: str = '-') -> ArrayAlignment:
+                       gap_char: str = '-') -> Alignment:
     """
     Sanitize an aligned protein FASTA by enforcing only canonical 20 amino acids
     and the gap character. Any illegal or unknown symbol is replaced with a gap.
 
     Parameters
     ----------
-    aln : ArrayAlignment
+    aln : Alignment
         The input alignment (protein sequences expected).
     legal_amino_acids : list[str], optional
         List of allowed amino acids. Defaults to the canonical 20.
@@ -35,7 +35,7 @@ def sanitize_alignment(aln: ArrayAlignment,
 
     Returns
     -------
-    ArrayAlignment
+    Alignment
         A new alignment object with illegal symbols replaced by gaps and all
         residue letters uppercased.
     """
@@ -524,15 +524,15 @@ def get_ohe_seq(sequence: Union[str, np.ndarray, torch.Tensor],
     else:
         raise ValueError("Input must be a string, numpy array, or torch tensor.")
 
-def alignment_to_base_numpy_sequences(alignment: ArrayAlignment,
+def alignment_to_base_numpy_sequences(alignment: Alignment,
                                       alphabet: List[str] = PROT_20) -> List[BaseNumpySequence]:
     """
-    Converts a cogent3 ArrayAlignment object to a list of
+    Converts a cogent3 Alignment object to a list of
     `BaseNumpySequence` objects.
 
     Parameters
     ----------
-    alignment : ArrayAlignment
+    alignment : Alignment
         The cogent3 alingmnet object
     
     alphabet : List[str], default=`PROT_20`
@@ -574,7 +574,7 @@ def alignment_to_base_numpy_sequences(alignment: ArrayAlignment,
         sequences.append(base_numpy_seq)
     return sequences
 
-def fasta_to_prot20_sequences(filepath: str | Path) -> List[BaseNumpySequence]:
+def fasta_to_prot20_sequences(filepath: str | Path, *, strict: bool = True) -> List[BaseNumpySequence]:
     """
     Load a FASTA file that may be aligned or unaligned and return a
     sanitised list of BaseNumpySequence with the canonical PROT_20
@@ -597,9 +597,6 @@ def fasta_to_prot20_sequences(filepath: str | Path) -> List[BaseNumpySequence]:
         List of ungapped, PROT_20 sequences.
     """
     p = Path(filepath)
-    # Note: do not hard-fail on non-canonical residues at this stage.
-    # We allow them and sanitize later (replace with gaps for alignments
-    # or delete from unaligned sequences), per user expectation.
     try:
         with open(p, 'r'):
             pass
@@ -608,6 +605,19 @@ def fasta_to_prot20_sequences(filepath: str | Path) -> List[BaseNumpySequence]:
     # Try alignment path first
     try:
         aln = load_aligned_seqs(str(p), moltype='protein')
+        # If strict, check for illegal symbols before sanitizing
+        if strict:
+            raw_chars: set[str] = set()
+            with open(p, 'r') as fh2:
+                for line in fh2:
+                    if not line or line.startswith('>'):
+                        continue
+                    raw_chars.update(ch.upper() for ch in line.strip())
+            raw_chars.discard('-'); raw_chars.discard('.')
+            illegal = {ch for ch in raw_chars if ch and ch not in set(PROT_20)}
+            if illegal:
+                raise ValueError(f"Non-canonical residues {sorted(illegal)} present in FASTA; expected only PROT_20: {PROT_20}")
+
         aln = sanitize_alignment(aln)
         return alignment_to_base_numpy_sequences(aln, alphabet=PROT_20)
     except Exception:
@@ -639,24 +649,30 @@ def fasta_to_prot20_sequences(filepath: str | Path) -> List[BaseNumpySequence]:
         for name, s in zip(names, seqs_raw):
             # strip gaps/dots and uppercase
             s_str = s.replace('-', '').replace('.', '').upper()
-            # delete any illegal residues (e.g. X, B, Z, etc.)
-            s_filtered = ''.join(ch for ch in s_str if ch in legal)
+            if strict:
+                bad = {ch for ch in set(s_str) if ch not in legal}
+                if bad:
+                    raise ValueError(f"Non-canonical residues {sorted(bad)} found in sequence {name!r}; expected only PROT_20: {PROT_20}")
+                s_filtered = s_str
+            else:
+                # delete any illegal residues (e.g. X, B, Z, etc.)
+                s_filtered = ''.join(ch for ch in s_str if ch in legal)
             # if sequence becomes empty after filtering, skip it
             if not s_filtered:
                 continue
             out.append(BaseNumpySequence.from_string(s_filtered, alphabet=PROT_20, moltype='protein', sequence_id=name))
         return out
 
-def moving_window_alignment(alignment: ArrayAlignment,
+def moving_window_alignment(alignment: Alignment,
                             window_size: int,
-                            overlap: int) -> List[ArrayAlignment]:
+                            overlap: int) -> List[Alignment]:
     """
     Split an alignment into sub-alignments by TIPS (sequences), using a
     moving window over the sequence list with overlap.
 
     Parameters
     ----------
-    alignment : ArrayAlignment
+    alignment : Alignment
         The input alignment (all tips retained in full length per sub-align).
     window_size : int
         Number of tips (sequences) per sub-alignment.
@@ -666,20 +682,20 @@ def moving_window_alignment(alignment: ArrayAlignment,
     Returns
     -------
     list
-        A list of ArrayAlignment objects, each containing `window_size`
+        A list of Alignment objects, each containing `window_size`
         tips (except possibly the last), all columns preserved.
     """
     if window_size <= overlap:
         raise ValueError("Window size must be greater than the overlap.")
 
-    # Order-preserving list of (name, seq)
-    items = list(alignment.named_seqs.items())
+    # Order-preserving list of (name, seq_str) using cogent3 Alignment API
+    items = [(name, str(alignment.get_gapped_seq(name))) for name in alignment.names]
     n_tips = len(items)
     if n_tips == 0:
         return []
 
     step = window_size - overlap
-    windows: list[ArrayAlignment] = []
+    windows: list[Alignment] = []
 
     # Primary windows
     for start in range(0, max(n_tips - window_size + 1, 1), step):
@@ -698,6 +714,58 @@ def moving_window_alignment(alignment: ArrayAlignment,
                 windows.append(make_aligned_seqs({k: v for k, v in tail}, moltype='protein'))
 
     return windows
+
+
+def iter_moving_window_alignment(alignment: Alignment,
+                                 window_size: int,
+                                 overlap: int):
+    """
+    Generator version of moving-window fanning by tips. Yields
+    Alignment objects, each containing up to `window_size` tips with
+    `overlap` tips overlapping with the previous window. All columns
+    (sites) are preserved.
+
+    Parameters
+    ----------
+    alignment : Alignment
+        Source alignment to fan.
+    window_size : int
+        Number of tips (sequences) per sub-alignment.
+    overlap : int
+        Number of tips to overlap between consecutive windows.
+    """
+    if window_size <= overlap:
+        raise ValueError("Window size must be greater than the overlap.")
+
+    items = [(name, str(alignment.get_gapped_seq(name))) for name in alignment.names]
+    n_tips = len(items)
+    if n_tips == 0:
+        return
+
+    step = window_size - overlap
+    # primary windows
+    start = 0
+    while start < n_tips:
+        end = min(start + window_size, n_tips)
+        sub = items[start:end]
+        if not sub:
+            break
+        yield make_aligned_seqs({k: v for k, v in sub}, moltype='protein')
+        if end == n_tips:
+            break
+        start += step
+    # ensure tail coverage (last window of exact size if not already yielded)
+    if n_tips > window_size:
+        tail = items[-window_size:]
+        tail_names = [k for k, _ in tail]
+        try:
+            last_names = list(alignment.names)  # fallback
+        except Exception:
+            last_names = []
+        # we cannot inspect last yielded window names here; rely on
+        # consumers tolerating a duplicate last window in rare edge cases
+        # to guarantee coverage.
+        # In typical use, the loop above already yielded the tail.
 
 @dataclass
 class HammingCheckResult:
