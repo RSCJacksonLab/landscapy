@@ -2,24 +2,13 @@ import numpy as np
 import pytest
 from fitness_landscape.utils import cosine_similarity_matrix, get_landscape_dist_mat, make_latent_geometric_graph_connected, sample_observed_induced_connected
 from fitness_landscape.core.landscape import FitnessLandscape
-from fitness_landscape.core.sequence import generate_sequences
-from fitness_landscape.core.fitness import NumericFitness
 import networkx as nx
 
 
 @pytest.fixture
-def util_landscape():
-    """Provides a basic FitnessLandscape for utility testing."""
-    sequences = generate_sequences(length=3, alphabet=[0, 1])
-    fitness_values = [[val] for val in np.random.rand(8)]
-    fitness_layers = {
-        'default': NumericFitness(name='default', values=fitness_values)
-    }
-    return FitnessLandscape.from_sequences(
-        sequences=sequences,
-        fitness_layers=fitness_layers,
-        graph_type='hamming'
-    )
+def util_landscape(binary_3bit_landscape):
+    """Reuse shared binary_3bit_landscape fixture from conftest."""
+    return binary_3bit_landscape
 
 def test_cosine_similarity_matrix():
     """Tests the cosine similarity matrix computation."""
@@ -59,4 +48,3 @@ def test_geometric_graph_induction():
     assert np.isclose((G.number_of_nodes() * 0.5), G_ind.number_of_nodes(), 2)
     assert np.isclose((G.number_of_edges() * 0.5), G_ind.number_of_edges(), 5)
     assert nx.is_connected(G_ind)
-

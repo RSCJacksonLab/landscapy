@@ -78,7 +78,15 @@ class BaseNumpySequence:
             self.alphabet = sorted(list(set(map(str, self._np))))
 
         # Standardize gap character ONLY for string arrays, preserving numeric arrays.
+        # Ensure dtype can hold "gap" (not truncated to 'g').
         if self._np.dtype.kind in 'US' and "gap" in self.alphabet and "-" not in self.alphabet:
+            try:
+                # Upcast to a wider Unicode dtype if needed
+                if self._np.dtype.itemsize < 12:  # 'U3' is 12 bytes
+                    self._np = self._np.astype('U3')
+            except Exception:
+                # Fallback to object dtype for safety
+                self._np = self._np.astype(object)
             self._np[self._np == "-"] = "gap"
 
         if moltype and not self._c3_seq:
