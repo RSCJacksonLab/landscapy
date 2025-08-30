@@ -10,6 +10,9 @@ from dataclasses import dataclass
 from softalign.soft_alignment import align_soft_sequences
 from ._const import ALPHABET_21, PROT_20
 from cogent3 import ArrayAlignment, make_aligned_seqs, ArrayAlignment 
+from cogent3 import load_aligned_seqs
+from pathlib import Path
+from .core.sequence import BaseNumpySequence
 
 def sanitize_alignment(aln: ArrayAlignment,
                        *,
@@ -541,18 +544,78 @@ def alignment_to_base_numpy_sequences(alignment: ArrayAlignment,
         A list of BaseNumpySequence objects with gaps removed.
         
     """
-    sequences = []
-    for seq in alignment.iter_seqs():
+    # Collect sequences as strings and ensure uniform length in alignment
+    names = list(alignment.names)
+    seq_strs = [str(alignment.get_gapped_seq(n)) for n in names]
+    if not seq_strs:
+        return []
+    L = len(seq_strs[0])
+    if any(len(s) != L for s in seq_strs):
+        # Defensive: cogent3 alignments should be rectangular
+        raise ValueError("Alignment sequences have differing lengths")
 
-        ungapped_seq_str = str(seq).replace('-', '')
+    # Keep only columns with no gaps across any sequence
+    keep = [j for j in range(L) if all(s[j] != '-' for s in seq_strs)]
+    if not keep:
+        raise ValueError("All alignment columns contain gaps; cannot build ungapped sequences")
 
+    sequences: list[BaseNumpySequence] = []
+    legal = set(alphabet)
+    for name, s in zip(names, seq_strs):
+        ungapped = ''.join(s[j] for j in keep)
+        bad = {ch for ch in set(ungapped.upper()) if ch not in legal}
+        if bad:
+            raise ValueError(f"Non-canonical residues {sorted(bad)} found in sequence {name!r}; expected only PROT_20: {alphabet}")
         base_numpy_seq = BaseNumpySequence(
-            list(ungapped_seq_str),
-            alphabet=PROT_20,
-            sequence_id=seq.name
+            list(ungapped),
+            alphabet=alphabet,
+            sequence_id=name,
         )
         sequences.append(base_numpy_seq)
     return sequences
+
+def fasta_to_prot20_sequences(filepath: str | Path) -> List[BaseNumpySequence]:
+    """
+    Load a FASTA file that may be aligned or unaligned and return a
+    sanitised list of BaseNumpySequence with the canonical PROT_20
+    alphabet and no gaps.
+
+    Behavior
+    - If the file parses as an alignment, gaps are removed per sequence
+      after sanitising with sanitize_alignment.
+    - Otherwise, sequences are treated as unaligned; any '-' or '.' are
+      stripped defensively and non-canonical residues cause an error.
+
+    Parameters
+    ----------
+    filepath : str | Path
+        Path to the FASTA file.
+
+    Returns
+    -------
+    List[BaseNumpySequence]
+        List of ungapped, PROT_20 sequences.
+    """
+    p = Path(filepath)
+    # Try alignment path first
+    try:
+        aln = load_aligned_seqs(str(p), moltype='protein')
+        aln = sanitize_alignment(aln)
+        return alignment_to_base_numpy_sequences(aln, alphabet=PROT_20)
+    except Exception:
+        # Fallback to unaligned sequences
+        from .core.sequence import read_from_fasta
+        seqs = read_from_fasta(p, moltype='protein')
+        legal = set(PROT_20)
+        out: list[BaseNumpySequence] = []
+        for s in seqs:
+            s_id = getattr(s, 'id', None)
+            s_str = s.to_str().replace('-', '').replace('.', '')
+            bad = {ch for ch in set(s_str.upper()) if ch not in legal}
+            if bad:
+                raise ValueError(f"Non-canonical residues {sorted(bad)} found in sequence {s_id!r}; expected only PROT_20: {PROT_20}")
+            out.append(BaseNumpySequence.from_string(s_str, alphabet=PROT_20, moltype='protein', sequence_id=s_id))
+        return out
 
 def moving_window_alignment(alignment: ArrayAlignment,
                             window_size: int,

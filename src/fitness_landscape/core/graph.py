@@ -1122,7 +1122,8 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
 def create_phylo_graph(sequences: Union[Path, ArrayAlignment],
                        replacement_matrix: List[str] = ['LG'],
                        model_fitting: bool = True,
-                       _log_progress: bool = False) -> nx.DiGraph:
+                       _log_progress: bool = False,
+                       _nested_parallel: bool = False) -> nx.DiGraph:
     """
     Factory function to create an undirected graph using phylogenetic
     inference and ancestral sequence reconstruction (with an 
@@ -1155,7 +1156,7 @@ def create_phylo_graph(sequences: Union[Path, ArrayAlignment],
     graph = constructor.construct_dag(graph_type='undirected')
     
     # Attach edge attributes.    
-    compute_edge_mutations_star(G=graph, _log_progress=_log_progress)
+    compute_edge_mutations_star(G=graph, _log_progress=_log_progress, _nested_parallel=_nested_parallel)
     return graph
 
 # Remote ray function for evol alignment.
@@ -1559,7 +1560,8 @@ def compute_edge_mutations_star(G: nx.Graph | nx.DiGraph,
                                 alphabet: List = PROT_20,
                                 chunk_size: Optional[int] = 8,
                                 eps: float = 1e-12,
-                                _log_progress: bool = False) -> None:
+                                _log_progress: bool = False,
+                                _nested_parallel: bool = False) -> None:
     """
     Compute expected Hamming distance per edge using star subgraphs, sequentially.
 
@@ -1609,23 +1611,59 @@ def compute_edge_mutations_star(G: nx.Graph | nx.DiGraph,
         _logger.info('compute_edge_mutations_star: start (nodes=%d, edges=%d, chunk=%s)', G.number_of_nodes(), G.number_of_edges(), chunk_size)
     set_w, set_d, set_s = {}, {}, {}
 
-    for u in G.nodes():
-        # Avoid duplicate pairs in undirected graphs
-        nbrs = [v for v in G.neighbors(u) if (u < v) or G.is_directed()]
-        if not nbrs:
-            continue
-        Pu = _sanitize(G.nodes[u]['sequence'].ungapped_arr)
-        for chunk_ids in _chunks(list(range(len(nbrs))), chunk_size):
-            seqs = [Pu] + [_sanitize(G.nodes[nbrs[i]]['sequence'].ungapped_arr) for i in chunk_ids]
-            aligned, _ = align_soft_sequences(sequences=seqs, alphabet=alphabet)
-            Au = np.asarray(aligned[0])
-            for off, idx in enumerate(chunk_ids, start=1):
-                v = nbrs[idx]
-                Av = np.asarray(aligned[off])
-                mut, eff, dist = expected_hamming_from_aligned(Au, Av)
-                set_w[(u, v)] = float(mut)
-                set_d[(u, v)] = float(dist)
-                set_s[(u, v)] = float(-np.log(max(dist, eps)))
+    if not _nested_parallel:
+        for u in G.nodes():
+            # Avoid duplicate pairs in undirected graphs
+            nbrs = [v for v in G.neighbors(u) if (u < v) or G.is_directed()]
+            if not nbrs:
+                continue
+            Pu = _sanitize(G.nodes[u]['sequence'].ungapped_arr)
+            for chunk_ids in _chunks(list(range(len(nbrs))), chunk_size):
+                seqs = [Pu] + [_sanitize(G.nodes[nbrs[i]]['sequence'].ungapped_arr) for i in chunk_ids]
+                _res = align_soft_sequences(sequences=seqs, alphabet=alphabet)
+                aligned = _res[0] if isinstance(_res, tuple) else _res
+                Au = np.asarray(aligned[0])
+                for off, idx in enumerate(chunk_ids, start=1):
+                    v = nbrs[idx]
+                    Av = np.asarray(aligned[off])
+                    mut, eff, dist = expected_hamming_from_aligned(Au, Av)
+                    set_w[(u, v)] = float(mut)
+                    set_d[(u, v)] = float(dist)
+                    set_s[(u, v)] = float(-np.log(max(dist, eps)))
+    else:
+        # Ray-parallel star computation per node
+        tasks = []
+        node_list = list(G.nodes())
+        for u in node_list:
+            nbrs = [v for v in G.neighbors(u) if (u < v) or G.is_directed()]
+            if not nbrs:
+                continue
+            seqs_v = [G.nodes[v]['sequence'] for v in nbrs]
+            tasks.append(_star_block.remote(u, nbrs, G.nodes[u]['sequence'], seqs_v, alphabet, chunk_size, eps))
+        if tasks:
+            pending = set(tasks)
+            try:
+                import psutil as _psutil
+            except Exception:
+                _psutil = None
+            done_count = 0
+            total = len(tasks)
+            while pending:
+                done, pending = ray.wait(list(pending), num_returns=1, timeout=30.0)
+                if done:
+                    W, D, S = ray.get(done[0])
+                    set_w.update(W); set_d.update(D); set_s.update(S)
+                    done_count += 1
+                    if _log_progress:
+                        _logger.info('compute_edge_mutations_star (nested): %d/%d completed', done_count, total)
+                else:
+                    if _log_progress:
+                        rss = ''
+                        if _psutil is not None:
+                            p = _psutil.Process()
+                            rss_bytes = p.memory_info().rss
+                            rss = f" rss={rss_bytes/1e9:.2f}GB"
+                        _logger.info('compute_edge_mutations_star heartbeat: %d/%d completed%s', done_count, total, rss)
 
     if set_w:
         nx.set_edge_attributes(G, set_w, "weight")

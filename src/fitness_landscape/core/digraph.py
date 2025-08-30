@@ -34,7 +34,9 @@ import ray
 
 def create_phylo_digraph(sequences: Union[Path, ArrayAlignment],
                          replacement_matrix: List[str] = ['NQ.pfam'],
-                         model_fitting: bool = True) -> nx.DiGraph:
+                         model_fitting: bool = True,
+                         _log_progress: bool = False,
+                         _nested_parallel: bool = False) -> nx.DiGraph:
     """
     Factory function to create a Directed acyclic graph using
     phylogenetic inference and ancestral sequence reconstruction. 
@@ -63,12 +65,13 @@ def create_phylo_digraph(sequences: Union[Path, ArrayAlignment],
 
     constructor = ASRConstructor(sequences,
                                  replacement_matrix = replacement_matrix,
-                                 model_fitting = model_fitting)
+                                 model_fitting = model_fitting,
+                                 _log_progress=_log_progress)
     # Construct digraph with `graph_type` flag.
     digraph = constructor.construct_dag(graph_type='directed')
     
     # Attach edge attributes.    
-    compute_edge_mutations_star(G=digraph)
+    compute_edge_mutations_star(G=digraph, _log_progress=_log_progress, _nested_parallel=_nested_parallel)
     return digraph
 
 # Remote ray function for evol alignment.
