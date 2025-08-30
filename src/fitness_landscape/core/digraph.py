@@ -36,7 +36,10 @@ def create_phylo_digraph(sequences: Union[Path, ArrayAlignment],
                          replacement_matrix: List[str] = ['NQ.pfam'],
                          model_fitting: bool = True,
                          _log_progress: bool = False,
-                         _nested_parallel: bool = False) -> nx.DiGraph:
+                         _nested_parallel: bool = False,
+                         *,
+                         _compute_hamming_edges: bool = True,
+                         **kwargs) -> nx.DiGraph:
     """
     Factory function to create a Directed acyclic graph using
     phylogenetic inference and ancestral sequence reconstruction. 
@@ -70,8 +73,9 @@ def create_phylo_digraph(sequences: Union[Path, ArrayAlignment],
     # Construct digraph with `graph_type` flag.
     digraph = constructor.construct_dag(graph_type='directed')
     
-    # Attach edge attributes.    
-    compute_edge_mutations_star(G=digraph, _log_progress=_log_progress, _nested_parallel=_nested_parallel)
+    # Attach edge attributes.
+    if _compute_hamming_edges:
+        compute_edge_mutations_star(G=digraph, _log_progress=_log_progress, _nested_parallel=_nested_parallel)
     return digraph
 
 # Remote ray function for evol alignment.
@@ -105,6 +109,8 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
                                              tau: float = 1.0,
                                              connectivity_threshold: float = 1e-4,
                                              cpus: int = 1,
+                                             *,
+                                             _compute_hamming_edges: bool = True,
                                              **kwargs) -> nx.DiGraph:
     """
     Constructs a diffusion graph by scoring standard alignments with an
@@ -263,8 +269,12 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
     for i, seq in enumerate(sequences):
         digraph.nodes[i]['sequence'] = seq
 
-    # Attach edge attributes.    
-    if all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for seq in sequences):
+    # Optionally compute expected Hamming distances if available
+    if _compute_hamming_edges and all(
+        hasattr(seq, "ungapped_arr") and getattr(seq, "ungapped_arr", None) is not None
+        and getattr(seq, "alphabet", None) == PROT_20
+        for seq in sequences
+    ):
         compute_edge_mutations_star(G=digraph)
     
     return digraph
@@ -277,6 +287,8 @@ def create_particle_filter_digraph(sequences: List[BaseNumpySequence],
                                    _emb_array_key: str = 'emb_array',
                                    temperature: float = 1.0,
                                    top_p: float = 0.9,
+                                   *,
+                                   _compute_hamming_edges: bool = True,
                                    **kwargs) -> nx.DiGraph:
     """
     Factory function to create a directed graph using a Gibbs sampling
@@ -323,8 +335,12 @@ def create_particle_filter_digraph(sequences: List[BaseNumpySequence],
     evolution_exp.run()
     digraph = evolution_exp.G
     
-    # Attach edge attributes. 
-    if all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for _, seq in digraph.nodes(data='sequence')):
+    # Optionally compute expected Hamming distances if available
+    if _compute_hamming_edges and all(
+        hasattr(seq, "ungapped_arr") and getattr(seq, "ungapped_arr", None) is not None
+        and getattr(seq, "alphabet", None) == PROT_20
+        for _, seq in digraph.nodes(data='sequence')
+    ):
         compute_edge_mutations_star(G=digraph)
     
     return digraph

@@ -584,7 +584,7 @@ def fasta_to_prot20_sequences(filepath: str | Path) -> List[BaseNumpySequence]:
     - If the file parses as an alignment, gaps are removed per sequence
       after sanitising with sanitize_alignment.
     - Otherwise, sequences are treated as unaligned; any '-' or '.' are
-      stripped defensively and non-canonical residues cause an error.
+      stripped defensively and non-canonical residues are deleted.
 
     Parameters
     ----------
@@ -597,20 +597,12 @@ def fasta_to_prot20_sequences(filepath: str | Path) -> List[BaseNumpySequence]:
         List of ungapped, PROT_20 sequences.
     """
     p = Path(filepath)
-    # Pre-validate raw characters: forbid any non-canonical residues
+    # Note: do not hard-fail on non-canonical residues at this stage.
+    # We allow them and sanitize later (replace with gaps for alignments
+    # or delete from unaligned sequences), per user expectation.
     try:
-        raw_chars: set[str] = set()
-        with open(p, 'r') as fh:
-            for line in fh:
-                if not line or line.startswith('>'):
-                    continue
-                raw_chars.update(ch.upper() for ch in line.strip())
-        # ignore common gap/dot placeholders
-        raw_chars.discard('-')
-        raw_chars.discard('.')
-        illegal = {ch for ch in raw_chars if ch and ch not in set(PROT_20)}
-        if illegal:
-            raise ValueError(f"Non-canonical residues {sorted(illegal)} present in FASTA; expected only PROT_20: {PROT_20}")
+        with open(p, 'r'):
+            pass
     except FileNotFoundError:
         raise
     # Try alignment path first
@@ -619,7 +611,7 @@ def fasta_to_prot20_sequences(filepath: str | Path) -> List[BaseNumpySequence]:
         aln = sanitize_alignment(aln)
         return alignment_to_base_numpy_sequences(aln, alphabet=PROT_20)
     except Exception:
-        # Fallback to unaligned: manually parse FASTA to allow stripping '.'/'-'
+        # Fallback to unaligned: manually parse FASTA and delete illegal symbols
         legal = set(PROT_20)
         names: list[str] = []
         seqs_raw: list[str] = []
@@ -647,52 +639,64 @@ def fasta_to_prot20_sequences(filepath: str | Path) -> List[BaseNumpySequence]:
         for name, s in zip(names, seqs_raw):
             # strip gaps/dots and uppercase
             s_str = s.replace('-', '').replace('.', '').upper()
-            bad = {ch for ch in set(s_str) if ch not in legal}
-            if bad:
-                raise ValueError(f"Non-canonical residues {sorted(bad)} found in sequence {name!r}; expected only PROT_20: {PROT_20}")
-            out.append(BaseNumpySequence.from_string(s_str, alphabet=PROT_20, moltype='protein', sequence_id=name))
+            # delete any illegal residues (e.g. X, B, Z, etc.)
+            s_filtered = ''.join(ch for ch in s_str if ch in legal)
+            # if sequence becomes empty after filtering, skip it
+            if not s_filtered:
+                continue
+            out.append(BaseNumpySequence.from_string(s_filtered, alphabet=PROT_20, moltype='protein', sequence_id=name))
         return out
 
 def moving_window_alignment(alignment: ArrayAlignment,
                             window_size: int,
                             overlap: int) -> List[ArrayAlignment]:
     """
-    Splits a cogent3 ArrayAlignment object into a list of smaller
-    ArrayAlignment objects using a moving window.
+    Split an alignment into sub-alignments by TIPS (sequences), using a
+    moving window over the sequence list with overlap.
 
     Parameters
     ----------
-    alignment : cogent3.core.alignment.ArrayAlignment
-        The alignment to be split.
+    alignment : ArrayAlignment
+        The input alignment (all tips retained in full length per sub-align).
     window_size : int
-        The number of sites (columns) in each window.
+        Number of tips (sequences) per sub-alignment.
     overlap : int
-        The number of sites to overlap between consecutive windows.
+        Number of tips of overlap between consecutive windows.
 
     Returns
     -------
     list
-        A list of cogent3.core.alignment.ArrayAlignment objects.
-    """    
+        A list of ArrayAlignment objects, each containing `window_size`
+        tips (except possibly the last), all columns preserved.
+    """
     if window_size <= overlap:
         raise ValueError("Window size must be greater than the overlap.")
 
-    alignment_items = list(alignment.named_seqs.items())
-    
-    # The step size is the amount to move the window forward in each iteration.
-    step_size = window_size - overlap
-    alignment_length = alignment.array_seqs.shape[0]
-    
-    windows = []
-    
-    for start in range(0, alignment_length - window_size + 1, step_size):
-        end = start + window_size
-        window = alignment_items[start:end]
-        window_dict = {
-            seq_id : seq for seq_id, seq in window
-        }
-        windows.append(make_aligned_seqs(window_dict, moltype='protein'))
-        
+    # Order-preserving list of (name, seq)
+    items = list(alignment.named_seqs.items())
+    n_tips = len(items)
+    if n_tips == 0:
+        return []
+
+    step = window_size - overlap
+    windows: list[ArrayAlignment] = []
+
+    # Primary windows
+    for start in range(0, max(n_tips - window_size + 1, 1), step):
+        end = min(start + window_size, n_tips)
+        sub = items[start:end]
+        if not sub:
+            continue
+        windows.append(make_aligned_seqs({k: v for k, v in sub}, moltype='protein'))
+
+    # Ensure tail coverage if not exactly divisible and not already included
+    if windows:
+        last_names = set(windows[-1].names)
+        if n_tips > window_size and len(last_names) < window_size:
+            tail = items[-window_size:]
+            if set(k for k, _ in tail) != last_names:
+                windows.append(make_aligned_seqs({k: v for k, v in tail}, moltype='protein'))
+
     return windows
 
 @dataclass

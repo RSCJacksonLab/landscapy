@@ -86,7 +86,12 @@ def _create_landscape_task(
     A generalized Ray remote task that calls the `from_sequences` method
     of a specified landscape class.
     """
-    import logging as _logging, time as _time
+    import logging as _logging, time as _time, os as _os
+    # Constrain intra-op threading in worker to avoid oversubscription/OOM
+    _os.environ.setdefault('OMP_NUM_THREADS', '1')
+    _os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+    _os.environ.setdefault('MKL_NUM_THREADS', '1')
+    _os.environ.setdefault('NUMEXPR_NUM_THREADS', '1')
     _logger = _logging.getLogger('fitness_landscape')
     if _log_progress:
         _logger.info('[job %s/%s] start', _job_id, _total_jobs)
@@ -747,6 +752,7 @@ class FitnessSuperscape:
                                    _construct_checkpoint_interval: int = 300,
                                    _construct_resume_checkpoint: Union[str, Path, None] = None,
                                    _parent_task_cpus: float = 1.0,
+                                   _meta_cpu_chains: int | None = None,
                                    **sampler_kwargs: Any) -> "FitnessSuperscape":
         """
         A flexible factory method to create a FitnessSuperscape by
@@ -813,7 +819,9 @@ class FitnessSuperscape:
             except Exception:
                 pass
 
+        # Prepare a submission queue; we submit at most `_meta_cpu_chains` tasks concurrently
         futures = []
+        prepared_jobs = []
         for job in construction_jobs:
             if 'sequences' not in job:
                 raise ValueError("Each job must have a `sequences` key.")
@@ -831,28 +839,43 @@ class FitnessSuperscape:
             if not wants_compute and job.get("graph_type") == "evol_diffusion" and wants_plm:
                 wants_compute = True
             num_gpus = 1 if (wants_plm and wants_compute) else 0
-            futures.append(
-                _create_landscape_task.options(num_gpus=num_gpus, num_cpus=_parent_task_cpus).remote(**job)
-            )
+            # Avoid computing Hamming edge weights inside child constructors; they will be
+            # recomputed on the latent graph after alignment.
+            job.setdefault('_compute_hamming_edges', False)
+
+            prepared_jobs.append((num_gpus, job))
 
         # Retrieve the results with progress logging
         import logging as _logging, time as _time
         _logger = _logging.getLogger('fitness_landscape')
-        total = len(futures)
-        pending = set(futures[i] for i in remaining_idx)
+        total = len(prepared_jobs)
+        # Concurrency window size
+        max_inflight = int(_meta_cpu_chains) if _meta_cpu_chains and _meta_cpu_chains > 0 else total
+        # Submit initial window
+        submit_order = list(range(len(prepared_jobs)))
+        inflight: dict[Any, int] = {}
         done_count = 0
-        ref_to_index = {ref: i for i, ref in enumerate(futures)}
         t_last = _time.perf_counter()
         try:
             import psutil as _psutil  # optional
         except Exception:
             _psutil = None
-        while pending:
-            done, pending = ray.wait(list(pending), num_returns=1, timeout=30.0)
+        # Helper to submit next job if any remain and inflight below cap
+        def _maybe_submit():
+            nonlocal submit_order
+            while submit_order and len(inflight) < max_inflight:
+                jidx = submit_order.pop(0)
+                num_gpus, job = prepared_jobs[jidx]
+                ref = _create_landscape_task.options(num_gpus=num_gpus, num_cpus=_parent_task_cpus).remote(**job)
+                inflight[ref] = jidx
+
+        _maybe_submit()
+        while inflight:
+            done, _ = ray.wait(list(inflight.keys()), num_returns=1, timeout=30.0)
             now = _time.perf_counter()
             if done:
                 ref = done[0]
-                idx = ref_to_index[ref]
+                idx = inflight.pop(ref)
                 try:
                     landscapes[idx] = ray.get(ref)
                 except Exception as e:
@@ -860,6 +883,8 @@ class FitnessSuperscape:
                 done_count += 1
                 if _show_progress:
                     _logger.info('parallel progress: %d/%d completed', done_count, total)
+                # Submit next job to keep window full
+                _maybe_submit()
                 # checkpoint
                 if ckpt_path and now - last_ckpt >= _construct_checkpoint_interval:
                     try:
