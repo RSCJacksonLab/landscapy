@@ -312,6 +312,15 @@ def diffusion_evol_superscape(sequences,
 @click.option('--meta-cpu-chains', required=False, type=int, default=os.cpu_count(), help='Number of CPU chains to use for the meta-alignment step in hierarchical alignment.')
 @click.option('--local-cpu-chains', required=False, type=int, default=(os.cpu_count()//10 if os.cpu_count()//10 > 1 else 1), help='Number of CPU chains to use for each parallel local alignment chain.')
 
+# Alignment cleaning
+@click.option('--drop-all-gap-columns/--keep-all-gap-columns', default=True, help='Drop columns that are entirely gaps in each alignment.')
+@click.option('--max-gap-frac', required=False, type=float, default=None, help='If set in [0,1], drop columns with gap fraction strictly greater than this threshold.')
+@click.option('--max-seq-gap-frac', required=False, type=float, default=None, help='If set in [0,1], drop any sequence whose gap fraction exceeds this threshold (e.g., 0.5 drops sequences >50% gaps).')
+# Ray worker lifecycle
+@click.option('--ray-fresh-worker/--no-ray-fresh-worker', default=False, help='If set, each Ray job uses a fresh worker (max_calls=1) to avoid native library state reuse.')
+# Streaming memory control
+@click.option('--max-seqs-per-block', required=False, type=int, default=None, help='If set, split each input alignment into blocks of at most this many sequences and process blocks sequentially. Fanning within a block may still use parallel Ray jobs.')
+
 def phylo_superscape(sequences,
                      output,
                      fan_alignment,
@@ -335,6 +344,11 @@ def phylo_superscape(sequences,
                      seed,
                      meta_cpu_chains,
                      local_cpu_chains,
+                     drop_all_gap_columns,
+                     max_gap_frac,
+                     max_seq_gap_frac,
+                     ray_fresh_worker,
+                     max_seqs_per_block,
                      sequential_construction,
                      log_file,
                      log_level,
@@ -372,6 +386,68 @@ def phylo_superscape(sequences,
     t0 = time.perf_counter(); c0 = time.process_time()
     logger.info('phylo-superscape: start')
 
+    # Helpers hoisted so both sub-iterators can reuse them
+    from cogent3.core.alignment import make_aligned_seqs
+
+    def _trim_alignment(alignment):
+        try:
+            names = list(alignment.names)
+            seqs = [str(alignment.get_gapped_seq(n)) for n in names]
+        except Exception:
+            return alignment
+        if not seqs:
+            return alignment
+        L = len(seqs[0])
+        keep_mask = [True] * L
+        for i in range(L):
+            col = [s[i] for s in seqs]
+            gap_count = sum(1 for c in col if c == '-')
+            # Drop all-gap columns
+            if drop_all_gap_columns and gap_count == len(col):
+                keep_mask[i] = False
+                continue
+            # Optional high-gap filter
+            if max_gap_frac is not None and 0.0 <= float(max_gap_frac) <= 1.0:
+                if (gap_count / len(col)) > float(max_gap_frac):
+                    keep_mask[i] = False
+        if all(keep_mask):
+            return alignment
+        if not any(keep_mask):
+            # Dropped all columns; return None to signal skip
+            return None
+        new_map = {n: ''.join(ch for ch, k in zip(s, keep_mask) if k) for n, s in zip(names, seqs)}
+        return make_aligned_seqs(new_map, moltype='protein')
+
+    def _drop_gappy_sequences(alignment):
+        if max_seq_gap_frac is None:
+            return alignment
+        try:
+            thr = float(max_seq_gap_frac)
+        except Exception:
+            return alignment
+        if not (0.0 <= thr <= 1.0):
+            return alignment
+        try:
+            names = list(alignment.names)
+            seqs = [str(alignment.get_gapped_seq(n)) for n in names]
+        except Exception:
+            return alignment
+        if not seqs:
+            return alignment
+        L = len(seqs[0]) or 1
+        keep_names = []
+        for n, s in zip(names, seqs):
+            gap_frac = (s.count('-') / L)
+            if gap_frac <= thr:
+                keep_names.append(n)
+        if len(keep_names) == len(names):
+            return alignment
+        if not keep_names:
+            logger.warning('All sequences exceeded max-seq-gap-frac=%.3f after trimming; skipping this alignment.', thr)
+            return None
+        new_map = {n: str(alignment.get_gapped_seq(n)) for n in keep_names}
+        return make_aligned_seqs(new_map, moltype='protein')
+
     def _iter_sub_alignments():
         from fitness_landscape.utils import iter_moving_window_alignment
         if os.path.isdir(sequences):
@@ -382,61 +458,126 @@ def phylo_superscape(sequences,
                 alignment_path = os.path.join(sequences, fasta_file)
                 alignment = load_aligned_seqs(alignment_path, moltype='protein')
                 alignment = sanitize_alignment(alignment)
+                alignment = _trim_alignment(alignment)
+                if alignment is None:
+                    logger.warning('Dropped alignment %s after trimming (no columns remain).', alignment_path)
+                    continue
+                alignment = _drop_gappy_sequences(alignment)
+                if alignment is None:
+                    logger.warning('Dropped alignment %s due to excessive sequence gaps.', alignment_path)
+                    continue
                 logger.info(f'Loaded alignment from {alignment_path}')
                 if fan_alignment:
                     if not all([fan_alignment_window, fan_alignment_overlap]):
                         raise click.UsageError("If --fan-alignment is set, both --fan-alignment-window and --fan-alignment-overlap must be provided.")
                     for sub in iter_moving_window_alignment(alignment, fan_alignment_window, fan_alignment_overlap):
-                        yield sub
+                        sub2 = _trim_alignment(sub)
+                        sub2 = _drop_gappy_sequences(sub2)
+                        if sub2 is None:
+                            continue
+                        yield sub2
                 else:
                     yield alignment
         else:
             alignment = load_aligned_seqs(sequences, moltype='protein')
             alignment = sanitize_alignment(alignment)
+            alignment = _trim_alignment(alignment)
+            if alignment is None:
+                logger.warning('Input alignment dropped after trimming (no columns remain).')
+                return
+            alignment = _drop_gappy_sequences(alignment)
+            if alignment is None:
+                logger.warning('Input alignment dropped due to excessive sequence gaps.')
+                return
             logger.info(f'Loaded alignment from {sequences}')
             if fan_alignment:
                 if not all([fan_alignment_window, fan_alignment_overlap]):
                     raise click.UsageError("If --fan-alignment is set, both --fan-alignment-window and --fan-alignment-overlap must be provided.")
                 for sub in iter_moving_window_alignment(alignment, fan_alignment_window, fan_alignment_overlap):
-                    yield sub
+                    sub2 = _trim_alignment(sub)
+                    sub2 = _drop_gappy_sequences(sub2)
+                    if sub2 is None:
+                        continue
+                    yield sub2
             else:
                 yield alignment
 
     # Build a streaming job generator for (di)graph construction
     def _construction_job_iter():
-        for i, sub_alignment in enumerate(_iter_sub_alignments(), start=1):
-            if directed_landscape:
-                yield {
-                    "sequences": sub_alignment,
-                    "digraph_type": "phylogenetic",
-                    "replacement_matrix": list(replacement_matrix),
-                    "model_fitting": model_fitting,
-                    "_compute_phylo_embeddings": compute_phylo_embeddings,
-                    "embedding_domain": embedding_domain,
-                    "_log_progress": log_progress,
-                    "_job_id": i,
-                    "_total_jobs": None,
-                    # Allow nested star-blocks if explicitly desired later
-                    "_nested_construction_parallel": False,
-                    # Keep payloads light in workers
-                    "_lightweight_nodes": True,
-                    "_hard_ancestors": True,
-                }
+        """
+        Generate construction jobs with optional sequence blocking.
+        If max_seqs_per_block is set, split each alignment into blocks
+        of up to that many sequences and emit a barrier between blocks so
+        the streaming constructor waits until all jobs in a block finish
+        before moving on.
+        """
+        from cogent3.core.alignment import make_aligned_seqs
+        from fitness_landscape.utils import iter_moving_window_alignment
+
+        job_counter = 0
+        for alignment in _iter_sub_alignments():
+            # Chunk by sequences if requested
+            names = list(alignment.names)
+            if max_seqs_per_block and max_seqs_per_block > 0 and len(names) > max_seqs_per_block:
+                blocks = [names[i:i+max_seqs_per_block] for i in range(0, len(names), max_seqs_per_block)]
             else:
-                yield {
-                    "sequences": sub_alignment,
-                    "graph_type": "phylogenetic",
-                    "replacement_matrix": list(replacement_matrix),
-                    "model_fitting": model_fitting,
-                    "_compute_phylo_embeddings": compute_phylo_embeddings,
-                    "embedding_domain": embedding_domain,
-                    "_log_progress": log_progress,
-                    "_job_id": i,
-                    "_total_jobs": None,
-                    "_nested_construction_parallel": False,
-                    "_lightweight_nodes": True,
-                    "_hard_ancestors": True,
-                }
+                blocks = [names]
+
+            for b_idx, block_names in enumerate(blocks):
+                block_map = {n: str(alignment.get_gapped_seq(n)) for n in block_names}
+                block_aln = make_aligned_seqs(block_map, moltype='protein')
+
+                def _emit_job(seq_aln):
+                    nonlocal job_counter
+                    job_counter += 1
+                    if directed_landscape:
+                        return {
+                            "sequences": seq_aln,
+                            "digraph_type": "phylogenetic",
+                            "replacement_matrix": list(replacement_matrix),
+                            "model_fitting": model_fitting,
+                            "_compute_phylo_embeddings": compute_phylo_embeddings,
+                            "embedding_domain": embedding_domain,
+                            "_log_progress": log_progress,
+                            "_job_id": job_counter,
+                            "_total_jobs": None,
+                            "_nested_construction_parallel": False,
+                            "_lightweight_nodes": True,
+                            "_hard_ancestors": True,
+                        }
+                    else:
+                        return {
+                            "sequences": seq_aln,
+                            "graph_type": "phylogenetic",
+                            "replacement_matrix": list(replacement_matrix),
+                            "model_fitting": model_fitting,
+                            "_compute_phylo_embeddings": compute_phylo_embeddings,
+                            "embedding_domain": embedding_domain,
+                            "_log_progress": log_progress,
+                            "_job_id": job_counter,
+                            "_total_jobs": None,
+                            "_nested_construction_parallel": False,
+                            "_lightweight_nodes": True,
+                            "_hard_ancestors": True,
+                        }
+
+                # Emit fanned or whole-block jobs
+                if fan_alignment:
+                    if not all([fan_alignment_window, fan_alignment_overlap]):
+                        raise click.UsageError("If --fan-alignment is set, both --fan-alignment-window and --fan-alignment-overlap must be provided.")
+                    for sub in iter_moving_window_alignment(block_aln, fan_alignment_window, fan_alignment_overlap):
+                        # Reuse the same trimming and per-sequence filtering logic as above
+                        sub2 = _trim_alignment(sub)
+                        sub2 = _drop_gappy_sequences(sub2)
+                        if sub2 is None:
+                            continue
+                        yield _emit_job(sub2)
+                else:
+                    yield _emit_job(block_aln)
+
+                # Insert barrier after each block to force sequential block processing
+                if b_idx < len(blocks) - 1:
+                    yield {"_barrier": True}
 
     bernoulli_beta = BernoulliBeta(alpha0=bernoulli_beta_alpha0, alpha1=bernoulli_beta_alpha1)
     
@@ -485,6 +626,7 @@ def phylo_superscape(sequences,
             constructor_type=('directed' if directed_landscape else 'undirected'),
             construction_job_iter=_construction_job_iter(),
             _meta_cpu_chains=meta_cpu_chains,
+            _fresh_worker_per_job=ray_fresh_worker,
             _show_progress=log_progress,
             _construct_checkpoint_dir=str(ckpt_dir),
             **sampler_kwargs

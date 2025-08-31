@@ -20,6 +20,8 @@ except Exception:
 import piqtree
 from piqtree import model_finder
 import math
+import os
+import tempfile
 from ..core.sequence import (
     BaseNumpySequence,
     SoftSequence
@@ -165,28 +167,58 @@ class ASRConstructor:
                 # Fallback if rand_seed not supported in older versions
                 return piqtree.build_tree(self.alignment, _model)
 
+        # Concurrency/stability guards: cap threaded libs and isolate working dir
+        env_cap = {
+            'OMP_NUM_THREADS': '1',
+            'OPENBLAS_NUM_THREADS': '1',
+            'MKL_NUM_THREADS': '1',
+            'NUMEXPR_NUM_THREADS': '1',
+        }
+        old_env = {k: os.environ.get(k) for k in env_cap}
+        os.environ.update(env_cap)
+
+        cwd0 = os.getcwd()
+        tmp_ctx = tempfile.TemporaryDirectory(prefix='iqtree_run_')
+        tmpdir = tmp_ctx.name
         primary_err = None
         try:
-            phylogenetic_tree = _try_build(model)
-        except Exception as e:
-            primary_err = e
-            # Fallback 1: retry with first provided model or LG
+            os.chdir(tmpdir)
             try:
-                first = str(replacement_matrix[0]) if replacement_matrix else 'LG'
-                phylogenetic_tree = _try_build(first)
-            except Exception as e2:
-                # Provide detailed error context including original exceptions
-                details = []
-                details.append(f"primary model={model!r} error={type(primary_err).__name__}: {primary_err}")
-                details.append(f"fallback model={first!r} error={type(e2).__name__}: {e2}")
-                pv = getattr(piqtree, '__version__', '?')
-                details.append(f"piqtree_version={pv}")
-                details.append("Set FITNESS_LANDSCAPE_IQTREE_LOG_DIR to preserve IQ-TREE logs for debugging")
-                msg = (
-                    "IQ-TREE (piqtree) tree building failed.\n" +
-                    "\n".join(details)
-                )
-                raise RuntimeError(msg) from e2
+                phylogenetic_tree = _try_build(model)
+            except Exception as e:
+                primary_err = e
+                # Fallback 1: retry with first provided model or LG
+                try:
+                    first = str(replacement_matrix[0]) if replacement_matrix else 'LG'
+                    phylogenetic_tree = _try_build(first)
+                except Exception as e2:
+                    # Provide detailed error context including original exceptions
+                    details = []
+                    details.append(f"primary model={model!r} error={type(primary_err).__name__}: {primary_err}")
+                    details.append(f"fallback model={first!r} error={type(e2).__name__}: {e2}")
+                    pv = getattr(piqtree, '__version__', '?')
+                    details.append(f"piqtree_version={pv}")
+                    details.append("Set FITNESS_LANDSCAPE_IQTREE_LOG_DIR to preserve IQ-TREE logs for debugging")
+                    msg = (
+                        "IQ-TREE (piqtree) tree building failed.\n" +
+                        "\n".join(details)
+                    )
+                    raise RuntimeError(msg) from e2
+        finally:
+            # Restore environment and working directory; cleanup temp dir
+            try:
+                os.chdir(cwd0)
+            except Exception:
+                pass
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            try:
+                tmp_ctx.cleanup()
+            except Exception:
+                pass
 
         self.phylogenetic_tree = phylogenetic_tree
         if self._log_progress:
