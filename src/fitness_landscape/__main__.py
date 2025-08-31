@@ -15,6 +15,7 @@ from fitness_landscape.core.landscape import FitnessLandscape
 from fitness_landscape.core.graph import create_evol_diffusion_graph
 from fitness_landscape.core.sequence import read_from_fasta
 from fitness_landscape.utils import _compute_embeddings_from_sequences, fasta_to_prot20_sequences
+from fitness_landscape._const import PROT_20
 
 @click.group()
 def cli():
@@ -512,6 +513,11 @@ def phylo_superscape(sequences,
 @click.option('--compute-hamming-edges/--no-compute-hamming-edges', default=True, help='Compute expected Hamming edge weights after phylo reconstruction.')
 @click.option('--lightweight-nodes/--no-lightweight-nodes', default=False, help='Return lightweight nodes (drop gapped_arr) to reduce memory.')
 @click.option('--hard-ancestors/--no-hard-ancestors', default=False, help='Collapse ancestral SoftSequence to hard argmax sequence to reduce memory.')
+# Logging (mirror other commands)
+@click.option('--log-file', type=click.Path(), default=None, help='Optional log file path.')
+@click.option('--log-level', type=click.Choice(['DEBUG','INFO','WARNING','ERROR']), default='INFO', show_default=True)
+@click.option('--log-progress', is_flag=True, default=False, help='Enable verbose progress logging.')
+@click.option('--log-prefix', type=str, default=None, help='If --log-file not provided, derive a log filename using this prefix next to --output.')
 def phylo_landscape(sequences,
                     output,
                     replacement_matrix,
@@ -523,14 +529,40 @@ def phylo_landscape(sequences,
                     plm_device,
                     compute_hamming_edges,
                     lightweight_nodes,
-                    hard_ancestors):
+                    hard_ancestors,
+                    log_file,
+                    log_level,
+                    log_progress,
+                    log_prefix):
     """
     Construct a single phylogenetic FitnessLandscape and save it to disk.
 
     This avoids the parallel Superscape flow to help isolate issues with
     Ray workers and focuses on a single phylogenetic reconstruction + ASR.
     """
+    # Logger setup (same scheme as others)
+    logger = logging.getLogger('fitness_landscape')
+    if not log_file and log_prefix:
+        ts = time.strftime('%Y%m%d-%H%M%S')
+        seq_base = os.path.basename(str(sequences).rstrip('/'))
+        out_p = Path(output)
+        base_dir = out_p.parent
+        log_name = f"{log_prefix}_{seq_base}_{ts}_{os.getpid()}.log"
+        log_file = str(base_dir / log_name)
+    if log_file:
+        logger.setLevel(getattr(logging, log_level))
+        fh = logging.FileHandler(log_file)
+        fh.setLevel(getattr(logging, log_level))
+        fmt = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+        fh.setFormatter(fmt)
+        if not any(isinstance(h, logging.FileHandler) and getattr(h, 'baseFilename', None) == fh.baseFilename for h in logger.handlers):
+            logger.addHandler(fh)
+
+    t0 = time.perf_counter(); c0 = time.process_time()
+    logger.info('phylo-landscape: start')
+
     # Build the phylogenetic landscape (undirected) using the alignment
+    logger.info('Loading alignment and constructing phylogenetic landscape')
     landscape = FitnessLandscape.from_sequences(
         sequences=Path(sequences),
         graph_type='phylogenetic',
@@ -547,9 +579,9 @@ def phylo_landscape(sequences,
     )
 
     # Persist to disk
-    with open(output, 'wb') as f:
-        pickle.dump(landscape, f)
-
+    logger.info('Saving landscape to %s', output)
+    landscape.save(Path(output))
+    logger.info('phylo-landscape: end wall=%.2fs cpu=%.2fs', time.perf_counter()-t0, time.process_time()-c0)
 
 
 @cli.command()
@@ -569,6 +601,7 @@ def phylo_landscape(sequences,
 @click.option('--use-gpu', is_flag=True, default=False, help='Use GPU for FAISS (if available for selected index).')
 @click.option('--hnsw-M', 'hnsw_m', type=int, default=32, show_default=True, help='HNSW M parameter.')
 @click.option('--cpus', type=int, default=1, show_default=True, help='CPUs per scoring task (used internally).')
+@click.option('--compute-hamming-edges/--no-compute-hamming-edges', default=True, help='Compute expected Hamming edge weights after phylo reconstruction.')
 
 # Embeddings
 @click.option('--compute-embeddings/--no-compute-embeddings', default=True, help='Compute node embeddings (ohe or plm).')
@@ -595,6 +628,7 @@ def evol_diffusion_landscape(sequences,
                              use_gpu,
                              hnsw_m,
                              cpus,
+                             compute_hamming_edges,
                              compute_embeddings,
                              embedding_domain,
                              plm_model_name,
@@ -630,22 +664,58 @@ def evol_diffusion_landscape(sequences,
     t0 = time.perf_counter(); c0 = time.process_time()
     logger.info('evol-diffusion-landscape: start')
 
-    # Read sequences (lenient sanitation to avoid early failures)
+    # Read sequences: accept a FASTA file or a directory of FASTA files.
+    # When a directory is provided, combine all FASTA files into one dataset.
     try:
-        seqs = fasta_to_prot20_sequences(Path(sequences), strict=False)
+        seq_path = Path(sequences)
+        if seq_path.is_dir():
+            fasta_files = sorted([p for p in seq_path.iterdir() if p.suffix.lower() in {'.fasta', '.fa', '.fas'}])
+            if not fasta_files:
+                raise click.UsageError(f"The directory '{sequences}' contains no FASTA files.")
+            seqs = []
+            for fp in fasta_files:
+                logger.info('Reading FASTA: %s', fp)
+                seqs.extend(fasta_to_prot20_sequences(fp, strict=False))
+            logger.info('Combined sequences from %d FASTA files (total=%d)', len(fasta_files), len(seqs))
+        else:
+            seqs = fasta_to_prot20_sequences(seq_path, strict=False)
     except Exception as e:
         raise click.UsageError(str(e))
 
     if not seqs:
-        raise click.UsageError('No sequences parsed from FASTA input.')
+        raise click.UsageError('No sequences parsed from the provided input.')
 
     # Embeddings
     if not compute_embeddings:
         raise click.UsageError('--no-compute-embeddings is not supported for this constructor; provide embeddings or enable computation.')
 
     if embedding_domain == 'ohe':
-        from fitness_landscape.core.graph import _encode_multiallele
-        E, _ = _encode_multiallele(seqs)
+        # If variable sequence lengths, fall back to a length-invariant
+        # composition embedding to avoid OHE stacking errors.
+        lengths = {len(s) for s in seqs}
+        if len(lengths) == 1:
+            from fitness_landscape.core.graph import _encode_multiallele
+            E, _ = _encode_multiallele(seqs)
+        else:
+            logger.warning('Sequences have non-uniform lengths (%s). Falling back to composition embeddings for kNN prefilter.', sorted(lengths))
+            A = [str(a).upper() for a in PROT_20]
+            amap = {a: i for i, a in enumerate(A)}
+            import numpy as _np
+            E = _np.zeros((len(seqs), len(A)), dtype=_np.float32)
+            for r, s in enumerate(seqs):
+                arr = getattr(s, 'to_array', lambda: [])()
+                counts = _np.zeros(len(A), dtype=_np.float32)
+                tot = 0
+                for sym in arr:
+                    j = amap.get(str(sym).upper())
+                    if j is not None:
+                        counts[j] += 1.0
+                        tot += 1
+                if tot > 0:
+                    counts /= float(tot)
+                else:
+                    counts[:] = 1.0 / len(A)
+                E[r] = counts
     else:
         E = _compute_embeddings_from_sequences(seqs, model_name=plm_model_name, batch_size=plm_batch_size, device=plm_device)
 
@@ -666,13 +736,15 @@ def evol_diffusion_landscape(sequences,
         use_gpu=use_gpu,
         hnsw_M=hnsw_m,
         cpus=cpus,
+        _compute_hamming_edges=compute_hamming_edges,
     )
 
     landscape = FitnessLandscape.from_graph(G)
 
     # Save
-    with open(output, 'wb') as f:
-        pickle.dump(landscape, f)
+    
+    landscape.save(Path(output))
+
     logger.info('Landscape saved to %s', output)
     logger.info('evol-diffusion-landscape: end wall=%.2fs cpu=%.2fs', time.perf_counter()-t0, time.process_time()-c0)
 

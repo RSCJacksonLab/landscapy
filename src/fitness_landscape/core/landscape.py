@@ -1,3 +1,4 @@
+import pickle
 import numpy as np
 import pandas as pd
 import networkx as nx
@@ -1172,6 +1173,17 @@ class FitnessLandscape:
         Thin alias around  existing `from_graph` for parity with other APIs.
         """
         return cls.from_graph(graph, **kwargs)
+
+    def save(self, filepath: Path):
+        """Saves the FitnessLandscape object to a file."""
+        with open(filepath, 'wb') as f:
+            pickle.dump(self, f)
+
+    @staticmethod
+    def load(filepath: Path):
+        """Loads a FitnessLandscape object from a file."""
+        with open(filepath, 'rb') as f:
+            return pickle.load(f)
 
     
     def __len__(self):
