@@ -751,6 +751,7 @@ class FitnessSuperscape:
                                    _construct_checkpoint_dir: Union[str, Path, None] = None,
                                    _construct_checkpoint_interval: int = 300,
                                    _construct_resume_checkpoint: Union[str, Path, None] = None,
+                                   _fresh_worker_per_job: bool = False,
                                    _parent_task_cpus: float = 1.0,
                                    _meta_cpu_chains: int | None = None,
                                    **sampler_kwargs: Any) -> "FitnessSuperscape":
@@ -869,7 +870,12 @@ class FitnessSuperscape:
             while submit_order and len(inflight) < max_inflight:
                 jidx = submit_order.pop(0)
                 num_gpus, job = prepared_jobs[jidx]
-                ref = _create_landscape_task.options(num_gpus=num_gpus, num_cpus=_parent_task_cpus).remote(**job)
+                _opts = {"num_gpus": num_gpus, "num_cpus": _parent_task_cpus}
+                if _fresh_worker_per_job:
+                    # Force worker isolation by using a unique runtime_env per task
+                    import uuid as _uuid
+                    _opts["runtime_env"] = {"env_vars": {"LANDSCAPY_FRESH_WORKER": str(_uuid.uuid4())}}
+                ref = _create_landscape_task.options(**_opts).remote(**job)
                 inflight[ref] = jidx
 
         _maybe_submit()
@@ -936,6 +942,7 @@ class FitnessSuperscape:
                                     _show_progress: bool = True,
                                     _construct_checkpoint_dir: Union[str, Path, None] = None,
                                     _meta_cpu_chains: int | None = None,
+                                    _fresh_worker_per_job: bool = False,
                                     _parent_task_cpus: float = 1.0,
                                     **sampler_kwargs: Any) -> "FitnessSuperscape":
         """
@@ -971,9 +978,14 @@ class FitnessSuperscape:
         job_index = 0
         last_ckpt = 0.0
 
+        pending_barrier = False
+
         def _submit_next(batch=1):
-            nonlocal job_index
+            nonlocal job_index, pending_barrier
             submitted = 0
+            # Respect barrier: if set and there are inflight tasks, don't submit new ones
+            if pending_barrier and inflight:
+                return submitted
             while submitted < batch and len(inflight) < max_inflight:
                 try:
                     job = next(construction_job_iter)
@@ -981,6 +993,10 @@ class FitnessSuperscape:
                     return submitted
                 # inject class and defaults
                 job = dict(job)
+                # Barrier handling: set flag and stop submitting until inflight drains
+                if job.get('_barrier'):
+                    pending_barrier = True
+                    return submitted
                 job['constructor_class'] = landscape_class
                 job.setdefault('_compute_hamming_edges', False)
                 wants_plm = job.get("embedding_domain") == "plm"
@@ -991,7 +1007,12 @@ class FitnessSuperscape:
                 # assign job id
                 job.setdefault('_job_id', job_index + 1)
                 job.setdefault('_total_jobs', None)
-                ref = _create_landscape_task.options(num_gpus=num_gpus, num_cpus=_parent_task_cpus).remote(**job)
+                _opts = {"num_gpus": num_gpus, "num_cpus": _parent_task_cpus}
+                if _fresh_worker_per_job:
+                    # Force worker isolation by using a unique runtime_env per task
+                    import uuid as _uuid
+                    _opts["runtime_env"] = {"env_vars": {"LANDSCAPY_FRESH_WORKER": str(_uuid.uuid4())}}
+                ref = _create_landscape_task.options(**_opts).remote(**job)
                 inflight[ref] = job_index
                 job_index += 1
                 submitted += 1
@@ -1018,6 +1039,9 @@ class FitnessSuperscape:
                 landscapes.append(L)
                 if _show_progress:
                     _logger.info('stream progress: %d completed', len(landscapes))
+                # If a barrier is pending and inflight is now empty, clear and continue submitting
+                if pending_barrier and not inflight:
+                    pending_barrier = False
                 _submit_next(batch=1)
                 # lightweight checkpoint
                 if ckpt_path and now - last_ckpt >= 300:
