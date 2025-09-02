@@ -31,7 +31,9 @@ def cli():
 @click.option('--k', required=False, type=int, default=50, help='kNN neighbors for pre-filtering.')
 @click.option('--t', required=False, type=int, default=5, help='Diffusion power (steps).')
 @click.option('--tau', required=False, type=float, default=1.0, help='Score temperature for kernel conversion.')
-@click.option('--connectivity-threshold', required=False, type=float, default=1e-4, help='Connectivity threshold for diffused matrix.')
+@click.option('--connectivity-threshold', required=False, type=float, default=1e-4, help='Default connectivity threshold for diffused matrix (used if no --thresholds/--threshold-grid).')
+@click.option('--thresholds', required=False, type=float, multiple=True, help='Explicit list of connectivity thresholds to sample (posterior over cutoffs). Provide multiple times: --thresholds 1e-4 --thresholds 1e-3 ...')
+@click.option('--threshold-grid', required=False, type=str, default=None, help='Generate thresholds as start:end:count (linear space). Example: 1e-4:1e-1:5')
 @click.option('--backend', required=False, type=click.Choice(['auto','faiss','balltree']), default='auto', help='kNN backend.')
 @click.option('--index-type', required=False, type=click.Choice(['hnsw','flat','ivf']), default='hnsw', help='FAISS index type.')
 @click.option('--faiss-metric', required=False, type=click.Choice(['ip','l2']), default='ip', help='FAISS metric.')
@@ -48,15 +50,15 @@ def cli():
 
 # RJMCMC sampling
 @click.option('--bernoulli-beta-alpha0', required=False, type=float, default=1, help='Bernoulli-Beta prior alpha0 parameter.')
-@click.option('--bernoulli-beta-alpha1', required=False, type=float, default=1, help='Bernoulli-Beta prior alpha1 parameter.')
+@click.option('--bernoulli-beta-alpha1', required=False, type=float, default=3, help='Bernoulli-Beta prior alpha1 parameter.')
 @click.option('--rjmcmc-alpha', required=False, type=float, default=0.9, help='Alpha parameter for the RJMCMC cosine and topological similarity trade-off.')
-@click.option('--birth-gamma-prior', required=False, type=float, default=0.02, help='Prior put on the birth rate of new latent slots in alignment. Applies symmetrically to deaths.')
-@click.option('--birth-step-prob', required=False, type=float, default=0.2, help='Probability of sampling a birth/death step in the RJMCMC sampler.')
+@click.option('--birth-gamma-prior', required=False, type=float, default=0.01, help='Prior put on the birth rate of new latent slots in alignment. Applies symmetrically to deaths.')
+@click.option('--birth-step-prob', required=False, type=float, default=0.5, help='Probability of sampling a birth/death step in the RJMCMC sampler.')
 @click.option('--burn-in-samples', required=False, type=int, default=1000, help='The number of burn-in sample steps for the RJMCMC sampler.')
-@click.option('--total-samples', required=False, type=int, default=5000, help='The total number of sample steps for the RJMCMC sampler.')
-@click.option('--sample-thin', required=False, type=int, default=50, help='Thinning interval for the RJMCMC sampler.')
-@click.option('--auto-anchor', required=False, is_flag=True, default=True, help='Boolean flag to auto-anchor nodes to latent slots by cosine similarity.')
-@click.option('--anchor-cosine-threshold', required=False, type=float, default=0.99, help='Cosine similarity threshold for auto-anchoring nodes to latent slots.')
+@click.option('--total-samples', required=False, type=int, default=10000, help='The total number of sample steps for the RJMCMC sampler.')
+@click.option('--sample-thin', required=False, type=int, default=10, help='Thinning interval for the RJMCMC sampler.')
+@click.option('--auto-anchor', required=False, is_flag=True, default=False, help='Boolean flag to auto-anchor nodes to latent slots by cosine similarity.')
+@click.option('--anchor-cosine-threshold', required=False, type=float, default=1, help='Cosine similarity threshold for auto-anchoring nodes to latent slots.')
 @click.option('--seed', required=False, type=int, default=None, help='Seed for the random number generator to make results reproducible.')
 
 # Logging / checkpointing (same as phylo)
@@ -71,44 +73,46 @@ def cli():
 @click.option('--meta-cpu-chains', required=False, type=int, default=os.cpu_count(), help='Number of CPU chains to use for the meta-alignment step in hierarchical alignment.')
 @click.option('--local-cpu-chains', required=False, type=int, default=(os.cpu_count()//10 if os.cpu_count()//10 > 1 else 1), help='Number of CPU chains to use for each parallel local alignment chain.')
 def diffusion_evol_superscape(sequences,
-                              output,
-                              k,
-                              t,
-                              tau,
-                              connectivity_threshold,
-                              backend,
-                              index_type,
-                              faiss_metric,
-                              include_self,
-                              use_gpu,
-                              hnsw_m,
-                              cpus,
-                              compute_embeddings,
-                              embedding_domain,
-                              plm_model_name,
-                              plm_batch_size,
-                              plm_device,
-                              bernoulli_beta_alpha0,
-                              bernoulli_beta_alpha1,
-                              rjmcmc_alpha,
-                              birth_gamma_prior,
-                              birth_step_prob,
-                              burn_in_samples,
-                              total_samples,
-                              sample_thin,
-                              auto_anchor,
-                              anchor_cosine_threshold,
-                              seed,
-                              log_file,
-                              log_level,
-                              log_progress,
-                              log_prefix,
-                              checkpoint_dir,
-                              checkpoint_interval,
-                              resume_checkpoint,
-                              sequential_construction,
-                              meta_cpu_chains,
-                              local_cpu_chains):
+                                  output,
+                                  k,
+                                  t,
+                                  tau,
+                                  connectivity_threshold,
+                                  thresholds,
+                                  threshold_grid,
+                                  backend,
+                                  index_type,
+                                  faiss_metric,
+                                  include_self,
+                                  use_gpu,
+                                  hnsw_m,
+                                  cpus,
+                                  compute_embeddings,
+                                  embedding_domain,
+                                  plm_model_name,
+                                  plm_batch_size,
+                                  plm_device,
+                                  bernoulli_beta_alpha0,
+                                  bernoulli_beta_alpha1,
+                                  rjmcmc_alpha,
+                                  birth_gamma_prior,
+                                  birth_step_prob,
+                                  burn_in_samples,
+                                  total_samples,
+                                  sample_thin,
+                                  auto_anchor,
+                                  anchor_cosine_threshold,
+                                  seed,
+                                  log_file,
+                                  log_level,
+                                  log_progress,
+                                  log_prefix,
+                                  checkpoint_dir,
+                                  checkpoint_interval,
+                                  resume_checkpoint,
+                                  sequential_construction,
+                                  meta_cpu_chains,
+                                  local_cpu_chains):
     """
     HPC interface to build a Superscape based on the evolutionary diffusion graph.
     Uses create_evol_diffusion_graph under the hood for each input FASTA.
@@ -171,6 +175,25 @@ def diffusion_evol_superscape(sequences,
         _resume_checkpoint=resume_checkpoint,
     )
 
+    # Build threshold list (posterior over cutoff samples)
+    thrs: list[float] = []
+    if thresholds:
+        thrs = list(thresholds)
+    elif threshold_grid:
+        try:
+            start_s, end_s, cnt_s = threshold_grid.split(':')
+            start_v = float(start_s); end_v = float(end_s); cnt = int(cnt_s)
+            if cnt <= 0:
+                raise ValueError
+            import numpy as _np
+            thrs = list(_np.linspace(start_v, end_v, cnt, dtype=float))
+        except Exception:
+            raise click.UsageError('--threshold-grid must be of the form start:end:count, e.g., 1e-4:1e-1:5')
+    else:
+        thrs = [connectivity_threshold]
+
+    logger.info('Using %d connectivity thresholds: %s', len(thrs), ', '.join(f'{v:.3g}' for v in thrs))
+
     # If requested, construct sequentially here; otherwise, fan out Ray jobs.
     if sequential_construction:
         landscapes = []
@@ -189,23 +212,26 @@ def diffusion_evol_superscape(sequences,
             else:
                 E = _compute_embeddings_from_sequences(seqs, model_name=plm_model_name, batch_size=plm_batch_size, device=plm_device)
             logger.info('[dataset %d/%d] embeddings shape=%s', i, len(fasta_paths), getattr(E,'shape', None))
-            # Build graph
-            G = create_evol_diffusion_graph(
-                sequences=seqs,
-                embeddings=E,
-                k=k,
-                t=t,
-                tau=tau,
-                connectivity_threshold=connectivity_threshold,
-                backend=backend,
-                index_type=index_type,
-                faiss_metric=faiss_metric,
-                include_self=include_self,
-                use_gpu=use_gpu,
-                hnsw_M=hnsw_m,
-                cpus=cpus,
-            )
-            landscapes.append(FitnessLandscape.from_graph(G))
+
+            # Build one landscape per threshold (posterior over cutoffs)
+            for thr in thrs:
+                logger.info('[dataset %d/%d] building diffusion graph @ threshold=%g', i, len(fasta_paths), thr)
+                G = create_evol_diffusion_graph(
+                    sequences=seqs,
+                    embeddings=E,
+                    k=k,
+                    t=t,
+                    tau=tau,
+                    connectivity_threshold=thr,
+                    backend=backend,
+                    index_type=index_type,
+                    faiss_metric=faiss_metric,
+                    include_self=include_self,
+                    use_gpu=use_gpu,
+                    hnsw_M=hnsw_m,
+                    cpus=cpus,
+                )
+                landscapes.append(FitnessLandscape.from_graph(G))
 
             # Construction checkpoint
             ckpt_file = ckpt_dir / 'superscape_construction.ckpt.pkl'
@@ -219,38 +245,51 @@ def diffusion_evol_superscape(sequences,
 
         superscape = FitnessSuperscape(landscapes=landscapes, **sampler_kwargs)
     else:
-        # Build parallel construction jobs using the new 'evol_diffusion' graph type
-        total_jobs = len(fasta_paths)
+        # Build parallel construction jobs: cartesian product of datasets x thresholds
+        total_jobs = len(fasta_paths) * len(thrs)
         construction_jobs = []
-        for i, fp in enumerate(fasta_paths, 1):
-            logger.info('[dataset %d/%d] queuing job for %s', i, total_jobs, fp)
+        job_id = 0
+        for fp in fasta_paths:
+            logger.info('Queuing jobs for %s across %d thresholds', fp, len(thrs))
             try:
-                seqs = fasta_to_prot20_sequences(Path(fp))
+                # Sanitize input: allow non-canonical chars (e.g., X) to be converted to gaps then removed
+                seqs = fasta_to_prot20_sequences(Path(fp), strict=False)
             except Exception as e:
                 raise click.UsageError(str(e))
-            construction_jobs.append({
-                'sequences': seqs,
-                'graph_type': 'evol_diffusion',
-                # diffusion/evol params
-                'k': k,
-                't': t,
-                'tau': tau,
-                'connectivity_threshold': connectivity_threshold,
-                'backend': backend,
-                'index_type': index_type,
-                'faiss_metric': faiss_metric,
-                'include_self': include_self,
-                'use_gpu': use_gpu,
-                'hnsw_M': hnsw_m,
-                'cpus': cpus,
-                # embedding domain (embeddings will be computed inside constructor)
-                'embedding_domain': embedding_domain,
-                '_compute_embeddings': compute_embeddings,
-                # bookkeeping
-                '_log_progress': log_progress,
-                '_job_id': i,
-                '_total_jobs': total_jobs,
-            })
+            # Precompute embeddings once to avoid recomputation in workers
+            if not compute_embeddings:
+                raise click.UsageError('--compute-embeddings must be enabled for diffusion graph')
+            if embedding_domain == 'ohe':
+                from fitness_landscape.core.graph import _encode_multiallele
+                E, _ = _encode_multiallele(seqs)
+            else:
+                E = _compute_embeddings_from_sequences(seqs, model_name=plm_model_name, batch_size=plm_batch_size, device=plm_device)
+            for thr in thrs:
+                job_id += 1
+                construction_jobs.append({
+                    'sequences': seqs,
+                    'embeddings': E,
+                    'graph_type': 'evol_diffusion',
+                    # diffusion/evol params
+                    'k': k,
+                    't': t,
+                    'tau': tau,
+                    'connectivity_threshold': thr,
+                    'backend': backend,
+                    'index_type': index_type,
+                    'faiss_metric': faiss_metric,
+                    'include_self': include_self,
+                    'use_gpu': use_gpu,
+                    'hnsw_M': hnsw_m,
+                    'cpus': cpus,
+                    # embeddings provided; skip internal compute
+                    'embedding_domain': embedding_domain,
+                    '_compute_embeddings': False,
+                    # bookkeeping
+                    '_log_progress': log_progress,
+                    '_job_id': job_id,
+                    '_total_jobs': total_jobs,
+                })
 
         logger.info('Launching %d parallel construction jobs (Ray)', len(construction_jobs))
         superscape = FitnessSuperscape.from_parallel_construction(
