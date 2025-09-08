@@ -225,6 +225,7 @@ class FitnessSuperscape:
         _ckpt_dir = _pop_any(_sampler_kwargs, ['_checkpoint_dir', 'checkpoint_dir'], None)
         _ckpt_int = _pop_any(_sampler_kwargs, ['_checkpoint_interval', 'checkpoint_interval'], None)
         _ckpt_resume = _pop_any(_sampler_kwargs, ['_resume_checkpoint', 'resume_checkpoint'], None)
+        _posterior_storage = _pop_any(_sampler_kwargs, ['_posterior_storage', 'posterior_storage'], None)
         if _show is not None:
             _hier_kwargs['_show_progress'] = _show
         if _ckpt_dir is not None:
@@ -233,6 +234,8 @@ class FitnessSuperscape:
             _hier_kwargs['_checkpoint_interval'] = _ckpt_int
         if _ckpt_resume is not None:
             _hier_kwargs['_resume_checkpoint'] = _ckpt_resume
+        if _posterior_storage is not None:
+            _hier_kwargs['_posterior_storage'] = _posterior_storage
 
         self._hierarchical_aligner = HierarchicalRJMCMCAligner(
             graphs=self._landscape_graphs,
