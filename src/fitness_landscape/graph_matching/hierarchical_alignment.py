@@ -2,12 +2,18 @@ from __future__ import annotations
 import ray
 import numpy as np
 import networkx as nx
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional, Union
 from .latent_alignment import RJMCMCAligner
 from scipy.sparse import csr_matrix
-from scipy.sparse.csgraph import connected_components
+from scipy.sparse.csgraph import connected_components, minimum_spanning_tree
 from ..utils import cosine_similarity_matrix
-import faiss
+# FAISS is optional; we provide a NumPy fallback if unavailable.
+try:
+    import faiss  # type: ignore
+    _FAISS_AVAILABLE = True
+except Exception:  # pragma: no cover
+    faiss = None
+    _FAISS_AVAILABLE = False
 from tqdm import tqdm
 import os
 import inspect
@@ -101,6 +107,10 @@ class HierarchicalRJMCMCAligner:
                  local_cluster_threshold: float = 0.85,
                  global_bridge_threshold: float = 0.5,
                  emb_key: str = 'emb_arr',
+                 # Overlapping window controls
+                 local_window_shifts: int = 0,
+                 local_window_size: Optional[int] = None,
+                 local_window_stride: Optional[int] = None,
                  _local_cpu_chains: int = (os.cpu_count()//10 if os.cpu_count()//10 > 1 else 1),
                  _meta_cpu_chains: int = os.cpu_count(),
                  _local_desc: str = "Local alignments",
@@ -117,6 +127,14 @@ class HierarchicalRJMCMCAligner:
         self.local_thresh = local_cluster_threshold
         self.global_thresh = global_bridge_threshold
         self.emb_key = emb_key
+        # Overlap window params (allow overriding via aligner_params as well)
+        _ap = dict(aligner_params) if isinstance(aligner_params, dict) else {}
+        _shifts = local_window_shifts if local_window_shifts is not None else _ap.get('local_window_shifts', 0)
+        _wsize = local_window_size if local_window_size is not None else _ap.get('local_window_size', None)
+        _wstride = local_window_stride if local_window_stride is not None else _ap.get('local_window_stride', None)
+        self.local_window_shifts = int(_shifts) if _shifts is not None else 0
+        self.local_window_size = _wsize
+        self.local_window_stride = _wstride
         self.K = len(graphs)
         self.directed = any(isinstance(g, nx.DiGraph) for g in graphs)
         
@@ -154,6 +172,8 @@ class HierarchicalRJMCMCAligner:
         self.meta_energy_trace = []
         self.meta_nl_trace = []
         self.meta_edges_trace = []
+        # Global slot union mapping built by overlap meta step
+        self._slot_union_map: Dict[Tuple[int, int], int] = {}
 
     def run_alignment(self) -> Tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray]]:
         """
@@ -185,65 +205,170 @@ class HierarchicalRJMCMCAligner:
 
     def _create_clusters(self) -> List[Dict]:
         """
-        Method to create clusters of nodes based on cosine similarity
-        of their embeddings across all graphs.
+        Create local alignment groups. Two modes:
+        - Overlap window mode (if local_window_shifts>0): build multiple shifted windows
+          over a 1D ordering of all nodes to create overlapping groups.
+        - Default: cosine-similarity graph + connected components (original behavior).
 
         Returns
         -------
         List[Dict]
-            A list of clusters, where each cluster is a dictionary
-            containing:
-            - 'global_indices': Indices of nodes in the cluster.
-            - 'node_backrefs': References to the original nodes in the
-            graphs.
+            Each cluster dict has keys:
+            - 'global_indices': indices into the flattened node list
+            - 'node_backrefs': list of (graph_idx, node_id) for this cluster
         """
-        all_embeddings = []
-        node_backrefs = [] 
+        # Flatten nodes and embeddings
+        all_embeddings: List[np.ndarray] = []
+        node_backrefs: List[Tuple[int, int]] = []
         for k, G in enumerate(self.original_graphs):
             for node_id, data in G.nodes(data=True):
-                all_embeddings.append(data[self.emb_key])
+                all_embeddings.append(np.asarray(data[self.emb_key], dtype=np.float32))
                 node_backrefs.append((k, node_id))
-        
+
         if not all_embeddings:
             return []
-        
-        all_embeddings = np.array(all_embeddings, dtype=np.float32)
-        all_embeddings /= np.linalg.norm(all_embeddings, axis=1, keepdims=True)
-        num_nodes, d = all_embeddings.shape
 
-        index = faiss.IndexFlatIP(d)
-        index.add(all_embeddings)
+        E = np.vstack(all_embeddings).astype(np.float32)
 
+        # Overlapping windows mode
+        if self.local_window_shifts and self.local_window_shifts > 0:
+            # Build a sparse kNN graph (cosine similarity), then compute MST and DFS order
+            N, d = E.shape
+            if N == 0:
+                return []
+            # Normalize for cosine
+            E_norm = E / (np.linalg.norm(E, axis=1, keepdims=True) + 1e-12)
+            k_mst = min(30, N - 1) if N > 1 else 0
+            if k_mst <= 0:
+                order = np.arange(N)
+            else:
+                # Helper: top-k cosine neighbors using FAISS if available, else NumPy
+                def _topk_cosine(E_norm_arr: np.ndarray, k: int) -> Tuple[np.ndarray, np.ndarray]:
+                    if _FAISS_AVAILABLE:
+                        index = faiss.IndexFlatIP(E_norm_arr.shape[1])
+                        index.add(E_norm_arr)
+                        return index.search(E_norm_arr, k + 1)
+                    # NumPy fallback (O(N^2) memory; suitable for small N or environments without FAISS)
+                    S = E_norm_arr @ E_norm_arr.T
+                    # For each row, select top k+1 indices (including self)
+                    Nn = S.shape[0]
+                    kk = min(k + 1, Nn)
+                    idx_part = np.argpartition(S, -kk, axis=1)[:, -kk:]
+                    # Sort those top-k by similarity descending
+                    row_indices = np.arange(Nn)[:, None]
+                    part_vals = S[row_indices, idx_part]
+                    order_desc = np.argsort(-part_vals, axis=1)
+                    top_idx = idx_part[row_indices, order_desc]
+                    top_sim = S[row_indices, top_idx]
+                    return top_sim, top_idx
+
+                sims, nbrs = _topk_cosine(E_norm, k_mst)
+                # Build symmetric sparse distance matrix with weights = 1 - cosine
+                rows, cols, data = [], [], []
+                for i in range(N):
+                    for c in range(1, k_mst + 1):
+                        j = int(nbrs[i, c])
+                        if j < 0 or j >= N or j == i:
+                            continue
+                        w = 1.0 - float(sims[i, c])
+                        if w < 0:
+                            w = 0.0
+                        rows.extend([i, j])
+                        cols.extend([j, i])
+                        data.extend([w, w])
+                if rows:
+                    from scipy import sparse as _sp
+                    G_sparse = _sp.csr_matrix((data, (rows, cols)), shape=(N, N))
+                    mst = minimum_spanning_tree(G_sparse)
+                    T = (mst + mst.T).tocsr()
+                    # Convert to NetworkX and DFS order; handle multiple components
+                    Gnx = nx.Graph()
+                    Gnx.add_nodes_from(range(N))
+                    ti, tj = T.nonzero()
+                    for a, b in zip(ti, tj):
+                        if a < b:
+                            Gnx.add_edge(int(a), int(b), weight=float(T[a, b]))
+                    order_list = []
+                    for comp in nx.connected_components(Gnx):
+                        comp_nodes = list(comp)
+                        # choose a root with highest degree in component
+                        root = max(comp_nodes, key=lambda u: Gnx.degree(u)) if comp_nodes else None
+                        if root is None:
+                            continue
+                        order_list.extend(list(nx.dfs_preorder_nodes(Gnx, source=root)))
+                    order = np.array(order_list, dtype=int)
+                    if order.size != N:
+                        # Fallback: append any missing nodes
+                        missing = np.setdiff1d(np.arange(N), order, assume_unique=False)
+                        order = np.concatenate([order, missing])
+                else:
+                    order = np.arange(N)
+            N = len(order)
+            # Heuristic defaults
+            w = int(self.local_window_size) if self.local_window_size else max(20, min(200, N // 20 if N >= 200 else max(10, N // 5)))
+            s = int(self.local_window_stride) if self.local_window_stride else max(1, w // 2)
+            S = max(1, int(self.local_window_shifts))
+
+            clusters: List[Dict] = []
+            for shift in range(S):
+                offset = (shift * s) // S
+                start = offset
+                while start < N:
+                    end = min(N, start + w)
+                    if end - start <= 0:
+                        break
+                    idxs = order[start:end]
+                    backrefs = [node_backrefs[i] for i in idxs]
+                    clusters.append({
+                        "global_indices": idxs.tolist(),
+                        "node_backrefs": backrefs,
+                    })
+                    start += s
+
+            # Deduplicate exact duplicate windows
+            seen = set()
+            uniq = []
+            for c in clusters:
+                key = tuple(sorted(c["global_indices"]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                uniq.append(c)
+            return uniq
+
+        # Default: similarity graph + connected components
+        E_norm = E / (np.linalg.norm(E, axis=1, keepdims=True) + 1e-12)
+        num_nodes = E_norm.shape[0]
         k_neighbors = min(100, num_nodes)
-        similarities, indices = index.search(all_embeddings, k_neighbors)
+        # Top-k neighbor search with FAISS if available, else NumPy fallback
+        if _FAISS_AVAILABLE:
+            d = E_norm.shape[1]
+            index = faiss.IndexFlatIP(d)
+            index.add(E_norm)
+            similarities, indices = index.search(E_norm, k_neighbors)
+        else:  # pragma: no cover
+            S = E_norm @ E_norm.T
+            kk = min(k_neighbors, num_nodes)
+            idx_part = np.argpartition(S, -kk, axis=1)[:, -kk:]
+            row_indices2 = np.arange(num_nodes)[:, None]
+            part_vals2 = S[row_indices2, idx_part]
+            order_desc2 = np.argsort(-part_vals2, axis=1)
+            indices = idx_part[row_indices2, order_desc2]
+            similarities = S[row_indices2, indices]
         row_indices = np.arange(num_nodes).repeat(k_neighbors)
         mask = (indices > -1) & (similarities >= self.local_thresh)
-    
         rows = row_indices[mask.ravel()]
-        cols = indices.ravel()[mask.ravel()] 
-        
-        adjacency_matrix = csr_matrix((np.ones_like(rows), (rows, cols)),
-                                      shape=(num_nodes, num_nodes))
+        cols = indices.ravel()[mask.ravel()]
+        adjacency_matrix = csr_matrix((np.ones_like(rows), (rows, cols)), shape=(num_nodes, num_nodes))
         adjacency_matrix_symmetric = adjacency_matrix + adjacency_matrix.T
-        
-        n_components, labels = connected_components(
-            csgraph=adjacency_matrix_symmetric,
-            directed=False,
-            return_labels=True
-        )
-
-        clusters = [[] for _ in range(n_components)]
-        for i, label in enumerate(labels):
-            clusters[label].append(i)
-
-        final_clusters = [
-            {
-                "global_indices": cluster_indices,
-                "node_backrefs": [node_backrefs[i] for i in cluster_indices]
-            }
-            for cluster_indices in clusters if cluster_indices
-        ]
-        
+        n_components, labels = connected_components(csgraph=adjacency_matrix_symmetric, directed=False, return_labels=True)
+        comps: List[List[int]] = [[] for _ in range(n_components)]
+        for i, lab in enumerate(labels):
+            comps[lab].append(i)
+        final_clusters = [{
+            "global_indices": comp,
+            "node_backrefs": [node_backrefs[i] for i in comp]
+        } for comp in comps if comp]
         return final_clusters
 
     def _run_local_alignments(self,
@@ -370,77 +495,146 @@ class HierarchicalRJMCMCAligner:
     def _run_global_meta_alignment(self,
                                    local_results: List[Dict]) -> Tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray]]:
         """
-        Method to run the global meta-alignment across clusters of
-        nodes.
+        Overlap-based meta-alignment using posterior probabilities from local RJMCMC.
 
-        Returns
-        -------
-        Tuple[nx.Graph or nx.DiGraph, Dict[int, np.ndarray]]
-            A tuple containing:
-            - The meta blueprint graph for the global alignment.
-            - A mapping of original graph nodes to latent space nodes.
+        For each pair of overlapping local groups (windows), compute a slot co-assignment
+        matrix from shared original nodes and match slots (Hungarian/greedy) to form
+        equivalence classes (union-find). These define global latent slot IDs across all
+        windows. No separate meta RJMCMC is performed in this mode.
         """
-        # Gracefully handle directed and undirected graphs.
         graph_constructor = nx.DiGraph if self.directed else nx.Graph
-
         if not local_results:
-            
-            # Return empty but correctly typed results
             return graph_constructor(), {k: np.array([]) for k in range(self.K)}
 
-        meta_graphs = [graph_constructor() for _ in range(self.K)]
-        
-        for i, result in enumerate(local_results):
-            cluster_embeddings = [self.original_graphs[k].nodes[node_id][self.emb_key] for k, node_id in result["node_backrefs"]]
-            if not cluster_embeddings: continue
-            
-            mean_embedding = np.mean(cluster_embeddings, axis=0)
-            graph_counts = [ref[0] for ref in result["node_backrefs"]]
-            primary_graph_idx = max(set(graph_counts), key=graph_counts.count)
+        def _num_local_slots(res: Dict) -> int:
+            bp = res.get('blueprint')
+            if bp is not None:
+                return bp.number_of_nodes()
+            mx = 0
+            for pm in res.get('node_mapping', {}).values():
+                if pm is not None and pm.size > 0:
+                    mx = max(mx, pm.shape[1])
+            return mx
 
-            meta_graphs[primary_graph_idx].add_node(i, **{self.emb_key: mean_embedding})
-            
-        num_clusters = len(local_results)
-        for i in range(num_clusters):
-            for j in range(i + 1, num_clusters):
-                embs_i = [self.original_graphs[k].nodes[nid][self.emb_key] for k, nid in local_results[i]["node_backrefs"]]
-                embs_j = [self.original_graphs[k].nodes[nid][self.emb_key] for k, nid in local_results[j]["node_backrefs"]]
-                
-                if not embs_i or not embs_j: continue
-                
-                sim_matrix = cosine_similarity_matrix(np.array(embs_i), np.array(embs_j))
-                if np.max(sim_matrix) > self.global_thresh:
-                    for k in range(self.K):
-                         if meta_graphs[k].has_node(i) and meta_graphs[k].has_node(j):
-                            meta_graphs[k].add_edge(i, j)
+        # Quick lookup for (graph_idx,node_id)->(graph_idx,row) within each group
+        node_to_localrow: List[Dict[Tuple[int, int], Tuple[int, int]]] = []
+        for res in local_results:
+            mapping: Dict[Tuple[int, int], Tuple[int, int]] = {}
+            for gidx, order in res.get('node_order', {}).items():
+                for row, nid in enumerate(order):
+                    mapping[(gidx, nid)] = (gidx, row)
+            node_to_localrow.append(mapping)
 
-        total_meta_edges = sum(g.number_of_edges() for g in meta_graphs)
-        if total_meta_edges == 0:
+        # Union-find over (group_idx, local_slot)
+        parent: Dict[Tuple[int, int], Tuple[int, int]] = {}
+        def find(x: Tuple[int, int]) -> Tuple[int, int]:
+            parent.setdefault(x, x)
+            if parent[x] != x:
+                parent[x] = find(parent[x])
+            return parent[x]
+        def union(a: Tuple[int, int], b: Tuple[int, int]):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[rb] = ra
 
-            # Create an empty blueprint graph but ensure it contains all the cluster nodes.
-            meta_blueprint = graph_constructor()
-            all_meta_nodes = set()
-            for g in meta_graphs:
-                all_meta_nodes.update(g.nodes())
-            meta_blueprint.add_nodes_from(all_meta_nodes)
-            
-            # Create empty but correctly structured mapping dictionaries.
-            meta_mappings = {k: np.empty((g.number_of_nodes(), 0)) for k, g in enumerate(meta_graphs)}
-            return meta_blueprint, meta_mappings
-        
-        meta_aligner = RJMCMCAligner(graphs=meta_graphs, **self.aligner_params)
-        meta_aligner.sample(num_chains=self._meta_cpu_chains)
+        try:
+            from scipy.optimize import linear_sum_assignment
+        except Exception:
+            linear_sum_assignment = None
 
-        # Store posterior samples for the meta-alignment
-        self.meta_posterior_L = meta_aligner._stored_L
-        self.meta_posterior_pi = meta_aligner._stored_pi
+        N = len(local_results)
+        for i in range(N):
+            res_i = local_results[i]
+            slots_i = _num_local_slots(res_i)
+            if slots_i <= 0:
+                continue
+            set_i = set(res_i['node_backrefs'])
+            for j in range(i + 1, N):
+                res_j = local_results[j]
+                slots_j = _num_local_slots(res_j)
+                if slots_j <= 0:
+                    continue
+                set_j = set(res_j['node_backrefs'])
+                overlap = list(set_i.intersection(set_j))
+                if not overlap:
+                    continue
 
-        # Collect traces.
-        self.meta_energy_trace.extend(meta_aligner.trace_E)
-        self.meta_nl_trace.extend(meta_aligner.trace_NL)
-        self.meta_edges_trace.extend(meta_aligner.trace_edges)
+                C = np.zeros((slots_i, slots_j), dtype=np.float64)
+                total_mass = 0.0
+                for (gidx, nid) in overlap:
+                    gi, row_i = node_to_localrow[i].get((gidx, nid), (None, None))
+                    gj, row_j = node_to_localrow[j].get((gidx, nid), (None, None))
+                    if gi is None or gj is None:
+                        continue
+                    Pi = res_i['node_mapping'].get(gi)
+                    Pj = res_j['node_mapping'].get(gj)
+                    if Pi is None or Pj is None or Pi.size == 0 or Pj.size == 0:
+                        continue
+                    if row_i >= Pi.shape[0] or row_j >= Pj.shape[0]:
+                        continue
+                    p_i = Pi[row_i]
+                    p_j = Pj[row_j]
+                    if p_i.size != slots_i:
+                        _pi = np.zeros(slots_i)
+                        _pi[:min(slots_i, p_i.size)] = p_i[:min(slots_i, p_i.size)]
+                        p_i = _pi
+                    if p_j.size != slots_j:
+                        _pj = np.zeros(slots_j)
+                        _pj[:min(slots_j, p_j.size)] = p_j[:min(slots_j, p_j.size)]
+                        p_j = _pj
+                    C += np.outer(p_i, p_j)
+                    total_mass += float(p_i.sum() * p_j.sum())
 
-        return meta_aligner.latent_blueprint_graph(), meta_aligner.get_node_to_latent_mapping()
+                if total_mass <= 0.0:
+                    continue
+
+                if linear_sum_assignment is not None:
+                    m, n = C.shape
+                    sz = max(m, n)
+                    Cp = np.zeros((sz, sz), dtype=np.float64)
+                    Cp[:m, :n] = C
+                    cost = 1.0 - (Cp / max(total_mass, 1e-12))
+                    r, c = linear_sum_assignment(cost)
+                    pairs = [(ri, ci) for ri, ci in zip(r, c) if ri < m and ci < n]
+                else:
+                    pairs = []
+                    used = set()
+                    for ri in range(C.shape[0]):
+                        cj = int(np.argmax(C[ri]))
+                        if cj in used:
+                            continue
+                        used.add(cj)
+                        pairs.append((ri, cj))
+
+                for si, sj in pairs:
+                    score = C[si, sj] / max(total_mass, 1e-12)
+                    if score >= self.global_thresh:
+                        union((i, si), (j, sj))
+
+        # Assign global IDs; include isolated slots
+        gid = 0
+        slot_union_map: Dict[Tuple[int, int], int] = {}
+        roots: Dict[Tuple[int, int], int] = {}
+        for key in list(parent.keys()):
+            r = find(key)
+            if r not in roots:
+                roots[r] = gid
+                gid += 1
+            slot_union_map[key] = roots[r]
+        for i, res in enumerate(local_results):
+            L = _num_local_slots(res)
+            for s_idx in range(L):
+                key = (i, s_idx)
+                if key not in slot_union_map:
+                    slot_union_map[key] = gid
+                    gid += 1
+
+        self._slot_union_map = slot_union_map
+
+        # Return empty meta artefacts; stitching will use union map
+        meta_blueprint = graph_constructor()
+        meta_mappings = {k: np.array([]) for k in range(self.K)}
+        return meta_blueprint, meta_mappings
 
     def _stitch_results(self,
                         local_results: List[Dict],
@@ -473,10 +667,11 @@ class HierarchicalRJMCMCAligner:
             - A mapping of original graph nodes to latent space nodes.
         """
         final_graph = nx.DiGraph() if self.directed else nx.Graph()
-        local_to_global_nodemap = {}
+        local_to_global_nodemap: Dict[Tuple[int, int], Union[str, int]] = {}
+        use_union = hasattr(self, '_slot_union_map') and bool(getattr(self, '_slot_union_map'))
 
+        # Compose local blueprints, relabeled to global IDs if available
         for i, result in enumerate(local_results):
-            # Use posterior sample if sample_idx is given and available; otherwise use posterior mean
             if sample_idx is not None and i < len(self.local_posterior_L):
                 stored_list = self.local_posterior_L[i]
                 if stored_list and len(stored_list) > 0:
@@ -491,64 +686,65 @@ class HierarchicalRJMCMCAligner:
             else:
                 local_bp = result['blueprint']
 
-            node_rename_mapping = {node: f"c{i}_n{node}" for node in local_bp.nodes()}
-            
-            for local_node, global_name in node_rename_mapping.items():
-                local_to_global_nodemap[(i, local_node)] = global_name
-                
+            node_rename_mapping: Dict[int, Union[str, int]] = {}
+            for node in local_bp.nodes():
+                if use_union:
+                    gid = self._slot_union_map.get((i, int(node)))
+                    name = f"g{gid}" if gid is not None else f"c{i}_n{node}"
+                else:
+                    name = f"c{i}_n{node}"
+                node_rename_mapping[node] = name
+                local_to_global_nodemap[(i, int(node))] = name
+
             relabeled_bp = nx.relabel_nodes(local_bp, node_rename_mapping, copy=True)
             final_graph = nx.compose(final_graph, relabeled_bp)
 
-        for i, j in meta_blueprint.edges():
-            nodes_i = local_results[i]["node_backrefs"]
-            nodes_j = local_results[j]["node_backrefs"]
-            embs_i = np.array([self.original_graphs[k].nodes[nid][self.emb_key] for k, nid in nodes_i])
-            embs_j = np.array([self.original_graphs[k].nodes[nid][self.emb_key] for k, nid in nodes_j])
-
-            sim_matrix = cosine_similarity_matrix(embs_i, embs_j)
-            i_idx, j_idx = np.unravel_index(np.argmax(sim_matrix), sim_matrix.shape)
-            
-            original_node_i_id = nodes_i[i_idx][1]
-            original_node_j_id = nodes_j[j_idx][1]
-            
-            graph_idx_i = nodes_i[i_idx][0]
-            graph_idx_j = nodes_j[j_idx][0]
-            
-            local_node_idx_i = local_results[i]['node_order'][graph_idx_i].index(original_node_i_id)
-            local_node_idx_j = local_results[j]['node_order'][graph_idx_j].index(original_node_j_id)
-            
-            # Use posterior sample if sample_idx is given
-            if sample_idx is not None:
-                use_sample = False
-                if i < len(self.local_posterior_pi) and j < len(self.local_posterior_pi):
-                    Lpi_i = self.local_posterior_pi[i]
-                    Lpi_j = self.local_posterior_pi[j]
-                    if Lpi_i and Lpi_j and graph_idx_i in Lpi_i and graph_idx_j in Lpi_j:
-                        li = Lpi_i[graph_idx_i]
-                        lj = Lpi_j[graph_idx_j]
-                        if li and lj and len(li) > 0 and len(lj) > 0:
-                            s_idx = sample_idx % min(len(li), len(lj))
-                            try:
-                                local_pi_i = li[s_idx]
-                                local_pi_j = lj[s_idx]
-                                local_latent_i = local_pi_i[local_node_idx_i]
-                                local_latent_j = local_pi_j[local_node_idx_j]
-                                use_sample = True
-                            except Exception:
-                                use_sample = False
-                if not use_sample:
+        # If union was not built, optionally add bridging edges based on meta blueprint
+        if not use_union:
+            for i, j in meta_blueprint.edges():
+                nodes_i = local_results[i]["node_backrefs"]
+                nodes_j = local_results[j]["node_backrefs"]
+                embs_i = np.array([self.original_graphs[k].nodes[nid][self.emb_key] for k, nid in nodes_i])
+                embs_j = np.array([self.original_graphs[k].nodes[nid][self.emb_key] for k, nid in nodes_j])
+                sim_matrix = cosine_similarity_matrix(embs_i, embs_j)
+                i_idx, j_idx = np.unravel_index(np.argmax(sim_matrix), sim_matrix.shape)
+                original_node_i_id = nodes_i[i_idx][1]
+                original_node_j_id = nodes_j[j_idx][1]
+                graph_idx_i = nodes_i[i_idx][0]
+                graph_idx_j = nodes_j[j_idx][0]
+                local_node_idx_i = local_results[i]['node_order'][graph_idx_i].index(original_node_i_id)
+                local_node_idx_j = local_results[j]['node_order'][graph_idx_j].index(original_node_j_id)
+                if sample_idx is not None:
+                    use_sample = False
+                    if i < len(self.local_posterior_pi) and j < len(self.local_posterior_pi):
+                        Lpi_i = self.local_posterior_pi[i]
+                        Lpi_j = self.local_posterior_pi[j]
+                        if Lpi_i and Lpi_j and graph_idx_i in Lpi_i and graph_idx_j in Lpi_j:
+                            li = Lpi_i[graph_idx_i]
+                            lj = Lpi_j[graph_idx_j]
+                            if li and lj and len(li) > 0 and len(lj) > 0:
+                                s_idx = sample_idx % min(len(li), len(lj))
+                                try:
+                                    local_pi_i = li[s_idx]
+                                    local_pi_j = lj[s_idx]
+                                    local_latent_i = local_pi_i[local_node_idx_i]
+                                    local_latent_j = local_pi_j[local_node_idx_j]
+                                    use_sample = True
+                                except Exception:
+                                    use_sample = False
+                    if not use_sample:
+                        local_latent_i = np.argmax(local_results[i]['node_mapping'][graph_idx_i][local_node_idx_i, :])
+                        local_latent_j = np.argmax(local_results[j]['node_mapping'][graph_idx_j][local_node_idx_j, :])
+                else:
                     local_latent_i = np.argmax(local_results[i]['node_mapping'][graph_idx_i][local_node_idx_i, :])
                     local_latent_j = np.argmax(local_results[j]['node_mapping'][graph_idx_j][local_node_idx_j, :])
-            else:
-                local_latent_i = np.argmax(local_results[i]['node_mapping'][graph_idx_i][local_node_idx_i, :])
-                local_latent_j = np.argmax(local_results[j]['node_mapping'][graph_idx_j][local_node_idx_j, :])
 
-            global_node_i = local_to_global_nodemap.get((i, local_latent_i))
-            global_node_j = local_to_global_nodemap.get((j, local_latent_j))
+                global_node_i = local_to_global_nodemap.get((i, local_latent_i))
+                global_node_j = local_to_global_nodemap.get((j, local_latent_j))
+                if global_node_i and global_node_j and not final_graph.has_edge(global_node_i, global_node_j):
+                    final_graph.add_edge(global_node_i, global_node_j)
 
-            if global_node_i and global_node_j and not final_graph.has_edge(global_node_i, global_node_j):
-                final_graph.add_edge(global_node_i, global_node_j)
-
+        # Finalize node indices
         final_latent_node_order = list(final_graph.nodes())
         global_name_to_final_idx = {name: i for i, name in enumerate(final_latent_node_order)}
         original_node_to_row_idx = {
@@ -558,57 +754,53 @@ class HierarchicalRJMCMCAligner:
 
         final_mappings = {k: np.zeros((len(g.nodes()), len(final_latent_node_order)))
                         for k, g in enumerate(self.original_graphs)}
+        contrib_counts = {k: np.zeros((len(g.nodes()),), dtype=np.float64) for k, g in enumerate(self.original_graphs)}
 
+        # Scatter local probabilities into global columns (average and renormalize per row)
         for cluster_idx, result in enumerate(local_results):
+            # Determine number of local latent slots
             num_local_latent = max([key[1] for key in local_to_global_nodemap if key[0] == cluster_idx] + [-1]) + 1
+            # Map local latent -> master column index
             local_latent_to_master_col = np.full(num_local_latent, -1, dtype=int)
             for local_latent_idx in range(num_local_latent):
                 global_name = local_to_global_nodemap.get((cluster_idx, local_latent_idx))
                 if global_name:
                     local_latent_to_master_col[local_latent_idx] = global_name_to_final_idx[global_name]
-            
-            for graph_idx in range(len(self.original_graphs)):
-                if sample_idx is not None:
-                    # For sampling, create a probabilistic mapping from a single permutation sample if available
-                    prob_matrix = np.zeros((len(result['node_order'][graph_idx]), num_local_latent))
-                    local_pi_list = None
-                    if cluster_idx < len(self.local_posterior_pi):
-                        Lpi = self.local_posterior_pi[cluster_idx]
-                        if Lpi and graph_idx in Lpi:
-                            local_pi_list = Lpi[graph_idx]
-                    if local_pi_list and len(local_pi_list) > 0:
-                        s_idx = sample_idx % len(local_pi_list)
-                        try:
-                            local_pi = local_pi_list[s_idx]
-                            for node_idx_local, latent_node in enumerate(local_pi):
-                                if latent_node != -1:
-                                    prob_matrix[node_idx_local, latent_node] = 1.0
-                        except Exception:
-                            pass
-                    # if no sample available, fall back below to deterministic mapping
-                else:
-                    prob_matrix = result['node_mapping'].get(graph_idx)
 
+            for graph_idx in range(len(self.original_graphs)):
+                prob_matrix = result['node_mapping'].get(graph_idx)
                 if prob_matrix is None or prob_matrix.size == 0:
                     continue
-
                 local_to_master_row = np.array([
                     original_node_to_row_idx[graph_idx][original_node_id]
                     for original_node_id in result['node_order'][graph_idx]
                 ])
+                for r_local, r_master in enumerate(local_to_master_row):
+                    row_probs = prob_matrix[r_local]
+                    if row_probs.size != num_local_latent:
+                        rp = np.zeros(num_local_latent)
+                        rp[:min(num_local_latent, row_probs.size)] = row_probs[:min(num_local_latent, row_probs.size)]
+                        row_probs = rp
+                    nz = np.where(row_probs > 0)[0]
+                    if nz.size == 0:
+                        continue
+                    for c_local in nz:
+                        master_col = local_latent_to_master_col[c_local]
+                        if master_col == -1:
+                            continue
+                        final_mappings[graph_idx][r_master, master_col] += row_probs[c_local]
+                    contrib_counts[graph_idx][r_master] += 1.0
 
-                local_rows, local_cols = prob_matrix.nonzero()
-                probs = prob_matrix[local_rows, local_cols]
+        for k in range(len(self.original_graphs)):
+            cnt = contrib_counts[k]
+            M = final_mappings[k]
+            for r in range(M.shape[0]):
+                if cnt[r] > 0:
+                    M[r, :] /= cnt[r]
+                s = M[r, :].sum()
+                if s > 0:
+                    M[r, :] /= s
 
-                master_rows = local_to_master_row[local_rows]
-                master_cols = local_latent_to_master_col[local_cols]
-                
-                valid_mask = master_cols != -1
-                if not np.any(valid_mask):
-                    continue
-
-                final_mappings[graph_idx][master_rows[valid_mask], master_cols[valid_mask]] = probs[valid_mask]
-                
         final_graph = nx.relabel_nodes(final_graph, global_name_to_final_idx, copy=True)
 
         return final_graph, final_mappings
@@ -644,3 +836,121 @@ class HierarchicalRJMCMCAligner:
                 
                 self.full_posterior_L.append(nx.to_numpy_array(graph_sample))
                 self.full_posterior_mappings.append(mappings_sample)
+
+    def latent_graph_from_local_posterior(self,
+                                          posterior_prob_cutoff: float = 0.2) -> tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray]]:
+        """
+        Build a stitched latent graph at an arbitrary cutoff using only the
+        stored LOCAL posterior samples (one posterior per overlapping window).
+
+        This is useful in overlap-window mode where the meta stage does not
+        produce global posterior samples. It reuses the previously computed
+        union map (slot equivalence classes) and recomputes, per window, the
+        local blueprint by averaging its stored adjacency samples and
+        thresholding at the provided cutoff.
+
+        Returns
+        -------
+        (graph, mappings): Tuple[nx.Graph|nx.DiGraph, Dict[int, np.ndarray]]
+            The stitched latent graph and per-input-graph node->latent mapping.
+        """
+        # Recreate the cluster metadata (node_backrefs) deterministically
+        clusters = self._create_clusters()
+        graph_constructor = nx.DiGraph if self.directed else nx.Graph
+
+        # Guard: require local posterior samples
+        if not self.local_posterior_L or all((lst is None or len(lst) == 0) for lst in self.local_posterior_L):
+            # Nothing to rebuild from; return empty graph and empty mappings
+            empty = {k: np.array([]) for k in range(self.K)}
+            return graph_constructor(), empty
+
+        local_results: List[Dict] = []
+        # Precompute original node -> row index for each graph
+        orig_row_lut: Dict[int, Dict] = {
+            k: {node: i for i, node in enumerate(g.nodes())}
+            for k, g in enumerate(self.original_graphs)
+        }
+
+        for idx, cluster in enumerate(clusters):
+            # 1) Build local blueprint by averaging posterior samples
+            stored_L = self.local_posterior_L[idx]
+            if stored_L is None or len(stored_L) == 0:
+                bp = graph_constructor()  # empty
+            else:
+                max_nl = max(L.shape[0] for L in stored_L)
+                tally = np.zeros((max_nl, max_nl), dtype=float)
+                for L in stored_L:
+                    nl = L.shape[0]
+                    tally[:nl, :nl] += L
+                Lavg = tally / max(1, len(stored_L))
+                Lbin = (Lavg >= posterior_prob_cutoff).astype(int)
+                bp = nx.from_numpy_array(Lbin, create_using=graph_constructor)
+
+            # 2) Recompute node order for this cluster (match run_local_alignment_task)
+            node_order: Dict[int, list] = {}
+            for gidx in range(self.K):
+                node_order[gidx] = [nid for (kk, nid) in cluster["node_backrefs"] if kk == gidx]
+
+            # 3) Build node->latent probability mapping from stored permutations
+            stored_pi = self.local_posterior_pi[idx]
+            node_mapping: Dict[int, np.ndarray] = {}
+            if stored_pi is None:
+                stored_pi = [[] for _ in range(self.K)]
+
+            # Determine max NL across samples for this cluster
+            max_nl = 0
+            for k in range(self.K):
+                for pk in stored_pi[k]:
+                    if pk is not None:
+                        max_nl = max(max_nl, int(np.max(pk)) + 1 if pk.size else max_nl)
+            # Fallback in case pk were empty
+            if max_nl <= 0:
+                max_nl = bp.number_of_nodes()
+
+            for gidx in range(self.K):
+                # Number of original nodes for this graph
+                num_nodes = len(self.original_graphs[gidx].nodes())
+                tally = np.zeros((num_nodes, max_nl), dtype=float)
+                pis = stored_pi[gidx]
+                if pis is None:
+                    pis = []
+                for pk in pis:
+                    if pk is None or pk.size == 0:
+                        continue
+                    # pk is length equal to number of nodes in the subgraph; need to map to original rows
+                    # Build a mapping from local row -> original node id from node_order
+                    for local_row, latent_slot in enumerate(pk):
+                        if latent_slot < 0:
+                            continue
+                        if local_row >= len(node_order[gidx]):
+                            continue
+                        orig_node = node_order[gidx][local_row]
+                        orig_row = orig_row_lut[gidx].get(orig_node, None)
+                        if orig_row is None:
+                            continue
+                        if latent_slot >= tally.shape[1]:
+                            # expand columns if needed
+                            extra = latent_slot + 1 - tally.shape[1]
+                            tally = np.pad(tally, ((0, 0), (0, extra)), constant_values=0.0)
+                        tally[orig_row, int(latent_slot)] += 1.0
+                if len(pis) > 0:
+                    tally /= float(len(pis))
+                # Normalize each row to probabilistic mapping
+                for r in range(tally.shape[0]):
+                    s = tally[r].sum()
+                    if s > 0:
+                        tally[r] /= s
+                node_mapping[gidx] = tally
+
+            local_results.append({
+                'blueprint': bp,
+                'node_mapping': node_mapping,
+                'node_order': node_order,
+                'node_backrefs': cluster['node_backrefs'],
+            })
+
+        # Stitch using existing union map and return
+        meta_bp = graph_constructor()
+        meta_map = {k: np.array([]) for k in range(self.K)}
+        final_graph, final_mappings = self._stitch_results(local_results, meta_bp, meta_map)
+        return final_graph, final_mappings
