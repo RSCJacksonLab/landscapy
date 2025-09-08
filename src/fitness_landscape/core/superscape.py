@@ -352,11 +352,20 @@ class FitnessSuperscape:
             The constructed latent fitness landscape.
         """
         if not self._hierarchical_aligner.full_posterior_L:
-            # Fallback: use the deterministic result returned by run_alignment()
-            # This occurs when the meta-stage produced no edges / no posterior sampling.
-            # Build the latent landscape directly from the stored latent_graph and mappings.
-            graph = self.latent_graph
-            mappings = self._latent_mappings
+            # No global posterior: attempt to rebuild from LOCAL posteriors (overlap-window mode)
+            try:
+                graph, mappings = self._hierarchical_aligner.latent_graph_from_local_posterior(
+                    posterior_prob_cutoff=posterior_prob_cutoff
+                )
+                # If local posteriors were unavailable, fall back to deterministic stitched result
+                if graph.number_of_nodes() == 0 and self.latent_graph is not None:
+                    graph = self.latent_graph
+                    mappings = self._latent_mappings
+            except Exception:
+                # As a last resort, just use the stitched graph from run_alignment
+                graph = self.latent_graph
+                mappings = self._latent_mappings
+
             return self._build_landscape_from_graph_and_mappings(graph, mappings)
 
         posterior_L = self._hierarchical_aligner.full_posterior_L

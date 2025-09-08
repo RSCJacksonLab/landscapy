@@ -836,3 +836,121 @@ class HierarchicalRJMCMCAligner:
                 
                 self.full_posterior_L.append(nx.to_numpy_array(graph_sample))
                 self.full_posterior_mappings.append(mappings_sample)
+
+    def latent_graph_from_local_posterior(self,
+                                          posterior_prob_cutoff: float = 0.2) -> tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray]]:
+        """
+        Build a stitched latent graph at an arbitrary cutoff using only the
+        stored LOCAL posterior samples (one posterior per overlapping window).
+
+        This is useful in overlap-window mode where the meta stage does not
+        produce global posterior samples. It reuses the previously computed
+        union map (slot equivalence classes) and recomputes, per window, the
+        local blueprint by averaging its stored adjacency samples and
+        thresholding at the provided cutoff.
+
+        Returns
+        -------
+        (graph, mappings): Tuple[nx.Graph|nx.DiGraph, Dict[int, np.ndarray]]
+            The stitched latent graph and per-input-graph node->latent mapping.
+        """
+        # Recreate the cluster metadata (node_backrefs) deterministically
+        clusters = self._create_clusters()
+        graph_constructor = nx.DiGraph if self.directed else nx.Graph
+
+        # Guard: require local posterior samples
+        if not self.local_posterior_L or all((lst is None or len(lst) == 0) for lst in self.local_posterior_L):
+            # Nothing to rebuild from; return empty graph and empty mappings
+            empty = {k: np.array([]) for k in range(self.K)}
+            return graph_constructor(), empty
+
+        local_results: List[Dict] = []
+        # Precompute original node -> row index for each graph
+        orig_row_lut: Dict[int, Dict] = {
+            k: {node: i for i, node in enumerate(g.nodes())}
+            for k, g in enumerate(self.original_graphs)
+        }
+
+        for idx, cluster in enumerate(clusters):
+            # 1) Build local blueprint by averaging posterior samples
+            stored_L = self.local_posterior_L[idx]
+            if stored_L is None or len(stored_L) == 0:
+                bp = graph_constructor()  # empty
+            else:
+                max_nl = max(L.shape[0] for L in stored_L)
+                tally = np.zeros((max_nl, max_nl), dtype=float)
+                for L in stored_L:
+                    nl = L.shape[0]
+                    tally[:nl, :nl] += L
+                Lavg = tally / max(1, len(stored_L))
+                Lbin = (Lavg >= posterior_prob_cutoff).astype(int)
+                bp = nx.from_numpy_array(Lbin, create_using=graph_constructor)
+
+            # 2) Recompute node order for this cluster (match run_local_alignment_task)
+            node_order: Dict[int, list] = {}
+            for gidx in range(self.K):
+                node_order[gidx] = [nid for (kk, nid) in cluster["node_backrefs"] if kk == gidx]
+
+            # 3) Build node->latent probability mapping from stored permutations
+            stored_pi = self.local_posterior_pi[idx]
+            node_mapping: Dict[int, np.ndarray] = {}
+            if stored_pi is None:
+                stored_pi = [[] for _ in range(self.K)]
+
+            # Determine max NL across samples for this cluster
+            max_nl = 0
+            for k in range(self.K):
+                for pk in stored_pi[k]:
+                    if pk is not None:
+                        max_nl = max(max_nl, int(np.max(pk)) + 1 if pk.size else max_nl)
+            # Fallback in case pk were empty
+            if max_nl <= 0:
+                max_nl = bp.number_of_nodes()
+
+            for gidx in range(self.K):
+                # Number of original nodes for this graph
+                num_nodes = len(self.original_graphs[gidx].nodes())
+                tally = np.zeros((num_nodes, max_nl), dtype=float)
+                pis = stored_pi[gidx]
+                if pis is None:
+                    pis = []
+                for pk in pis:
+                    if pk is None or pk.size == 0:
+                        continue
+                    # pk is length equal to number of nodes in the subgraph; need to map to original rows
+                    # Build a mapping from local row -> original node id from node_order
+                    for local_row, latent_slot in enumerate(pk):
+                        if latent_slot < 0:
+                            continue
+                        if local_row >= len(node_order[gidx]):
+                            continue
+                        orig_node = node_order[gidx][local_row]
+                        orig_row = orig_row_lut[gidx].get(orig_node, None)
+                        if orig_row is None:
+                            continue
+                        if latent_slot >= tally.shape[1]:
+                            # expand columns if needed
+                            extra = latent_slot + 1 - tally.shape[1]
+                            tally = np.pad(tally, ((0, 0), (0, extra)), constant_values=0.0)
+                        tally[orig_row, int(latent_slot)] += 1.0
+                if len(pis) > 0:
+                    tally /= float(len(pis))
+                # Normalize each row to probabilistic mapping
+                for r in range(tally.shape[0]):
+                    s = tally[r].sum()
+                    if s > 0:
+                        tally[r] /= s
+                node_mapping[gidx] = tally
+
+            local_results.append({
+                'blueprint': bp,
+                'node_mapping': node_mapping,
+                'node_order': node_order,
+                'node_backrefs': cluster['node_backrefs'],
+            })
+
+        # Stitch using existing union map and return
+        meta_bp = graph_constructor()
+        meta_map = {k: np.array([]) for k in range(self.K)}
+        final_graph, final_mappings = self._stitch_results(local_results, meta_bp, meta_map)
+        return final_graph, final_mappings
