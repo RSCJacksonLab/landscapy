@@ -178,11 +178,66 @@ class FitnessSuperscape:
             self.latent_landscape = self.construct_latent_landscape(posterior_prob_cutoff=posterior_prob_cutoff)
             return
 
-        # Run RJMCMC sampling using the hierachical aligner (scales in linear time).
-        # and not the RJMCMC aligner (scales in O(N^2K^2) time).
+        # Run RJMCMC sampling using the hierarchical aligner (scales ~linearly).
+        # Prepare hierarchical aligner controls (top-level kwargs) and pass the rest
+        # through as RJMCMCAligner params via aligner_params.
+        _sampler_kwargs = dict(sampler_kwargs)
+
+        # Extract hierarchical kwargs (support both underscored and non-underscored forms)
+        _hier_kwargs = {}
+        def _pop_any(d, keys, default=None):
+            for k in keys:
+                if k in d:
+                    return d.pop(k)
+            return default
+
+        # Sliding-window controls: default-enable sliding windows unless explicitly disabled
+        _lw_shifts = _pop_any(_sampler_kwargs, [
+            'local_window_shifts'
+        ], None)
+        _lw_size = _pop_any(_sampler_kwargs, [
+            'local_window_size'
+        ], None)
+        _lw_stride = _pop_any(_sampler_kwargs, [
+            'local_window_stride'
+        ], None)
+        # If user did not specify any windowing params, default to sliding windows enabled.
+        if _lw_shifts is None and _lw_size is None and _lw_stride is None:
+            _hier_kwargs['local_window_shifts'] = 1
+        else:
+            if _lw_shifts is not None:
+                _hier_kwargs['local_window_shifts'] = _lw_shifts
+            if _lw_size is not None:
+                _hier_kwargs['local_window_size'] = _lw_size
+            if _lw_stride is not None:
+                _hier_kwargs['local_window_stride'] = _lw_stride
+
+        # CPU chain controls
+        _lc = _pop_any(_sampler_kwargs, ['_local_cpu_chains', 'local_cpu_chains'], None)
+        _mc = _pop_any(_sampler_kwargs, ['_meta_cpu_chains', 'meta_cpu_chains'], None)
+        if _lc is not None:
+            _hier_kwargs['_local_cpu_chains'] = _lc
+        if _mc is not None:
+            _hier_kwargs['_meta_cpu_chains'] = _mc
+
+        # Progress / checkpoint controls
+        _show = _pop_any(_sampler_kwargs, ['_show_progress', 'show_progress'], None)
+        _ckpt_dir = _pop_any(_sampler_kwargs, ['_checkpoint_dir', 'checkpoint_dir'], None)
+        _ckpt_int = _pop_any(_sampler_kwargs, ['_checkpoint_interval', 'checkpoint_interval'], None)
+        _ckpt_resume = _pop_any(_sampler_kwargs, ['_resume_checkpoint', 'resume_checkpoint'], None)
+        if _show is not None:
+            _hier_kwargs['_show_progress'] = _show
+        if _ckpt_dir is not None:
+            _hier_kwargs['_checkpoint_dir'] = _ckpt_dir
+        if _ckpt_int is not None:
+            _hier_kwargs['_checkpoint_interval'] = _ckpt_int
+        if _ckpt_resume is not None:
+            _hier_kwargs['_resume_checkpoint'] = _ckpt_resume
+
         self._hierarchical_aligner = HierarchicalRJMCMCAligner(
             graphs=self._landscape_graphs,
-            aligner_params=sampler_kwargs
+            aligner_params=_sampler_kwargs,
+            **_hier_kwargs,
         )
         # The results are now stored directly, not the aligner object
         self.latent_graph, self._latent_mappings, = self._hierarchical_aligner.run_alignment()

@@ -60,6 +60,9 @@ def cli():
 @click.option('--auto-anchor', required=False, is_flag=True, default=False, help='Boolean flag to auto-anchor nodes to latent slots by cosine similarity.')
 @click.option('--anchor-cosine-threshold', required=False, type=float, default=1, help='Cosine similarity threshold for auto-anchoring nodes to latent slots.')
 @click.option('--seed', required=False, type=int, default=None, help='Seed for the random number generator to make results reproducible.')
+@click.option('--local-window-shifts', required=False, type=int, default=None, help='Number of interleaved shifts for overlapping local windows. Set 0 to disable sliding windows.')
+@click.option('--local-window-size', required=False, type=int, default=None, help='Window size (number of nodes) for local sliding windows. Heuristic default if omitted.')
+@click.option('--local-window-stride', required=False, type=int, default=None, help='Stride between local windows. Heuristic default if omitted.')
 
 # Logging / checkpointing (same as phylo)
 @click.option('--log-file', required=False, type=click.Path(), help='Path to write a detailed log file for this run.')
@@ -112,7 +115,10 @@ def diffusion_evol_superscape(sequences,
                                   resume_checkpoint,
                                   sequential_construction,
                                   meta_cpu_chains,
-                                  local_cpu_chains):
+                                  local_cpu_chains,
+                                  local_window_shifts,
+                                  local_window_size,
+                                  local_window_stride):
     """
     HPC interface to build a Superscape based on the evolutionary diffusion graph.
     Uses create_evol_diffusion_graph under the hood for each input FASTA.
@@ -170,6 +176,10 @@ def diffusion_evol_superscape(sequences,
         cosine_anchor_threshold=anchor_cosine_threshold,
         seed=seed,
         local_cpu_chains=local_cpu_chains,
+        # Optional sliding-window params for hierarchical aligner
+        **({"local_window_shifts": local_window_shifts} if local_window_shifts is not None else {}),
+        **({"local_window_size": local_window_size} if local_window_size is not None else {}),
+        **({"local_window_stride": local_window_stride} if local_window_stride is not None else {}),
         _checkpoint_dir=str(ckpt_dir),
         _checkpoint_interval=checkpoint_interval,
         _resume_checkpoint=resume_checkpoint,
@@ -351,6 +361,11 @@ def diffusion_evol_superscape(sequences,
 @click.option('--meta-cpu-chains', required=False, type=int, default=os.cpu_count(), help='Number of CPU chains to use for the meta-alignment step in hierarchical alignment.')
 @click.option('--local-cpu-chains', required=False, type=int, default=(os.cpu_count()//10 if os.cpu_count()//10 > 1 else 1), help='Number of CPU chains to use for each parallel local alignment chain.')
 
+# Hierarchical sliding windows
+@click.option('--local-window-shifts', required=False, type=int, default=None, help='Number of interleaved shifts for overlapping local windows. Set 0 to disable sliding windows.')
+@click.option('--local-window-size', required=False, type=int, default=None, help='Window size (number of nodes) for local sliding windows. Heuristic default if omitted.')
+@click.option('--local-window-stride', required=False, type=int, default=None, help='Stride between local windows. Heuristic default if omitted.')
+
 # Alignment cleaning
 @click.option('--drop-all-gap-columns/--keep-all-gap-columns', default=True, help='Drop columns that are entirely gaps in each alignment.')
 @click.option('--max-gap-frac', required=False, type=float, default=None, help='If set in [0,1], drop columns with gap fraction strictly greater than this threshold.')
@@ -383,6 +398,9 @@ def phylo_superscape(sequences,
                      seed,
                      meta_cpu_chains,
                      local_cpu_chains,
+                     local_window_shifts,
+                     local_window_size,
+                     local_window_stride,
                      drop_all_gap_columns,
                      max_gap_frac,
                      max_seq_gap_frac,
@@ -632,6 +650,11 @@ def phylo_superscape(sequences,
         "cosine_anchor_threshold": anchor_cosine_threshold,
         "seed": seed,
         "local_cpu_chains": local_cpu_chains,
+        # Optional sliding-window controls for hierarchical aligner
+        # If omitted, core defaults will enable sliding windows.
+        **({"local_window_shifts": local_window_shifts} if local_window_shifts is not None else {}),
+        **({"local_window_size": local_window_size} if local_window_size is not None else {}),
+        **({"local_window_stride": local_window_stride} if local_window_stride is not None else {}),
         # propagate checkpointing into hierarchical aligner
         "_checkpoint_dir": None,  # filled below
         "_checkpoint_interval": checkpoint_interval,
