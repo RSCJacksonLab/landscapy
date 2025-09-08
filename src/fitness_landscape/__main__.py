@@ -59,6 +59,7 @@ def cli():
 @click.option('--sample-thin', required=False, type=int, default=10, help='Thinning interval for the RJMCMC sampler.')
 @click.option('--auto-anchor', required=False, is_flag=True, default=False, help='Boolean flag to auto-anchor nodes to latent slots by cosine similarity.')
 @click.option('--anchor-cosine-threshold', required=False, type=float, default=1, help='Cosine similarity threshold for auto-anchoring nodes to latent slots.')
+@click.option('--posterior-threshold', required=False, type=float, default=0.25, help='Posterior probability threshold to binarize the latent graph (used in stitching with sliding windows).')
 @click.option('--seed', required=False, type=int, default=None, help='Seed for the random number generator to make results reproducible.')
 @click.option('--local-window-shifts', required=False, type=int, default=None, help='Number of interleaved shifts for overlapping local windows. Set 0 to disable sliding windows.')
 @click.option('--local-window-size', required=False, type=int, default=None, help='Window size (number of nodes) for local sliding windows. Heuristic default if omitted.')
@@ -105,6 +106,7 @@ def diffusion_evol_superscape(sequences,
                                   sample_thin,
                                   auto_anchor,
                                   anchor_cosine_threshold,
+                                  posterior_threshold,
                                   seed,
                                   log_file,
                                   log_level,
@@ -253,7 +255,7 @@ def diffusion_evol_superscape(sequences,
             except Exception:
                 pass
 
-        superscape = FitnessSuperscape(landscapes=landscapes, **sampler_kwargs)
+        superscape = FitnessSuperscape(landscapes=landscapes, posterior_prob_cutoff=posterior_threshold, **sampler_kwargs)
     else:
         # Build parallel construction jobs: cartesian product of datasets x thresholds
         total_jobs = len(fasta_paths) * len(thrs)
@@ -305,6 +307,7 @@ def diffusion_evol_superscape(sequences,
         superscape = FitnessSuperscape.from_parallel_construction(
             constructor_type='undirected',
             construction_jobs=construction_jobs,
+            posterior_prob_cutoff=posterior_threshold,
             _show_progress=log_progress,
             _construct_checkpoint_dir=str(ckpt_dir),
             _construct_checkpoint_interval=checkpoint_interval,
@@ -343,6 +346,7 @@ def diffusion_evol_superscape(sequences,
 @click.option('--sample-thin', required=False, type=int, default=50, help='Thinning interval for the RJMCMC sampler.')
 @click.option('--auto-anchor', required=False, is_flag=True, default=True, help='Boolean flag to auto-anchor nodes to latent slots by cosine similarity.')
 @click.option('--anchor-cosine-threshold', required=False, type=float, default=0.99, help='Cosine similarity threshold for auto-anchoring nodes to latent slots.')
+@click.option('--posterior-threshold', required=False, type=float, default=0.25, help='Posterior probability threshold to binarize the latent graph (used in stitching with sliding windows).')
 @click.option('--sequential-construction', is_flag=True, default=False, help='Construct each landscape sequentially (avoids Ray during construction).')
 @click.option('--seed', required=False, type=int, default=None, help='Seed for the random number generator to make results reproducible.')
 
@@ -395,6 +399,7 @@ def phylo_superscape(sequences,
                      sample_thin,
                      auto_anchor,
                      anchor_cosine_threshold,
+                     posterior_threshold,
                      seed,
                      meta_cpu_chains,
                      local_cpu_chains,
@@ -681,12 +686,13 @@ def phylo_superscape(sequences,
             else:
                 from fitness_landscape.core.landscape import FitnessLandscape
                 landscapes.append(FitnessLandscape.from_sequences(sequences=seqs, **j))
-        superscape = FitnessSuperscape(landscapes=landscapes, **sampler_kwargs)
+        superscape = FitnessSuperscape(landscapes=landscapes, posterior_prob_cutoff=posterior_threshold, **sampler_kwargs)
     else:
         logger.info('Launching streaming parallel construction (Ray)')
         superscape = FitnessSuperscape.from_streaming_construction(
             constructor_type=('directed' if directed_landscape else 'undirected'),
             construction_job_iter=_construction_job_iter(),
+            posterior_prob_cutoff=posterior_threshold,
             _meta_cpu_chains=meta_cpu_chains,
             _fresh_worker_per_job=ray_fresh_worker,
             _show_progress=log_progress,
