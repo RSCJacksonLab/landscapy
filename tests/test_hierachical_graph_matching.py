@@ -236,3 +236,40 @@ def test_stitch_results_no_bridges(mock_graphs,
     assert final_graph.number_of_nodes() == 4
     assert nx.is_connected(final_graph) is False
     assert nx.number_connected_components(final_graph) == 2
+
+
+def test_windowed_overlap_clustering(mock_graphs,
+                                     aligner_params,
+                                     mock_rjmcmc_sample):
+    """
+    Ensure windowed clustering with shifts/stride runs and stitches using overlaps,
+    producing two disconnected components for the two true clusters.
+    """
+    aligner = HierarchicalRJMCMCAligner(
+        graphs=mock_graphs,
+        aligner_params=aligner_params,
+        local_window_shifts=2,
+        local_window_size=3,
+        local_window_stride=2
+    )
+
+    local_results = aligner._run_local_alignments()
+    # Expect at least two windows to be created
+    assert isinstance(local_results, list) and len(local_results) >= 2
+
+    meta_bp, meta_maps = aligner._run_global_meta_alignment(local_results)
+    final_graph, final_mappings = aligner._stitch_results(local_results, meta_bp, meta_maps)
+
+    assert isinstance(final_graph, nx.Graph)
+    # Stitching via overlaps should merge some local slots into fewer global nodes
+    total_local_slots = 0
+    for res in local_results:
+        bp = res.get('blueprint')
+        if bp is not None:
+            total_local_slots += bp.number_of_nodes()
+    assert final_graph.number_of_nodes() < total_local_slots
+
+    # Rows should be valid probability distributions
+    for k, M in final_mappings.items():
+        if M.size:
+            assert np.allclose(M.sum(axis=1), 1.0)

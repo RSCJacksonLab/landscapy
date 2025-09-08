@@ -155,13 +155,20 @@ class FitnessSuperscape:
             # Provide a minimal, picklable aligner-like object
             import networkx as _nx
             self._hierarchical_aligner = NullAligner(directed=isinstance(G0, _nx.DiGraph))
-            # empty traces
+            # empty traces (alias both naming styles for consistency with multi-graph path)
             self.local_energy_traces = {}
             self.local_nl_traces = {}
             self.local_edges_traces = {}
             self.meta_energy_trace = []
             self.meta_nl_trace = []
             self.meta_edges_trace = []
+            # public aliases used elsewhere when multiple landscapes are aligned
+            self.local_trace_E = self.local_energy_traces
+            self.local_trace_NL = self.local_nl_traces
+            self.local_trace_edges = self.local_edges_traces
+            self.meta_trace_E = self.meta_energy_trace
+            self.meta_trace_NL = self.meta_nl_trace
+            self.meta_trace_edges = self.meta_edges_trace
 
             # Canonical node order and back refs
             self._node_orders = [list(self.landscapes[0].graph.nodes())]
@@ -180,12 +187,16 @@ class FitnessSuperscape:
         # The results are now stored directly, not the aligner object
         self.latent_graph, self._latent_mappings, = self._hierarchical_aligner.run_alignment()
         
-        # Collect local traces 
+        # Collect local traces (expose with consistent names)
         self.local_trace_E = self._hierarchical_aligner.local_energy_traces
         self.local_trace_NL = self._hierarchical_aligner.local_nl_traces
         self.local_trace_edges = self._hierarchical_aligner.local_edges_traces
+        # Backward-friendly aliases
+        self.local_energy_traces = self.local_trace_E
+        self.local_nl_traces = self.local_trace_NL
+        self.local_edges_traces = self.local_trace_edges
         
-        # Collect meta traces 
+        # Collect meta traces (empty when using overlap-based meta stage)
         self.meta_trace_E = self._hierarchical_aligner.meta_energy_trace
         self.meta_trace_NL = self._hierarchical_aligner.meta_nl_trace
         self.meta_trace_edges = self._hierarchical_aligner.meta_edges_trace
