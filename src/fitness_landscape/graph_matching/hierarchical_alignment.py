@@ -2,7 +2,7 @@ from __future__ import annotations
 import ray
 import numpy as np
 import networkx as nx
-from typing import List, Dict, Tuple, Optional, Union
+from typing import List, Dict, Tuple, Optional, Union, Literal
 from .latent_alignment import RJMCMCAligner
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components, minimum_spanning_tree
@@ -117,7 +117,10 @@ class HierarchicalRJMCMCAligner:
                  _show_progress: bool = False,
                  _checkpoint_dir: str | None = None,
                  _checkpoint_interval: int = 300,
-                 _resume_checkpoint: str | None = None
+                 _resume_checkpoint: str | None = None,
+                 # Posterior storage policy: 'compact' averages on the fly to reduce memory,
+                 # 'full' retains all per-sample arrays, 'none' drops posterior storage.
+                 _posterior_storage: Literal['compact','full','none'] = 'compact'
                  ) -> None:
         
         
@@ -146,6 +149,7 @@ class HierarchicalRJMCMCAligner:
         self._checkpoint_dir = _checkpoint_dir
         self._checkpoint_interval = _checkpoint_interval
         self._resume_checkpoint = _resume_checkpoint
+        self._posterior_storage = _posterior_storage
 
         # Update aligner parameters with directed flag.
         if 'directed' not in self.aligner_params:
@@ -160,6 +164,8 @@ class HierarchicalRJMCMCAligner:
         self.local_edges_traces = {}
 
         # Initialise storage of posterior samples.
+        # In 'full' mode: lists of lists (per-cluster per-sample)
+        # In 'compact' mode: per-cluster averaged matrices (L_avg: np.ndarray, pi_probs: Dict[int,np.ndarray])
         self.local_posterior_L = []
         self.local_posterior_pi = []
         self.meta_posterior_L = []
@@ -460,9 +466,86 @@ class HierarchicalRJMCMCAligner:
                 results_in_order[idx]['node_mapping'] = node_mapping
                 results_in_order[idx]['node_order'] = node_order
 
-                # posterior samples for local alignments (store by cluster index)
-                self.local_posterior_L[idx] = stored_L
-                self.local_posterior_pi[idx] = stored_pi
+                # Posterior storage by policy
+                if self._posterior_storage == 'none':
+                    self.local_posterior_L[idx] = None
+                    self.local_posterior_pi[idx] = None
+                elif self._posterior_storage == 'full':
+                    # Downcast to save memory: L as uint8/float16; permutations as int16
+                    L_comp = [np.asarray(Lm, dtype=np.uint8) for Lm in (stored_L or [])]
+                    pi_comp = []
+                    if stored_pi is None:
+                        pi_comp = [[] for _ in range(self.K)]
+                    else:
+                        for gidx in range(self.K):
+                            arrs = stored_pi[gidx] if gidx < len(stored_pi) else []
+                            # Skip empty perms; otherwise cast to int16
+                            pi_comp.append([np.asarray(p, dtype=np.int16) for p in arrs if p is not None and p.size > 0])
+                    self.local_posterior_L[idx] = L_comp
+                    self.local_posterior_pi[idx] = pi_comp
+                else:  # 'compact'
+                    # Compute averaged blueprint matrix (float32)
+                    if stored_L and len(stored_L) > 0:
+                        max_nl = max(Lm.shape[0] for Lm in stored_L)
+                        tally = np.zeros((max_nl, max_nl), dtype=np.float32)
+                        for Lm in stored_L:
+                            nl = Lm.shape[0]
+                            tally[:nl, :nl] += Lm.astype(np.float32, copy=False)
+                        L_avg = tally / max(1, len(stored_L))
+                    else:
+                        L_avg = np.zeros((0, 0), dtype=np.float32)
+
+                    # Build node->latent probability mapping per original graph in ORIGINAL row indices
+                    # Initialize probability matrices with correct row counts
+                    pi_probs: Dict[int, np.ndarray] = {}
+                    # Determine number of latent slots from L_avg
+                    max_nl = L_avg.shape[0]
+                    # Original node -> row index LUT per graph
+                    # Note: we need orig_row_lut here; reconstruct it cheaply
+                    orig_row_lut: Dict[int, Dict] = {
+                        k: {node: i for i, node in enumerate(self.original_graphs[k].nodes())}
+                        for k in range(self.K)
+                    }
+                    # Tally counts, then normalise per row
+                    # stored_pi is a list per graph of arrays (local-row -> latent slot)
+                    if stored_pi is None:
+                        stored_pi = [[] for _ in range(self.K)]
+                    for gidx in range(self.K):
+                        num_rows = self.original_graphs[gidx].number_of_nodes()
+                        if num_rows == 0:
+                            continue
+                        tally = np.zeros((num_rows, max(1, max_nl)), dtype=np.float32)
+                        pis = stored_pi[gidx] if gidx < len(stored_pi) else []
+                        # Build local-row -> original-row mapping from node_order
+                        local_order = node_order.get(gidx, [])
+                        for pk in pis:
+                            if pk is None or pk.size == 0:
+                                continue
+                            for local_row, latent_slot in enumerate(pk):
+                                if latent_slot < 0:
+                                    continue
+                                if local_row >= len(local_order):
+                                    continue
+                                orig_node = local_order[local_row]
+                                orig_row = orig_row_lut[gidx].get(orig_node, None)
+                                if orig_row is None:
+                                    continue
+                                if latent_slot >= tally.shape[1]:
+                                    # expand columns if needed
+                                    extra = int(latent_slot + 1 - tally.shape[1])
+                                    tally = np.pad(tally, ((0, 0), (0, extra)), constant_values=0.0)
+                                tally[orig_row, int(latent_slot)] += 1.0
+                        # Normalize rows
+                        with np.errstate(invalid='ignore'):
+                            row_sums = tally.sum(axis=1, keepdims=True)  # (R,1)
+                            mask = (row_sums > 0)  # (R,1) boolean
+                            if np.any(mask):
+                                # Normalize rows with broadcasting-safe indexing
+                                tally[mask[:, 0], :] /= row_sums[mask[:, 0], :]
+                        pi_probs[gidx] = tally.astype(np.float32, copy=False)
+
+                    self.local_posterior_L[idx] = L_avg
+                    self.local_posterior_pi[idx] = pi_probs
 
                 # traces
                 self.local_energy_traces[idx] = trace_E
@@ -858,8 +941,11 @@ class HierarchicalRJMCMCAligner:
         clusters = self._create_clusters()
         graph_constructor = nx.DiGraph if self.directed else nx.Graph
 
-        # Guard: require local posterior samples
-        if not self.local_posterior_L or all((lst is None or len(lst) == 0) for lst in self.local_posterior_L):
+        # Guard: require local posterior samples (either compact or full)
+        if not self.local_posterior_L or all(
+            (v is None) or (isinstance(v, list) and len(v) == 0) or (isinstance(v, np.ndarray) and v.size == 0)
+            for v in self.local_posterior_L
+        ):
             # Nothing to rebuild from; return empty graph and empty mappings
             empty = {k: np.array([]) for k in range(self.K)}
             return graph_constructor(), empty
@@ -874,17 +960,26 @@ class HierarchicalRJMCMCAligner:
         for idx, cluster in enumerate(clusters):
             # 1) Build local blueprint by averaging posterior samples
             stored_L = self.local_posterior_L[idx]
-            if stored_L is None or len(stored_L) == 0:
-                bp = graph_constructor()  # empty
-            else:
-                max_nl = max(L.shape[0] for L in stored_L)
-                tally = np.zeros((max_nl, max_nl), dtype=float)
-                for L in stored_L:
-                    nl = L.shape[0]
-                    tally[:nl, :nl] += L
-                Lavg = tally / max(1, len(stored_L))
-                Lbin = (Lavg >= posterior_prob_cutoff).astype(int)
-                bp = nx.from_numpy_array(Lbin, create_using=graph_constructor)
+            if stored_L is None:
+                bp = graph_constructor()
+            elif isinstance(stored_L, np.ndarray):  # compact averaged form
+                if stored_L.size == 0:
+                    bp = graph_constructor()
+                else:
+                    Lbin = (stored_L >= posterior_prob_cutoff).astype(int)
+                    bp = nx.from_numpy_array(Lbin, create_using=graph_constructor)
+            else:  # full list of samples
+                if len(stored_L) == 0:
+                    bp = graph_constructor()
+                else:
+                    max_nl = max(L.shape[0] for L in stored_L)
+                    tally = np.zeros((max_nl, max_nl), dtype=float)
+                    for L in stored_L:
+                        nl = L.shape[0]
+                        tally[:nl, :nl] += L
+                    Lavg = tally / max(1, len(stored_L))
+                    Lbin = (Lavg >= posterior_prob_cutoff).astype(int)
+                    bp = nx.from_numpy_array(Lbin, create_using=graph_constructor)
 
             # 2) Recompute node order for this cluster (match run_local_alignment_task)
             node_order: Dict[int, list] = {}
@@ -894,53 +989,57 @@ class HierarchicalRJMCMCAligner:
             # 3) Build node->latent probability mapping from stored permutations
             stored_pi = self.local_posterior_pi[idx]
             node_mapping: Dict[int, np.ndarray] = {}
-            if stored_pi is None:
-                stored_pi = [[] for _ in range(self.K)]
+            if isinstance(stored_pi, dict):
+                # Compact form: already in original-row space
+                node_mapping = {int(k): np.asarray(v, dtype=float) for k, v in stored_pi.items()}
+            else:
+                if stored_pi is None:
+                    stored_pi = [[] for _ in range(self.K)]
 
-            # Determine max NL across samples for this cluster
-            max_nl = 0
-            for k in range(self.K):
-                for pk in stored_pi[k]:
-                    if pk is not None:
-                        max_nl = max(max_nl, int(np.max(pk)) + 1 if pk.size else max_nl)
-            # Fallback in case pk were empty
-            if max_nl <= 0:
-                max_nl = bp.number_of_nodes()
+                # Determine max NL across samples for this cluster
+                max_nl = 0
+                for k in range(self.K):
+                    for pk in stored_pi[k]:
+                        if pk is not None:
+                            max_nl = max(max_nl, int(np.max(pk)) + 1 if pk.size else max_nl)
+                # Fallback in case pk were empty
+                if max_nl <= 0:
+                    max_nl = bp.number_of_nodes()
 
-            for gidx in range(self.K):
-                # Number of original nodes for this graph
-                num_nodes = len(self.original_graphs[gidx].nodes())
-                tally = np.zeros((num_nodes, max_nl), dtype=float)
-                pis = stored_pi[gidx]
-                if pis is None:
-                    pis = []
-                for pk in pis:
-                    if pk is None or pk.size == 0:
-                        continue
-                    # pk is length equal to number of nodes in the subgraph; need to map to original rows
-                    # Build a mapping from local row -> original node id from node_order
-                    for local_row, latent_slot in enumerate(pk):
-                        if latent_slot < 0:
+                for gidx in range(self.K):
+                    # Number of original nodes for this graph
+                    num_nodes = len(self.original_graphs[gidx].nodes())
+                    tally = np.zeros((num_nodes, max_nl), dtype=float)
+                    pis = stored_pi[gidx]
+                    if pis is None:
+                        pis = []
+                    for pk in pis:
+                        if pk is None or pk.size == 0:
                             continue
-                        if local_row >= len(node_order[gidx]):
-                            continue
-                        orig_node = node_order[gidx][local_row]
-                        orig_row = orig_row_lut[gidx].get(orig_node, None)
-                        if orig_row is None:
-                            continue
-                        if latent_slot >= tally.shape[1]:
-                            # expand columns if needed
-                            extra = latent_slot + 1 - tally.shape[1]
-                            tally = np.pad(tally, ((0, 0), (0, extra)), constant_values=0.0)
-                        tally[orig_row, int(latent_slot)] += 1.0
-                if len(pis) > 0:
-                    tally /= float(len(pis))
-                # Normalize each row to probabilistic mapping
-                for r in range(tally.shape[0]):
-                    s = tally[r].sum()
-                    if s > 0:
-                        tally[r] /= s
-                node_mapping[gidx] = tally
+                        # pk is length equal to number of nodes in the subgraph; need to map to original rows
+                        # Build a mapping from local row -> original node id from node_order
+                        for local_row, latent_slot in enumerate(pk):
+                            if latent_slot < 0:
+                                continue
+                            if local_row >= len(node_order[gidx]):
+                                continue
+                            orig_node = node_order[gidx][local_row]
+                            orig_row = orig_row_lut[gidx].get(orig_node, None)
+                            if orig_row is None:
+                                continue
+                            if latent_slot >= tally.shape[1]:
+                                # expand columns if needed
+                                extra = latent_slot + 1 - tally.shape[1]
+                                tally = np.pad(tally, ((0, 0), (0, extra)), constant_values=0.0)
+                            tally[orig_row, int(latent_slot)] += 1.0
+                    if len(pis) > 0:
+                        tally /= float(len(pis))
+                    # Normalize each row to probabilistic mapping
+                    for r in range(tally.shape[0]):
+                        s = tally[r].sum()
+                        if s > 0:
+                            tally[r] /= s
+                    node_mapping[gidx] = tally
 
             local_results.append({
                 'blueprint': bp,
