@@ -93,8 +93,13 @@ def _create_landscape_task(
     _os.environ.setdefault('MKL_NUM_THREADS', '1')
     _os.environ.setdefault('NUMEXPR_NUM_THREADS', '1')
     _logger = _logging.getLogger('fitness_landscape')
+    # Optional human-readable label for logs
+    _job_label = kwargs.pop('_job_label', None)
     if _log_progress:
-        _logger.info('[job %s/%s] start', _job_id, _total_jobs)
+        if _job_label:
+            _logger.info('[job %s/%s] start: %s', _job_id, _total_jobs, _job_label)
+        else:
+            _logger.info('[job %s/%s] start', _job_id, _total_jobs)
     ts = _time.perf_counter()
     try:
         result = constructor_class.from_sequences(
@@ -103,7 +108,11 @@ def _create_landscape_task(
             **kwargs
         )
         if _log_progress:
-            _logger.info('[job %s/%s] complete in %.2fs', _job_id, _total_jobs, _time.perf_counter()-ts)
+            dt = _time.perf_counter()-ts
+            if _job_label:
+                _logger.info('[job %s/%s] complete in %.2fs: %s', _job_id, _total_jobs, dt, _job_label)
+            else:
+                _logger.info('[job %s/%s] complete in %.2fs', _job_id, _total_jobs, dt)
         return result
     except Exception as e:
         msg = f"[job {_job_id}/{_total_jobs}] construction failed: {e}"
@@ -938,7 +947,8 @@ class FitnessSuperscape:
         submit_order = list(range(len(prepared_jobs)))
         inflight: dict[Any, int] = {}
         done_count = 0
-        t_last = _time.perf_counter()
+        t_start = _time.perf_counter()
+        t_last = t_start
         try:
             import psutil as _psutil  # optional
         except Exception:
@@ -970,7 +980,10 @@ class FitnessSuperscape:
                     raise
                 done_count += 1
                 if _show_progress:
-                    _logger.info('parallel progress: %d/%d completed', done_count, total)
+                    elapsed = now - t_start
+                    avg = (elapsed / done_count) if done_count else 0.0
+                    eta = (avg * (total - done_count)) if done_count else 0.0
+                    _logger.info('parallel progress: %d/%d completed inflight=%d elapsed=%.1fs eta=%.1fs', done_count, total, len(inflight), elapsed, eta)
                 # Submit next job to keep window full
                 _maybe_submit()
                 # checkpoint
@@ -998,7 +1011,8 @@ class FitnessSuperscape:
                         p = _psutil.Process()
                         rss_bytes = p.memory_info().rss
                         rss = f" rss={rss_bytes/1e9:.2f}GB"
-                    _logger.info('parallel heartbeat: %d/%d completed%s', done_count, total, rss)
+                    elapsed = _time.perf_counter() - t_start
+                    _logger.info('parallel heartbeat: %d/%d completed inflight=%d elapsed=%.1fs%s', done_count, total, len(inflight), elapsed, rss)
 
         # Initialize the FitnessSuperscape with the final list of landscapes
         return cls(
@@ -1052,10 +1066,12 @@ class FitnessSuperscape:
         import logging as _logging, time as _time
         _logger = _logging.getLogger('fitness_landscape')
         max_inflight = int(_meta_cpu_chains) if _meta_cpu_chains and _meta_cpu_chains > 0 else (os.cpu_count() or 1)
-        inflight: dict[Any, int] = {}
+        inflight: dict[Any, dict] = {}
         landscapes: list[Union[FitnessLandscape, DirectedFitnessLandscape]] = []
         job_index = 0
         last_ckpt = 0.0
+        t_start = _time.perf_counter()
+        total_hint = None
 
         pending_barrier = False
 
@@ -1086,13 +1102,17 @@ class FitnessSuperscape:
                 # assign job id
                 job.setdefault('_job_id', job_index + 1)
                 job.setdefault('_total_jobs', None)
+                # surface a total jobs hint if provided
+                nonlocal total_hint
+                if job.get('_total_jobs'):
+                    total_hint = int(job['_total_jobs'])
                 _opts = {"num_gpus": num_gpus, "num_cpus": _parent_task_cpus}
                 if _fresh_worker_per_job:
                     # Force worker isolation by using a unique runtime_env per task
                     import uuid as _uuid
                     _opts["runtime_env"] = {"env_vars": {"LANDSCAPY_FRESH_WORKER": str(_uuid.uuid4())}}
                 ref = _create_landscape_task.options(**_opts).remote(**job)
-                inflight[ref] = job_index
+                inflight[ref] = {"idx": job_index, "ts": _time.perf_counter()}
                 job_index += 1
                 submitted += 1
             return submitted
@@ -1110,16 +1130,25 @@ class FitnessSuperscape:
             now = _time.perf_counter()
             if done:
                 ref = done[0]
-                idx = inflight.pop(ref)
+                meta = inflight.pop(ref)
                 try:
                     L = ray.get(ref)
                 except Exception as e:
                     raise
                 landscapes.append(L)
                 if _show_progress:
-                    _logger.info('stream progress: %d completed', len(landscapes))
+                    elapsed = now - t_start
+                    done_count = len(landscapes)
+                    avg = (elapsed / done_count) if done_count else 0.0
+                    eta = (avg * ((total_hint or 0) - done_count)) if (done_count and total_hint) else None
+                    if total_hint:
+                        _logger.info('stream progress: %d/%d completed inflight=%d elapsed=%.1fs eta=%.1fs', done_count, total_hint, len(inflight), elapsed, eta or 0.0)
+                    else:
+                        _logger.info('stream progress: %d completed inflight=%d elapsed=%.1fs', done_count, len(inflight), elapsed)
                 # If a barrier is pending and inflight is now empty, clear and continue submitting
                 if pending_barrier and not inflight:
+                    if _show_progress:
+                        _logger.info('stream barrier passed; continuing submissions')
                     pending_barrier = False
                 _submit_next(batch=1)
                 # lightweight checkpoint
@@ -1139,7 +1168,8 @@ class FitnessSuperscape:
                         p = _psutil.Process()
                         rss_bytes = p.memory_info().rss
                         rss = f" rss={rss_bytes/1e9:.2f}GB"
-                    _logger.info('stream heartbeat: %d completed%s', len(landscapes), rss)
+                    elapsed = _time.perf_counter() - t_start
+                    _logger.info('stream heartbeat: %d completed inflight=%d elapsed=%.1fs%s', len(landscapes), len(inflight), elapsed, rss)
 
         return cls(
             landscapes=landscapes,

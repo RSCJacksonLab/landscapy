@@ -205,6 +205,8 @@ def diffusion_evol_superscape(sequences,
         thrs = [connectivity_threshold]
 
     logger.info('Using %d connectivity thresholds: %s', len(thrs), ', '.join(f'{v:.3g}' for v in thrs))
+    logger.info('RJMCMC: alpha=%.3f burn-in=%d samples=%d thin=%d auto_anchor=%s', rjmcmc_alpha, burn_in_samples, total_samples, sample_thin, str(auto_anchor))
+    logger.info('Parallelism: meta_cpu_chains=%s local_cpu_chains=%s sequential_construction=%s', str(meta_cpu_chains), str(local_cpu_chains), str(sequential_construction))
 
     # If requested, construct sequentially here; otherwise, fan out Ray jobs.
     if sequential_construction:
@@ -303,15 +305,65 @@ def diffusion_evol_superscape(sequences,
                     '_total_jobs': total_jobs,
                 })
 
-        logger.info('Launching %d parallel construction jobs (Ray)', len(construction_jobs))
-        superscape = FitnessSuperscape.from_parallel_construction(
+        # Switch to streaming submission to bound memory and avoid
+        # materializing all jobs up front (mirrors phylo_superscape).
+        def _construction_job_iter():
+            job_id = 0
+            total_jobs = len(fasta_paths) * len(thrs)
+            for fp in fasta_paths:
+                logger.info('Queuing jobs for %s across %d thresholds', fp, len(thrs))
+                try:
+                    # Sanitize input: allow non-canonical chars (e.g., X) to be converted to gaps then removed
+                    seqs = fasta_to_prot20_sequences(Path(fp), strict=False)
+                except Exception as e:
+                    raise click.UsageError(str(e))
+                # Precompute embeddings once per dataset
+                if not compute_embeddings:
+                    raise click.UsageError('--compute-embeddings must be enabled for diffusion graph')
+                if embedding_domain == 'ohe':
+                    from fitness_landscape.core.graph import _encode_multiallele
+                    E, _ = _encode_multiallele(seqs)
+                else:
+                    E = _compute_embeddings_from_sequences(seqs, model_name=plm_model_name, batch_size=plm_batch_size, device=plm_device)
+                ds_name = os.path.basename(str(fp))
+                for thr in thrs:
+                    job_id += 1
+                    job_label = f"dataset={ds_name} thr={thr:.3g} k={k} t={t}"
+                    yield {
+                        'sequences': seqs,
+                        'embeddings': E,
+                        'graph_type': 'evol_diffusion',
+                        # diffusion/evol params
+                        'k': k,
+                        't': t,
+                        'tau': tau,
+                        'connectivity_threshold': thr,
+                        'backend': backend,
+                        'index_type': index_type,
+                        'faiss_metric': faiss_metric,
+                        'include_self': include_self,
+                        'use_gpu': use_gpu,
+                        'hnsw_M': hnsw_m,
+                        'cpus': cpus,
+                        # embeddings provided; skip internal compute
+                        'embedding_domain': embedding_domain,
+                        '_compute_embeddings': False,
+                        # bookkeeping
+                        '_log_progress': log_progress,
+                        '_job_id': job_id,
+                        '_total_jobs': total_jobs,
+                        '_job_label': job_label,
+                    }
+
+        logger.info('Checkpointing: dir=%s interval=%ss', str(ckpt_dir), str(checkpoint_interval))
+        logger.info('Launching streaming parallel construction (Ray)')
+        superscape = FitnessSuperscape.from_streaming_construction(
             constructor_type='undirected',
-            construction_jobs=construction_jobs,
+            construction_job_iter=_construction_job_iter(),
             posterior_prob_cutoff=posterior_threshold,
             _show_progress=log_progress,
             _construct_checkpoint_dir=str(ckpt_dir),
-            _construct_checkpoint_interval=checkpoint_interval,
-            _construct_resume_checkpoint=resume_checkpoint,
+            _meta_cpu_chains=meta_cpu_chains,
             _parent_task_cpus=0.25,
             **sampler_kwargs,
         )
@@ -447,6 +499,12 @@ def phylo_superscape(sequences,
             logger.addHandler(fh)
     t0 = time.perf_counter(); c0 = time.process_time()
     logger.info('phylo-superscape: start')
+    logger.info('RJMCMC: alpha=%.3f burn-in=%d samples=%d thin=%d auto_anchor=%s', rjmcmc_alpha, burn_in_samples, total_samples, sample_thin, str(auto_anchor))
+    logger.info('Parallelism: meta_cpu_chains=%s local_cpu_chains=%s sequential_construction=%s', str(meta_cpu_chains), str(local_cpu_chains), str(sequential_construction))
+    if fan_alignment:
+        logger.info('Fanning enabled: window=%s overlap=%s', str(fan_alignment_window), str(fan_alignment_overlap))
+    if max_seqs_per_block:
+        logger.info('Sequence blocking: max_seqs_per_block=%s', str(max_seqs_per_block))
 
     # Helpers hoisted so both sub-iterators can reuse them
     from cogent3.core.alignment import make_aligned_seqs
@@ -589,39 +647,46 @@ def phylo_superscape(sequences,
                 block_map = {n: str(alignment.get_gapped_seq(n)) for n in block_names}
                 block_aln = make_aligned_seqs(block_map, moltype='protein')
 
-                def _emit_job(seq_aln):
-                    nonlocal job_counter
-                    job_counter += 1
-                    if directed_landscape:
-                        return {
-                            "sequences": seq_aln,
-                            "digraph_type": "phylogenetic",
-                            "replacement_matrix": list(replacement_matrix),
-                            "model_fitting": model_fitting,
-                            "_compute_phylo_embeddings": compute_phylo_embeddings,
-                            "embedding_domain": embedding_domain,
-                            "_log_progress": log_progress,
-                            "_job_id": job_counter,
-                            "_total_jobs": None,
-                            "_nested_construction_parallel": False,
-                            "_lightweight_nodes": True,
-                            "_hard_ancestors": True,
-                        }
-                    else:
-                        return {
-                            "sequences": seq_aln,
-                            "graph_type": "phylogenetic",
-                            "replacement_matrix": list(replacement_matrix),
-                            "model_fitting": model_fitting,
-                            "_compute_phylo_embeddings": compute_phylo_embeddings,
-                            "embedding_domain": embedding_domain,
-                            "_log_progress": log_progress,
-                            "_job_id": job_counter,
-                            "_total_jobs": None,
-                            "_nested_construction_parallel": False,
-                            "_lightweight_nodes": True,
-                            "_hard_ancestors": True,
-                        }
+        def _emit_job(seq_aln):
+            nonlocal job_counter
+            job_counter += 1
+            try:
+                _n = len(list(seq_aln.names))
+            except Exception:
+                _n = None
+            _lbl = f"phylo size={_n if _n is not None else '?'} directed={bool(directed_landscape)}"
+            if directed_landscape:
+                return {
+                    "sequences": seq_aln,
+                    "digraph_type": "phylogenetic",
+                    "replacement_matrix": list(replacement_matrix),
+                    "model_fitting": model_fitting,
+                    "_compute_phylo_embeddings": compute_phylo_embeddings,
+                    "embedding_domain": embedding_domain,
+                    "_log_progress": log_progress,
+                    "_job_id": job_counter,
+                    "_total_jobs": None,
+                    "_job_label": _lbl,
+                    "_nested_construction_parallel": False,
+                    "_lightweight_nodes": True,
+                    "_hard_ancestors": True,
+                }
+            else:
+                return {
+                    "sequences": seq_aln,
+                    "graph_type": "phylogenetic",
+                    "replacement_matrix": list(replacement_matrix),
+                    "model_fitting": model_fitting,
+                    "_compute_phylo_embeddings": compute_phylo_embeddings,
+                    "embedding_domain": embedding_domain,
+                    "_log_progress": log_progress,
+                    "_job_id": job_counter,
+                    "_total_jobs": None,
+                    "_job_label": _lbl,
+                    "_nested_construction_parallel": False,
+                    "_lightweight_nodes": True,
+                    "_hard_ancestors": True,
+                }
 
                 # Emit fanned or whole-block jobs
                 if fan_alignment:
@@ -674,6 +739,7 @@ def phylo_superscape(sequences,
         ckpt_dir = out_p.parent / f"{out_p.stem}_ckpt"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     sampler_kwargs["_checkpoint_dir"] = str(ckpt_dir)
+    logger.info('Checkpointing: dir=%s interval=%ss', str(ckpt_dir), str(checkpoint_interval))
 
     # Optionally avoid Ray during per-alignment construction
     if sequential_construction:
