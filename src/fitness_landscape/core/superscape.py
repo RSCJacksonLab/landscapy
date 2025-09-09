@@ -297,7 +297,8 @@ class FitnessSuperscape:
             x = x / row_sum
             v = x.mean(axis=0)
             s = float(v.sum())
-            return (v / s) if s > 0 else np.full(A, 1.0 / A)
+            out = (v / s) if s > 0 else np.full(A, 1.0 / A)
+            return np.asarray(out, dtype=np.float32)
 
         def comp_from_sequence(seq) -> np.ndarray:
             # SoftSequence: use ungapped posterior
@@ -317,8 +318,8 @@ class FitnessSuperscape:
                     counts[j] += 1.0
                     total += 1
             if total <= 0:
-                return np.full(A, 1.0 / A)
-            return counts / total
+                return np.full(A, 1.0 / A, dtype=np.float32)
+            return np.asarray(counts / total, dtype=np.float32)
 
         for G in graphs:
             for _, data in G.nodes(data=True):

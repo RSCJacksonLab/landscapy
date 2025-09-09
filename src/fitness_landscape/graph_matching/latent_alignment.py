@@ -234,8 +234,18 @@ class RJMCMCAligner:
 
         self.W: List[csr_matrix] = []
         for G, vs in zip(graphs, self.V):
-            dense = nx.to_numpy_array(G, nodelist=vs, weight=weight_key, nonedge=0.0)
-            self.W.append(csr_matrix((dense > 0).astype(np.int8)))
+            # Handle empty subgraphs/windows gracefully
+            if not vs:
+                self.W.append(csr_matrix((0, 0), dtype=np.int8))
+                continue
+            # Build sparse adjacency directly without materializing dense NxN arrays
+            try:
+                A = nx.to_scipy_sparse_array(G, nodelist=vs, weight=weight_key, dtype=np.float32, format='csr')
+            except TypeError:
+                # Older NetworkX versions
+                A = nx.to_scipy_sparse_matrix(G, nodelist=vs, weight=weight_key, dtype=np.float32, format='csr')
+            B = (A != 0).astype(np.int8)
+            self.W.append(B)
         
         self.binary_mode = True   
         
@@ -259,11 +269,11 @@ class RJMCMCAligner:
         for G, vs in zip(self.graphs, self.V):
             # If there are nodes in this specific graph
             if vs:  
-                embeddings = [np.asarray(G.nodes[v].get(emb_key, []), float) for v in vs]
-                self.X.append(np.vstack(embeddings))
+                embeddings = [np.asarray(G.nodes[v].get(emb_key, []), dtype=np.float32) for v in vs]
+                self.X.append(np.vstack(embeddings).astype(np.float32, copy=False))
             else:
                 # If the graph is empty, append a correctly shaped empty array.
-                self.X.append(np.empty((0, emb_dim), dtype=float))
+                self.X.append(np.empty((0, emb_dim), dtype=np.float32))
 
         anchor_label_to_slot: dict[str | int, int] = {}
         next_slot = 0
