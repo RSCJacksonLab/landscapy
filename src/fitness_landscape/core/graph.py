@@ -68,30 +68,36 @@ def _build_hamming_csr_binary(sequences: list[BinarySequence]) -> csr_matrix:
     max_bit = int(max(int(b).bit_length() for b in bitstrings))
     L = max(1, max_bit)
 
-    index_of = {int(bs): i for i, bs in enumerate(bitstrings)}
+    # Map packed bitstring -> list of indices (to handle duplicates correctly)
+    bs_to_indices: dict[int, list[int]] = {}
+    for idx, bs in enumerate(bitstrings):
+        bs_to_indices.setdefault(int(bs), []).append(idx)
 
-    # worst-case capacity: n*L*2 (both directions)
-    cap = n * L * 2
-    rows = np.empty(cap, dtype=np.int32)
-    cols = np.empty(cap, dtype=np.int32)
-    
-    # Lookup bit flipped sequeneces in hash map.
-    k = 0
+    rows_list: list[int] = []
+    cols_list: list[int] = []
+
+    # For each node, flip each bit and connect to all occurrences of the neighbor code
     for i, s in enumerate(bitstrings):
         s_int = int(s)
         for pos in range(L):
             t = s_int ^ (1 << pos)
-            j = index_of.get(t)
-            if j is None or i >= j:
+            js = bs_to_indices.get(int(t))
+            if not js:
                 continue
-            rows[k], cols[k] = i, j
-            k += 1
-            rows[k], cols[k] = j, i
-            k += 1
+            for j in js:
+                if i >= j:
+                    continue
+                rows_list.extend([i, j])
+                cols_list.extend([j, i])
 
-    rows = rows[:k]; cols = cols[:k]
-    # 1 weighted adjacency for unweighted.
-    data = np.ones(k, dtype=np.float32)
+    if rows_list:
+        rows = np.asarray(rows_list, dtype=np.int32)
+        cols = np.asarray(cols_list, dtype=np.int32)
+        data = np.ones(len(rows), dtype=np.float32)
+    else:
+        rows = np.zeros(0, dtype=np.int32)
+        cols = np.zeros(0, dtype=np.int32)
+        data = np.zeros(0, dtype=np.float32)
     A = csr_matrix((data, (rows, cols)), shape=(n, n))
     return A
 
