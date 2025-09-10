@@ -558,6 +558,11 @@ def phylo_landscape(sequences,
 @click.option('--plm-batch-size', type=int, default=64, show_default=True, help='Batch size for PLM embeddings.')
 @click.option('--plm-device', type=str, default=None, help='Device for PLM embeddings (e.g., cpu or cuda).')
 
+# Embedding checkpoints (optional)
+@click.option('--embeddings-in', type=click.Path(exists=True), default=None, help='Optional .npy file with precomputed embeddings. Skips embedding computation.')
+@click.option('--embeddings-out', type=click.Path(), default=None, help='Optional path to save computed/loaded embeddings (.npy).')
+@click.option('--only-embeddings', is_flag=True, default=False, help='Only produce embeddings (skip graph build). Use with --embeddings-out.')
+
 # Logging
 @click.option('--log-file', type=click.Path(), default=None, help='Optional log file path.')
 @click.option('--log-level', type=click.Choice(['DEBUG','INFO','WARNING','ERROR']), default='INFO', show_default=True)
