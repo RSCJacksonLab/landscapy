@@ -24,250 +24,6 @@ def cli():
 
 @cli.command()
 # Reading and writing results
-@click.option('--sequences', required=True, type=click.Path(exists=True), help='Path to the input FASTA file or a directory of FASTA files.')
-@click.option('--output', required=True, type=click.Path(), help='Path to save the serialized FitnessSuperscape object.')
-
-# Diffusion graph parameters
-@click.option('--k', required=False, type=int, default=50, help='kNN neighbors for pre-filtering.')
-@click.option('--t', required=False, type=int, default=5, help='Diffusion power (steps).')
-@click.option('--tau', required=False, type=float, default=1.0, help='Score temperature for kernel conversion.')
-@click.option('--connectivity-threshold', required=False, type=float, default=1e-4, help='Connectivity threshold for diffused matrix.')
-@click.option('--backend', required=False, type=click.Choice(['auto','faiss','balltree']), default='auto', help='kNN backend.')
-@click.option('--index-type', required=False, type=click.Choice(['hnsw','flat','ivf']), default='hnsw', help='FAISS index type.')
-@click.option('--faiss-metric', required=False, type=click.Choice(['ip','l2']), default='ip', help='FAISS metric.')
-@click.option('--include-self', is_flag=True, default=False, help='Include self edges in kNN.')
-@click.option('--use-gpu', is_flag=True, default=False, help='Use GPU for FAISS if available.')
-@click.option('--hnsw-M', required=False, type=int, default=32, help='HNSW M parameter.')
-@click.option('--cpus', required=False, type=int, default=1, help='CPUs per scoring task (used internally).')
-        
-@click.option('--compute-embeddings', is_flag=True, default=True, help='Compute embeddings for sequences (ohe or plm).')
-@click.option('--embedding-domain', required=False, type=click.Choice(['ohe','plm']), default='ohe', help='Embedding domain for diffusion graph.')
-@click.option('--plm-model-name', required=False, type=str, default='facebook/esm2_t6_8M_UR50D', help='PLM model if embedding-domain=plm.')
-@click.option('--plm-batch-size', required=False, type=int, default=64, help='Batch size for PLM embeddings.')
-@click.option('--plm-device', required=False, type=str, default=None, help='Device for PLM embeddings.')
-
-# RJMCMC sampling
-@click.option('--bernoulli-beta-alpha0', required=False, type=float, default=1, help='Bernoulli-Beta prior alpha0 parameter.')
-@click.option('--bernoulli-beta-alpha1', required=False, type=float, default=1, help='Bernoulli-Beta prior alpha1 parameter.')
-@click.option('--rjmcmc-alpha', required=False, type=float, default=0.9, help='Alpha parameter for the RJMCMC cosine and topological similarity trade-off.')
-@click.option('--birth-gamma-prior', required=False, type=float, default=0.02, help='Prior put on the birth rate of new latent slots in alignment. Applies symmetrically to deaths.')
-@click.option('--birth-step-prob', required=False, type=float, default=0.2, help='Probability of sampling a birth/death step in the RJMCMC sampler.')
-@click.option('--burn-in-samples', required=False, type=int, default=1000, help='The number of burn-in sample steps for the RJMCMC sampler.')
-@click.option('--total-samples', required=False, type=int, default=5000, help='The total number of sample steps for the RJMCMC sampler.')
-@click.option('--sample-thin', required=False, type=int, default=50, help='Thinning interval for the RJMCMC sampler.')
-@click.option('--auto-anchor', required=False, is_flag=True, default=True, help='Boolean flag to auto-anchor nodes to latent slots by cosine similarity.')
-@click.option('--anchor-cosine-threshold', required=False, type=float, default=0.99, help='Cosine similarity threshold for auto-anchoring nodes to latent slots.')
-@click.option('--seed', required=False, type=int, default=None, help='Seed for the random number generator to make results reproducible.')
-
-# Logging / checkpointing (same as phylo)
-@click.option('--log-file', required=False, type=click.Path(), help='Path to write a detailed log file for this run.')
-@click.option('--log-level', required=False, type=click.Choice(['DEBUG','INFO','WARNING','ERROR']), default='INFO', help='Log level for the detailed log file.')
-@click.option('--log-progress', is_flag=True, default=False, help='Enable verbose progress logging within constructors.')
-@click.option('--log-prefix', required=False, type=str, help='Basename for auto log filename when --log-file is not provided.')
-@click.option('--checkpoint-dir', required=False, type=click.Path(), help='Directory to write construction/alignment checkpoints. Defaults to <output_dir>/<output_stem>_ckpt.')
-@click.option('--checkpoint-interval', required=False, type=int, default=300, help='Checkpoint interval in seconds during parallel construction.')
-@click.option('--resume-checkpoint', required=False, type=click.Path(), help='Resume from a previous construction checkpoint file.')
-@click.option('--sequential-construction', is_flag=True, default=False, help='Construct each landscape sequentially (avoids Ray during construction); the diffusion graph internally parallelizes scoring.')
-@click.option('--meta-cpu-chains', required=False, type=int, default=os.cpu_count(), help='Number of CPU chains to use for the meta-alignment step in hierarchical alignment.')
-@click.option('--local-cpu-chains', required=False, type=int, default=(os.cpu_count()//10 if os.cpu_count()//10 > 1 else 1), help='Number of CPU chains to use for each parallel local alignment chain.')
-def diffusion_evol_superscape(sequences,
-                              output,
-                              k,
-                              t,
-                              tau,
-                              connectivity_threshold,
-                              backend,
-                              index_type,
-                              faiss_metric,
-                              include_self,
-                              use_gpu,
-                              hnsw_m,
-                              cpus,
-                              compute_embeddings,
-                              embedding_domain,
-                              plm_model_name,
-                              plm_batch_size,
-                              plm_device,
-                              bernoulli_beta_alpha0,
-                              bernoulli_beta_alpha1,
-                              rjmcmc_alpha,
-                              birth_gamma_prior,
-                              birth_step_prob,
-                              burn_in_samples,
-                              total_samples,
-                              sample_thin,
-                              auto_anchor,
-                              anchor_cosine_threshold,
-                              seed,
-                              log_file,
-                              log_level,
-                              log_progress,
-                              log_prefix,
-                              checkpoint_dir,
-                              checkpoint_interval,
-                              resume_checkpoint,
-                              sequential_construction,
-                              meta_cpu_chains,
-                              local_cpu_chains):
-    """
-    HPC interface to build a Superscape based on the evolutionary diffusion graph.
-    Uses create_evol_diffusion_graph under the hood for each input FASTA.
-    """
-    # Setup logging (reuse same scheme as phylo_superscape)
-    logger = logging.getLogger('fitness_landscape')
-    if not log_file:
-        ts = time.strftime('%Y%m%d-%H%M%S')
-        seq_base = os.path.basename(sequences.rstrip('/'))
-        out_p = Path(output)
-        base_dir = out_p.parent
-        default_prefix = log_prefix or 'diffusion_evol_superscape'
-        log_name = f"{default_prefix}_{seq_base}_{ts}_{os.getpid()}.log"
-        log_file = str(base_dir / log_name)
-    if log_file:
-        logger.setLevel(getattr(logging, log_level))
-        fh = logging.FileHandler(log_file)
-        fh.setLevel(getattr(logging, log_level))
-        fmt = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
-        fh.setFormatter(fmt)
-        if not any(isinstance(h, logging.FileHandler) and getattr(h, 'baseFilename', None) == fh.baseFilename for h in logger.handlers):
-            logger.addHandler(fh)
-    t0 = time.perf_counter(); c0 = time.process_time()
-    logger.info('diffusion-evol-superscape: start')
-
-    # Ingest input
-    fasta_paths = []
-    if os.path.isdir(sequences):
-        fasta_paths = [os.path.join(sequences, f) for f in os.listdir(sequences) if f.endswith(('.fasta','.fa','.fas'))]
-    else:
-        fasta_paths = [sequences]
-    if not fasta_paths:
-        raise click.UsageError(f"No FASTA files found in {sequences}")
-    logger.info('Found %d FASTA files', len(fasta_paths))
-
-    # Checkpoint dir
-    if checkpoint_dir:
-        ckpt_dir = Path(checkpoint_dir)
-    else:
-        out_p = Path(output)
-        ckpt_dir = out_p.parent / f"{out_p.stem}_ckpt"
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-
-    # Sampler kwargs (passed to hierarchical aligner/RJMCMC)
-    bernoulli_beta = BernoulliBeta(alpha0=bernoulli_beta_alpha0, alpha1=bernoulli_beta_alpha1)
-    sampler_kwargs = dict(
-        bernoulli_beta=bernoulli_beta,
-        alpha=rjmcmc_alpha,
-        birth_prior_gamma=birth_gamma_prior,
-        birth_death_prob=birth_step_prob,
-        burn_in=burn_in_samples,
-        samples=total_samples,
-        thin=sample_thin,
-        auto_anchor=auto_anchor,
-        cosine_anchor_threshold=anchor_cosine_threshold,
-        seed=seed,
-        local_cpu_chains=local_cpu_chains,
-        _checkpoint_dir=str(ckpt_dir),
-        _checkpoint_interval=checkpoint_interval,
-        _resume_checkpoint=resume_checkpoint,
-    )
-
-    # If requested, construct sequentially here; otherwise, fan out Ray jobs.
-    if sequential_construction:
-        landscapes = []
-        for i, fp in enumerate(fasta_paths, 1):
-            logger.info('[dataset %d/%d] reading %s', i, len(fasta_paths), fp)
-            try:
-                seqs = fasta_to_prot20_sequences(Path(fp), strict=False)
-            except Exception as e:
-                raise click.UsageError(str(e))
-            # Embeddings
-            if not compute_embeddings:
-                raise click.UsageError('--compute-embeddings must be enabled for diffusion graph')
-            if embedding_domain == 'ohe':
-                from fitness_landscape.core.graph import _encode_multiallele
-                E, _ = _encode_multiallele(seqs)
-            else:
-                E = _compute_embeddings_from_sequences(seqs, model_name=plm_model_name, batch_size=plm_batch_size, device=plm_device)
-            logger.info('[dataset %d/%d] embeddings shape=%s', i, len(fasta_paths), getattr(E,'shape', None))
-            # Build graph
-            G = create_evol_diffusion_graph(
-                sequences=seqs,
-                embeddings=E,
-                k=k,
-                t=t,
-                tau=tau,
-                connectivity_threshold=connectivity_threshold,
-                backend=backend,
-                index_type=index_type,
-                faiss_metric=faiss_metric,
-                include_self=include_self,
-                use_gpu=use_gpu,
-                hnsw_M=hnsw_m,
-                cpus=cpus,
-            )
-            landscapes.append(FitnessLandscape.from_graph(G))
-
-            # Construction checkpoint
-            ckpt_file = ckpt_dir / 'superscape_construction.ckpt.pkl'
-            try:
-                with open(ckpt_file, 'wb') as f:
-                    pickle.dump({'landscapes': landscapes, 'datasets': fasta_paths, 'ts': time.time()}, f)
-                if log_progress:
-                    logger.info('construction checkpoint written: %s', ckpt_file)
-            except Exception:
-                pass
-
-        superscape = FitnessSuperscape(landscapes=landscapes, **sampler_kwargs)
-    else:
-        # Build parallel construction jobs using the new 'evol_diffusion' graph type
-        total_jobs = len(fasta_paths)
-        construction_jobs = []
-        for i, fp in enumerate(fasta_paths, 1):
-            logger.info('[dataset %d/%d] queuing job for %s', i, total_jobs, fp)
-            try:
-                seqs = fasta_to_prot20_sequences(Path(fp))
-            except Exception as e:
-                raise click.UsageError(str(e))
-            construction_jobs.append({
-                'sequences': seqs,
-                'graph_type': 'evol_diffusion',
-                # diffusion/evol params
-                'k': k,
-                't': t,
-                'tau': tau,
-                'connectivity_threshold': connectivity_threshold,
-                'backend': backend,
-                'index_type': index_type,
-                'faiss_metric': faiss_metric,
-                'include_self': include_self,
-                'use_gpu': use_gpu,
-                'hnsw_M': hnsw_m,
-                'cpus': cpus,
-                # embedding domain (embeddings will be computed inside constructor)
-                'embedding_domain': embedding_domain,
-                '_compute_embeddings': compute_embeddings,
-                # bookkeeping
-                '_log_progress': log_progress,
-                '_job_id': i,
-                '_total_jobs': total_jobs,
-            })
-
-        logger.info('Launching %d parallel construction jobs (Ray)', len(construction_jobs))
-        superscape = FitnessSuperscape.from_parallel_construction(
-            constructor_type='undirected',
-            construction_jobs=construction_jobs,
-            _show_progress=log_progress,
-            _construct_checkpoint_dir=str(ckpt_dir),
-            _construct_checkpoint_interval=checkpoint_interval,
-            _construct_resume_checkpoint=resume_checkpoint,
-            _parent_task_cpus=0.25,
-            **sampler_kwargs,
-        )
-    superscape.save(Path(output))
-    logger.info('Superscape saved to %s', output)
-    logger.info('diffusion-evol-superscape: end wall=%.2fs cpu=%.2fs', time.perf_counter()-t0, time.process_time()-c0)
-@cli.command()
-# Reading and writing results
 @click.option('--sequences', required=True, type=click.Path(exists=True), help='Path to the input alignment file or a directory of alignment files.')
 @click.option('--output', required=True, type=click.Path(), help='Path to save the serialized FitnessSuperscape object.')
 
@@ -278,8 +34,13 @@ def diffusion_evol_superscape(sequences,
 
 # Phylogenetic inference
 @click.option('--directed-landscape', required=False, is_flag=True, default=False, help='Boolean flag to indicate if a directed phylogenetic fitness landscape should be constructed.')
+# Embedding controls (harmonized with diffusion CLI)
 @click.option('--compute-phylo-embeddings/--no-compute-phylo-embeddings', default=True, help='Compute embeddings for extant and ancestral sequences to attach to nodes.')
+@click.option('--compute-embeddings/--no-compute-embeddings', 'compute_phylo_embeddings', default=True, help='Alias of --compute-phylo-embeddings for consistency with diffusion CLI.')
 @click.option('--embedding-domain', required=False, type=click.Choice(['ohe', 'plm']), default='ohe', help='Embedding domain for node attributes (ohe or plm).')
+@click.option('--plm-model-name', required=False, type=str, default='facebook/esm2_t6_8M_UR50D', help='PLM model if embedding-domain=plm (harmonized with diffusion CLI).')
+@click.option('--plm-batch-size', required=False, type=int, default=64, help='Batch size for PLM embeddings (harmonized with diffusion CLI).')
+@click.option('--plm-device', required=False, type=str, default=None, help='Device for PLM embeddings (e.g., cpu or cuda).')
 @click.option('--replacement-matrix', required=False, multiple=True, default=['LG'], help='Replacement matrix/matrices for IQ-TREE model selection (e.g., LG). Can be provided multiple times.')
 @click.option('--model-fitting/--no-model-fitting', default=False, help='Whether to perform IQ-TREE model selection across the provided replacement matrices.')
 
@@ -294,6 +55,7 @@ def diffusion_evol_superscape(sequences,
 @click.option('--sample-thin', required=False, type=int, default=50, help='Thinning interval for the RJMCMC sampler.')
 @click.option('--auto-anchor', required=False, is_flag=True, default=True, help='Boolean flag to auto-anchor nodes to latent slots by cosine similarity.')
 @click.option('--anchor-cosine-threshold', required=False, type=float, default=0.99, help='Cosine similarity threshold for auto-anchoring nodes to latent slots.')
+@click.option('--posterior-threshold', required=False, type=float, default=0.25, help='Posterior probability threshold to binarize the latent graph (used in stitching with sliding windows).')
 @click.option('--sequential-construction', is_flag=True, default=False, help='Construct each landscape sequentially (avoids Ray during construction).')
 @click.option('--seed', required=False, type=int, default=None, help='Seed for the random number generator to make results reproducible.')
 
@@ -312,6 +74,11 @@ def diffusion_evol_superscape(sequences,
 @click.option('--meta-cpu-chains', required=False, type=int, default=os.cpu_count(), help='Number of CPU chains to use for the meta-alignment step in hierarchical alignment.')
 @click.option('--local-cpu-chains', required=False, type=int, default=(os.cpu_count()//10 if os.cpu_count()//10 > 1 else 1), help='Number of CPU chains to use for each parallel local alignment chain.')
 
+# Hierarchical sliding windows
+@click.option('--local-window-shifts', required=False, type=int, default=None, help='Number of interleaved shifts for overlapping local windows. Set 0 to disable sliding windows.')
+@click.option('--local-window-size', required=False, type=int, default=None, help='Window size (number of nodes) for local sliding windows. Heuristic default if omitted.')
+@click.option('--local-window-stride', required=False, type=int, default=None, help='Stride between local windows. Heuristic default if omitted.')
+
 # Alignment cleaning
 @click.option('--drop-all-gap-columns/--keep-all-gap-columns', default=True, help='Drop columns that are entirely gaps in each alignment.')
 @click.option('--max-gap-frac', required=False, type=float, default=None, help='If set in [0,1], drop columns with gap fraction strictly greater than this threshold.')
@@ -329,6 +96,9 @@ def phylo_superscape(sequences,
                      directed_landscape,
                      compute_phylo_embeddings,
                      embedding_domain,
+                     plm_model_name,
+                     plm_batch_size,
+                     plm_device,
                      replacement_matrix,
                      model_fitting,
                      bernoulli_beta_alpha0,
@@ -341,9 +111,13 @@ def phylo_superscape(sequences,
                      sample_thin,
                      auto_anchor,
                      anchor_cosine_threshold,
+                     posterior_threshold,
                      seed,
                      meta_cpu_chains,
                      local_cpu_chains,
+                     local_window_shifts,
+                     local_window_size,
+                     local_window_stride,
                      drop_all_gap_columns,
                      max_gap_frac,
                      max_seq_gap_frac,
@@ -385,6 +159,12 @@ def phylo_superscape(sequences,
             logger.addHandler(fh)
     t0 = time.perf_counter(); c0 = time.process_time()
     logger.info('phylo-superscape: start')
+    logger.info('RJMCMC: alpha=%.3f burn-in=%d samples=%d thin=%d auto_anchor=%s', rjmcmc_alpha, burn_in_samples, total_samples, sample_thin, str(auto_anchor))
+    logger.info('Parallelism: meta_cpu_chains=%s local_cpu_chains=%s sequential_construction=%s', str(meta_cpu_chains), str(local_cpu_chains), str(sequential_construction))
+    if fan_alignment:
+        logger.info('Fanning enabled: window=%s overlap=%s', str(fan_alignment_window), str(fan_alignment_overlap))
+    if max_seqs_per_block:
+        logger.info('Sequence blocking: max_seqs_per_block=%s', str(max_seqs_per_block))
 
     # Helpers hoisted so both sub-iterators can reuse them
     from cogent3.core.alignment import make_aligned_seqs
@@ -527,57 +307,71 @@ def phylo_superscape(sequences,
                 block_map = {n: str(alignment.get_gapped_seq(n)) for n in block_names}
                 block_aln = make_aligned_seqs(block_map, moltype='protein')
 
-                def _emit_job(seq_aln):
-                    nonlocal job_counter
-                    job_counter += 1
-                    if directed_landscape:
-                        return {
-                            "sequences": seq_aln,
-                            "digraph_type": "phylogenetic",
-                            "replacement_matrix": list(replacement_matrix),
-                            "model_fitting": model_fitting,
-                            "_compute_phylo_embeddings": compute_phylo_embeddings,
-                            "embedding_domain": embedding_domain,
-                            "_log_progress": log_progress,
-                            "_job_id": job_counter,
-                            "_total_jobs": None,
-                            "_nested_construction_parallel": False,
-                            "_lightweight_nodes": True,
-                            "_hard_ancestors": True,
-                        }
-                    else:
-                        return {
-                            "sequences": seq_aln,
-                            "graph_type": "phylogenetic",
-                            "replacement_matrix": list(replacement_matrix),
-                            "model_fitting": model_fitting,
-                            "_compute_phylo_embeddings": compute_phylo_embeddings,
-                            "embedding_domain": embedding_domain,
-                            "_log_progress": log_progress,
-                            "_job_id": job_counter,
-                            "_total_jobs": None,
-                            "_nested_construction_parallel": False,
-                            "_lightweight_nodes": True,
-                            "_hard_ancestors": True,
-                        }
+        def _emit_job(seq_aln):
+            nonlocal job_counter
+            job_counter += 1
+            try:
+                _n = len(list(seq_aln.names))
+            except Exception:
+                _n = None
+            _lbl = f"phylo size={_n if _n is not None else '?'} directed={bool(directed_landscape)}"
+            if directed_landscape:
+                return {
+                    "sequences": seq_aln,
+                    "digraph_type": "phylogenetic",
+                    "replacement_matrix": list(replacement_matrix),
+                    "model_fitting": model_fitting,
+                    "_compute_phylo_embeddings": compute_phylo_embeddings,
+                    "embedding_domain": embedding_domain,
+                    # PLM knobs (used when _compute_phylo_embeddings and embedding_domain=plm)
+                    "model_name": plm_model_name,
+                    "batch_size": plm_batch_size,
+                    "device": plm_device,
+                    "_log_progress": log_progress,
+                    "_job_id": job_counter,
+                    "_total_jobs": None,
+                    "_job_label": _lbl,
+                    "_nested_construction_parallel": False,
+                    "_lightweight_nodes": True,
+                    "_hard_ancestors": True,
+                }
+            else:
+                return {
+                    "sequences": seq_aln,
+                    "graph_type": "phylogenetic",
+                    "replacement_matrix": list(replacement_matrix),
+                    "model_fitting": model_fitting,
+                    "_compute_phylo_embeddings": compute_phylo_embeddings,
+                    "embedding_domain": embedding_domain,
+                    # PLM knobs (used when _compute_phylo_embeddings and embedding_domain=plm)
+                    "model_name": plm_model_name,
+                    "batch_size": plm_batch_size,
+                    "device": plm_device,
+                    "_log_progress": log_progress,
+                    "_job_id": job_counter,
+                    "_total_jobs": None,
+                    "_job_label": _lbl,
+                    "_nested_construction_parallel": False,
+                    "_lightweight_nodes": True,
+                    "_hard_ancestors": True,
+                }
 
-                # Emit fanned or whole-block jobs
-                if fan_alignment:
-                    if not all([fan_alignment_window, fan_alignment_overlap]):
-                        raise click.UsageError("If --fan-alignment is set, both --fan-alignment-window and --fan-alignment-overlap must be provided.")
-                    for sub in iter_moving_window_alignment(block_aln, fan_alignment_window, fan_alignment_overlap):
-                        # Reuse the same trimming and per-sequence filtering logic as above
-                        sub2 = _trim_alignment(sub)
-                        sub2 = _drop_gappy_sequences(sub2)
-                        if sub2 is None:
-                            continue
-                        yield _emit_job(sub2)
-                else:
-                    yield _emit_job(block_aln)
+        # Emit fanned or whole-block jobs
+        if fan_alignment:
+            if not all([fan_alignment_window, fan_alignment_overlap]):
+                raise click.UsageError("If --fan-alignment is set, both --fan-alignment-window and --fan-alignment-overlap must be provided.")
+            for sub in iter_moving_window_alignment(block_aln, fan_alignment_window, fan_alignment_overlap):
+                sub2 = _trim_alignment(sub)
+                sub2 = _drop_gappy_sequences(sub2)
+                if sub2 is None:
+                    continue
+                yield _emit_job(sub2)
+        else:
+            yield _emit_job(block_aln)
 
-                # Insert barrier after each block to force sequential block processing
-                if b_idx < len(blocks) - 1:
-                    yield {"_barrier": True}
+        # Insert barrier after each block to force sequential block processing
+        if b_idx < len(blocks) - 1:
+            yield {"_barrier": True}
 
     bernoulli_beta = BernoulliBeta(alpha0=bernoulli_beta_alpha0, alpha1=bernoulli_beta_alpha1)
     
@@ -593,6 +387,11 @@ def phylo_superscape(sequences,
         "cosine_anchor_threshold": anchor_cosine_threshold,
         "seed": seed,
         "local_cpu_chains": local_cpu_chains,
+        # Optional sliding-window controls for hierarchical aligner
+        # If omitted, core defaults will enable sliding windows.
+        **({"local_window_shifts": local_window_shifts} if local_window_shifts is not None else {}),
+        **({"local_window_size": local_window_size} if local_window_size is not None else {}),
+        **({"local_window_stride": local_window_stride} if local_window_stride is not None else {}),
         # propagate checkpointing into hierarchical aligner
         "_checkpoint_dir": None,  # filled below
         "_checkpoint_interval": checkpoint_interval,
@@ -607,6 +406,7 @@ def phylo_superscape(sequences,
         ckpt_dir = out_p.parent / f"{out_p.stem}_ckpt"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     sampler_kwargs["_checkpoint_dir"] = str(ckpt_dir)
+    logger.info('Checkpointing: dir=%s interval=%ss', str(ckpt_dir), str(checkpoint_interval))
 
     # Optionally avoid Ray during per-alignment construction
     if sequential_construction:
@@ -619,12 +419,13 @@ def phylo_superscape(sequences,
             else:
                 from fitness_landscape.core.landscape import FitnessLandscape
                 landscapes.append(FitnessLandscape.from_sequences(sequences=seqs, **j))
-        superscape = FitnessSuperscape(landscapes=landscapes, **sampler_kwargs)
+        superscape = FitnessSuperscape(landscapes=landscapes, posterior_prob_cutoff=posterior_threshold, **sampler_kwargs)
     else:
         logger.info('Launching streaming parallel construction (Ray)')
         superscape = FitnessSuperscape.from_streaming_construction(
             constructor_type=('directed' if directed_landscape else 'undirected'),
             construction_job_iter=_construction_job_iter(),
+            posterior_prob_cutoff=posterior_threshold,
             _meta_cpu_chains=meta_cpu_chains,
             _fresh_worker_per_job=ray_fresh_worker,
             _show_progress=log_progress,
@@ -652,6 +453,11 @@ def phylo_superscape(sequences,
 @click.option('--plm-model-name', type=str, default='facebook/esm2_t6_8M_UR50D', help='PLM model to use when embedding-domain=plm.')
 @click.option('--plm-batch-size', type=int, default=64, help='Batch size for PLM embeddings.')
 @click.option('--plm-device', type=str, default=None, help='Device for PLM embeddings (e.g., cpu or cuda).')
+
+# Checkpointing
+@click.option('--embeddings-in', type=click.Path(exists=True), default=None, help='Path to precomputed embeddings (.npy). Skips embedding computation.')
+@click.option('--embeddings-out', type=click.Path(), default=None, help='If provided, save computed or loaded embeddings to this path (.npy).')
+@click.option('--only-embeddings', is_flag=True, default=False, help='Stop after producing embeddings (use with --embeddings-out).')
 @click.option('--compute-hamming-edges/--no-compute-hamming-edges', default=True, help='Compute expected Hamming edge weights after phylo reconstruction.')
 @click.option('--lightweight-nodes/--no-lightweight-nodes', default=False, help='Return lightweight nodes (drop gapped_arr) to reduce memory.')
 @click.option('--hard-ancestors/--no-hard-ancestors', default=False, help='Collapse ancestral SoftSequence to hard argmax sequence to reduce memory.')
@@ -775,11 +581,14 @@ def evol_diffusion_landscape(sequences,
                              embedding_domain,
                              plm_model_name,
                              plm_batch_size,
-                             plm_device,
-                             log_file,
-                             log_level,
-                             log_progress,
-                             log_prefix):
+                            plm_device,
+                            embeddings_in,
+                            embeddings_out,
+                            only_embeddings,
+                            log_file,
+                            log_level,
+                            log_progress,
+                            log_prefix):
     """
     Construct a single evolutionary diffusion FitnessLandscape and save it to disk.
 
@@ -809,6 +618,7 @@ def evol_diffusion_landscape(sequences,
     # Read sequences: accept a FASTA file or a directory of FASTA files.
     # When a directory is provided, combine all FASTA files into one dataset.
     try:
+        _t_read0 = time.perf_counter(); _c_read0 = time.process_time()
         seq_path = Path(sequences)
         if seq_path.is_dir():
             fasta_files = sorted([p for p in seq_path.iterdir() if p.suffix.lower() in {'.fasta', '.fa', '.fas'}])
@@ -821,19 +631,31 @@ def evol_diffusion_landscape(sequences,
             logger.info('Combined sequences from %d FASTA files (total=%d)', len(fasta_files), len(seqs))
         else:
             seqs = fasta_to_prot20_sequences(seq_path, strict=False)
+        logger.info('Read sequences: n=%d wall=%.2fs cpu=%.2fs', len(seqs), time.perf_counter()-_t_read0, time.process_time()-_c_read0)
     except Exception as e:
         raise click.UsageError(str(e))
 
     if not seqs:
         raise click.UsageError('No sequences parsed from the provided input.')
 
-    # Embeddings
-    if not compute_embeddings:
-        raise click.UsageError('--no-compute-embeddings is not supported for this constructor; provide embeddings or enable computation.')
-
-    if embedding_domain == 'ohe':
+    # Embeddings: load from checkpoint or compute
+    if embeddings_in is not None:
+        _t_emb0 = time.perf_counter(); _c_emb0 = time.process_time()
+        import numpy as _np
+        logger.info('Loading embeddings from %s', embeddings_in)
+        try:
+            E = _np.load(embeddings_in)
+        except Exception as e:
+            raise click.UsageError(f'Failed to load embeddings from {embeddings_in}: {e}')
+        if getattr(E, 'shape', (None,))[0] != len(seqs):
+            raise click.UsageError(f'Embeddings count ({getattr(E, "shape", (None,))[0]}) does not match sequences ({len(seqs)}).')
+        logger.info('Embeddings loaded: shape=%s wall=%.2fs cpu=%.2fs', getattr(E, 'shape', None), time.perf_counter()-_t_emb0, time.process_time()-_c_emb0)
+    elif not compute_embeddings:
+        raise click.UsageError('--no-compute-embeddings provided but no --embeddings-in; supply precomputed embeddings or enable computation.')
+    elif embedding_domain == 'ohe':
         # If variable sequence lengths, fall back to a length-invariant
         # composition embedding to avoid OHE stacking errors.
+        _t_emb0 = time.perf_counter(); _c_emb0 = time.process_time()
         lengths = {len(s) for s in seqs}
         if len(lengths) == 1:
             from fitness_landscape.core.graph import _encode_multiallele
@@ -858,12 +680,31 @@ def evol_diffusion_landscape(sequences,
                 else:
                     counts[:] = 1.0 / len(A)
                 E[r] = counts
+        logger.info('Embeddings (ohe/composition) built: shape=%s wall=%.2fs cpu=%.2fs', getattr(E, 'shape', None), time.perf_counter()-_t_emb0, time.process_time()-_c_emb0)
     else:
+        _t_emb0 = time.perf_counter(); _c_emb0 = time.process_time()
         E = _compute_embeddings_from_sequences(seqs, model_name=plm_model_name, batch_size=plm_batch_size, device=plm_device)
+        logger.info('Embeddings (PLM) built: shape=%s wall=%.2fs cpu=%.2fs', getattr(E, 'shape', None), time.perf_counter()-_t_emb0, time.process_time()-_c_emb0)
 
     logger.info('embeddings shape=%s', getattr(E, 'shape', None))
 
+    # Save embeddings checkpoint if requested
+    if embeddings_out is not None:
+        try:
+            import numpy as _np
+            _np.save(embeddings_out, E)
+            logger.info('Saved embeddings to %s', embeddings_out)
+        except Exception as e:
+            raise click.UsageError(f'Failed to save embeddings to {embeddings_out}: {e}')
+
+    # If only embeddings requested, stop here
+    if only_embeddings:
+        logger.info('only-embeddings set; skipping graph construction.')
+        logger.info('evol-diffusion-landscape: end wall=%.2fs cpu=%.2fs', time.perf_counter()-t0, time.process_time()-c0)
+        return
+
     # Build diffusion-evolution graph
+    _t_graph0 = time.perf_counter(); _c_graph0 = time.process_time()
     G = create_evol_diffusion_graph(
         sequences=seqs,
         embeddings=E,
@@ -880,12 +721,15 @@ def evol_diffusion_landscape(sequences,
         cpus=cpus,
         _compute_hamming_edges=compute_hamming_edges,
     )
+    logger.info('Graph constructed: nodes=%d edges=%d wall=%.2fs cpu=%.2fs', G.number_of_nodes(), G.number_of_edges(), time.perf_counter()-_t_graph0, time.process_time()-_c_graph0)
 
     landscape = FitnessLandscape.from_graph(G)
 
     # Save
     
+    _t_save0 = time.perf_counter(); _c_save0 = time.process_time()
     landscape.save(Path(output))
+    logger.info('Saved landscape: wall=%.2fs cpu=%.2fs', time.perf_counter()-_t_save0, time.process_time()-_c_save0)
 
     logger.info('Landscape saved to %s', output)
     logger.info('evol-diffusion-landscape: end wall=%.2fs cpu=%.2fs', time.perf_counter()-t0, time.process_time()-c0)

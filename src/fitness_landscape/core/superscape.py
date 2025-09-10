@@ -93,8 +93,13 @@ def _create_landscape_task(
     _os.environ.setdefault('MKL_NUM_THREADS', '1')
     _os.environ.setdefault('NUMEXPR_NUM_THREADS', '1')
     _logger = _logging.getLogger('fitness_landscape')
+    # Optional human-readable label for logs
+    _job_label = kwargs.pop('_job_label', None)
     if _log_progress:
-        _logger.info('[job %s/%s] start', _job_id, _total_jobs)
+        if _job_label:
+            _logger.info('[job %s/%s] start: %s', _job_id, _total_jobs, _job_label)
+        else:
+            _logger.info('[job %s/%s] start', _job_id, _total_jobs)
     ts = _time.perf_counter()
     try:
         result = constructor_class.from_sequences(
@@ -103,7 +108,11 @@ def _create_landscape_task(
             **kwargs
         )
         if _log_progress:
-            _logger.info('[job %s/%s] complete in %.2fs', _job_id, _total_jobs, _time.perf_counter()-ts)
+            dt = _time.perf_counter()-ts
+            if _job_label:
+                _logger.info('[job %s/%s] complete in %.2fs: %s', _job_id, _total_jobs, dt, _job_label)
+            else:
+                _logger.info('[job %s/%s] complete in %.2fs', _job_id, _total_jobs, dt)
         return result
     except Exception as e:
         msg = f"[job {_job_id}/{_total_jobs}] construction failed: {e}"
@@ -155,13 +164,20 @@ class FitnessSuperscape:
             # Provide a minimal, picklable aligner-like object
             import networkx as _nx
             self._hierarchical_aligner = NullAligner(directed=isinstance(G0, _nx.DiGraph))
-            # empty traces
+            # empty traces (alias both naming styles for consistency with multi-graph path)
             self.local_energy_traces = {}
             self.local_nl_traces = {}
             self.local_edges_traces = {}
             self.meta_energy_trace = []
             self.meta_nl_trace = []
             self.meta_edges_trace = []
+            # public aliases used elsewhere when multiple landscapes are aligned
+            self.local_trace_E = self.local_energy_traces
+            self.local_trace_NL = self.local_nl_traces
+            self.local_trace_edges = self.local_edges_traces
+            self.meta_trace_E = self.meta_energy_trace
+            self.meta_trace_NL = self.meta_nl_trace
+            self.meta_trace_edges = self.meta_edges_trace
 
             # Canonical node order and back refs
             self._node_orders = [list(self.landscapes[0].graph.nodes())]
@@ -171,21 +187,83 @@ class FitnessSuperscape:
             self.latent_landscape = self.construct_latent_landscape(posterior_prob_cutoff=posterior_prob_cutoff)
             return
 
-        # Run RJMCMC sampling using the hierachical aligner (scales in linear time).
-        # and not the RJMCMC aligner (scales in O(N^2K^2) time).
+        # Run RJMCMC sampling using the hierarchical aligner (scales ~linearly).
+        # Prepare hierarchical aligner controls (top-level kwargs) and pass the rest
+        # through as RJMCMCAligner params via aligner_params.
+        _sampler_kwargs = dict(sampler_kwargs)
+
+        # Extract hierarchical kwargs (support both underscored and non-underscored forms)
+        _hier_kwargs = {}
+        def _pop_any(d, keys, default=None):
+            for k in keys:
+                if k in d:
+                    return d.pop(k)
+            return default
+
+        # Sliding-window controls: default-enable sliding windows unless explicitly disabled
+        _lw_shifts = _pop_any(_sampler_kwargs, [
+            'local_window_shifts'
+        ], None)
+        _lw_size = _pop_any(_sampler_kwargs, [
+            'local_window_size'
+        ], None)
+        _lw_stride = _pop_any(_sampler_kwargs, [
+            'local_window_stride'
+        ], None)
+        # If user did not specify any windowing params, default to sliding windows enabled.
+        if _lw_shifts is None and _lw_size is None and _lw_stride is None:
+            _hier_kwargs['local_window_shifts'] = 1
+        else:
+            if _lw_shifts is not None:
+                _hier_kwargs['local_window_shifts'] = _lw_shifts
+            if _lw_size is not None:
+                _hier_kwargs['local_window_size'] = _lw_size
+            if _lw_stride is not None:
+                _hier_kwargs['local_window_stride'] = _lw_stride
+
+        # CPU chain controls
+        _lc = _pop_any(_sampler_kwargs, ['_local_cpu_chains', 'local_cpu_chains'], None)
+        _mc = _pop_any(_sampler_kwargs, ['_meta_cpu_chains', 'meta_cpu_chains'], None)
+        if _lc is not None:
+            _hier_kwargs['_local_cpu_chains'] = _lc
+        if _mc is not None:
+            _hier_kwargs['_meta_cpu_chains'] = _mc
+
+        # Progress / checkpoint controls
+        _show = _pop_any(_sampler_kwargs, ['_show_progress', 'show_progress'], None)
+        _ckpt_dir = _pop_any(_sampler_kwargs, ['_checkpoint_dir', 'checkpoint_dir'], None)
+        _ckpt_int = _pop_any(_sampler_kwargs, ['_checkpoint_interval', 'checkpoint_interval'], None)
+        _ckpt_resume = _pop_any(_sampler_kwargs, ['_resume_checkpoint', 'resume_checkpoint'], None)
+        _posterior_storage = _pop_any(_sampler_kwargs, ['_posterior_storage', 'posterior_storage'], None)
+        if _show is not None:
+            _hier_kwargs['_show_progress'] = _show
+        if _ckpt_dir is not None:
+            _hier_kwargs['_checkpoint_dir'] = _ckpt_dir
+        if _ckpt_int is not None:
+            _hier_kwargs['_checkpoint_interval'] = _ckpt_int
+        if _ckpt_resume is not None:
+            _hier_kwargs['_resume_checkpoint'] = _ckpt_resume
+        if _posterior_storage is not None:
+            _hier_kwargs['_posterior_storage'] = _posterior_storage
+
         self._hierarchical_aligner = HierarchicalRJMCMCAligner(
             graphs=self._landscape_graphs,
-            aligner_params=sampler_kwargs
+            aligner_params=_sampler_kwargs,
+            **_hier_kwargs,
         )
         # The results are now stored directly, not the aligner object
         self.latent_graph, self._latent_mappings, = self._hierarchical_aligner.run_alignment()
         
-        # Collect local traces 
+        # Collect local traces (expose with consistent names)
         self.local_trace_E = self._hierarchical_aligner.local_energy_traces
         self.local_trace_NL = self._hierarchical_aligner.local_nl_traces
         self.local_trace_edges = self._hierarchical_aligner.local_edges_traces
+        # Backward-friendly aliases
+        self.local_energy_traces = self.local_trace_E
+        self.local_nl_traces = self.local_trace_NL
+        self.local_edges_traces = self.local_trace_edges
         
-        # Collect meta traces 
+        # Collect meta traces (empty when using overlap-based meta stage)
         self.meta_trace_E = self._hierarchical_aligner.meta_energy_trace
         self.meta_trace_NL = self._hierarchical_aligner.meta_nl_trace
         self.meta_trace_edges = self._hierarchical_aligner.meta_edges_trace
@@ -228,7 +306,8 @@ class FitnessSuperscape:
             x = x / row_sum
             v = x.mean(axis=0)
             s = float(v.sum())
-            return (v / s) if s > 0 else np.full(A, 1.0 / A)
+            out = (v / s) if s > 0 else np.full(A, 1.0 / A)
+            return np.asarray(out, dtype=np.float32)
 
         def comp_from_sequence(seq) -> np.ndarray:
             # SoftSequence: use ungapped posterior
@@ -248,8 +327,8 @@ class FitnessSuperscape:
                     counts[j] += 1.0
                     total += 1
             if total <= 0:
-                return np.full(A, 1.0 / A)
-            return counts / total
+                return np.full(A, 1.0 / A, dtype=np.float32)
+            return np.asarray(counts / total, dtype=np.float32)
 
         for G in graphs:
             for _, data in G.nodes(data=True):
@@ -286,11 +365,20 @@ class FitnessSuperscape:
             The constructed latent fitness landscape.
         """
         if not self._hierarchical_aligner.full_posterior_L:
-            # Fallback: use the deterministic result returned by run_alignment()
-            # This occurs when the meta-stage produced no edges / no posterior sampling.
-            # Build the latent landscape directly from the stored latent_graph and mappings.
-            graph = self.latent_graph
-            mappings = self._latent_mappings
+            # No global posterior: attempt to rebuild from LOCAL posteriors (overlap-window mode)
+            try:
+                graph, mappings = self._hierarchical_aligner.latent_graph_from_local_posterior(
+                    posterior_prob_cutoff=posterior_prob_cutoff
+                )
+                # If local posteriors were unavailable, fall back to deterministic stitched result
+                if graph.number_of_nodes() == 0 and self.latent_graph is not None:
+                    graph = self.latent_graph
+                    mappings = self._latent_mappings
+            except Exception:
+                # As a last resort, just use the stitched graph from run_alignment
+                graph = self.latent_graph
+                mappings = self._latent_mappings
+
             return self._build_landscape_from_graph_and_mappings(graph, mappings)
 
         posterior_L = self._hierarchical_aligner.full_posterior_L
@@ -383,7 +471,9 @@ class FitnessSuperscape:
                 observed_mappings.append({"node_id": node_id, "probability": probability, "graph_index": graph_idx})
 
             observed_mappings.sort(key=lambda x: x['probability'], reverse=True)
-            graph.nodes[latent_node_idx]['observed_node_mappings'] = observed_mappings
+            # Some stitched graphs may use non-consecutive/non-integer labels; guard assignment
+            if latent_node_idx in graph.nodes:
+                graph.nodes[latent_node_idx]['observed_node_mappings'] = observed_mappings
 
             if len(contributor_indices) == 0:
                 uniform_probability = 1.0 / len(self.alphabet)
@@ -392,8 +482,9 @@ class FitnessSuperscape:
                 latent_sequences.append(ambiguous_sequence)
                 gapped_arr = np.zeros((default_length, len(self.alphabet) + 1))
                 gapped_arr[:, :-1] = uniform_posterior
-                graph.nodes[latent_node_idx]['gapped_arr'] = gapped_arr
-                graph.nodes[latent_node_idx]['ungapped_arr'] = uniform_posterior
+                if latent_node_idx in graph.nodes:
+                    graph.nodes[latent_node_idx]['gapped_arr'] = gapped_arr
+                    graph.nodes[latent_node_idx]['ungapped_arr'] = uniform_posterior
                 continue
 
             ungapped_arrs_to_align = [np.ascontiguousarray(np.asarray(all_ungapped_arrs[i], dtype=np.float64)) for i in contributor_indices]
@@ -404,10 +495,12 @@ class FitnessSuperscape:
             total_prob_for_node = np.sum(contributor_probs) + 1e-12
             weighted_sum_posterior = np.einsum('i,ija->ja', contributor_probs, aligned_tensor)
             final_posterior = weighted_sum_posterior / total_prob_for_node
-            graph.nodes[latent_node_idx]['gapped_arr'] = final_posterior
+            if latent_node_idx in graph.nodes:
+                graph.nodes[latent_node_idx]['gapped_arr'] = final_posterior
             ungapped_arr = final_posterior[:, :-1]
             ungapped_arr = ungapped_arr / ungapped_arr.sum(axis=1, keepdims=True)
-            graph.nodes[latent_node_idx]['ungapped_arr'] = ungapped_arr
+            if latent_node_idx in graph.nodes:
+                graph.nodes[latent_node_idx]['ungapped_arr'] = ungapped_arr
             aa_posterior = final_posterior[:, :-1]
             gap_posterior = final_posterior[:, -1:]
             latent_sequences.append(SoftSequence(aa_posterior=aa_posterior, alphabet=self.alphabet, gap_posterior=gap_posterior))
@@ -859,7 +952,8 @@ class FitnessSuperscape:
         submit_order = list(range(len(prepared_jobs)))
         inflight: dict[Any, int] = {}
         done_count = 0
-        t_last = _time.perf_counter()
+        t_start = _time.perf_counter()
+        t_last = t_start
         try:
             import psutil as _psutil  # optional
         except Exception:
@@ -891,7 +985,10 @@ class FitnessSuperscape:
                     raise
                 done_count += 1
                 if _show_progress:
-                    _logger.info('parallel progress: %d/%d completed', done_count, total)
+                    elapsed = now - t_start
+                    avg = (elapsed / done_count) if done_count else 0.0
+                    eta = (avg * (total - done_count)) if done_count else 0.0
+                    _logger.info('parallel progress: %d/%d completed inflight=%d elapsed=%.1fs eta=%.1fs', done_count, total, len(inflight), elapsed, eta)
                 # Submit next job to keep window full
                 _maybe_submit()
                 # checkpoint
@@ -919,7 +1016,8 @@ class FitnessSuperscape:
                         p = _psutil.Process()
                         rss_bytes = p.memory_info().rss
                         rss = f" rss={rss_bytes/1e9:.2f}GB"
-                    _logger.info('parallel heartbeat: %d/%d completed%s', done_count, total, rss)
+                    elapsed = _time.perf_counter() - t_start
+                    _logger.info('parallel heartbeat: %d/%d completed inflight=%d elapsed=%.1fs%s', done_count, total, len(inflight), elapsed, rss)
 
         # Initialize the FitnessSuperscape with the final list of landscapes
         return cls(
@@ -973,10 +1071,12 @@ class FitnessSuperscape:
         import logging as _logging, time as _time
         _logger = _logging.getLogger('fitness_landscape')
         max_inflight = int(_meta_cpu_chains) if _meta_cpu_chains and _meta_cpu_chains > 0 else (os.cpu_count() or 1)
-        inflight: dict[Any, int] = {}
+        inflight: dict[Any, dict] = {}
         landscapes: list[Union[FitnessLandscape, DirectedFitnessLandscape]] = []
         job_index = 0
         last_ckpt = 0.0
+        t_start = _time.perf_counter()
+        total_hint = None
 
         pending_barrier = False
 
@@ -1007,13 +1107,17 @@ class FitnessSuperscape:
                 # assign job id
                 job.setdefault('_job_id', job_index + 1)
                 job.setdefault('_total_jobs', None)
+                # surface a total jobs hint if provided
+                nonlocal total_hint
+                if job.get('_total_jobs'):
+                    total_hint = int(job['_total_jobs'])
                 _opts = {"num_gpus": num_gpus, "num_cpus": _parent_task_cpus}
                 if _fresh_worker_per_job:
                     # Force worker isolation by using a unique runtime_env per task
                     import uuid as _uuid
                     _opts["runtime_env"] = {"env_vars": {"LANDSCAPY_FRESH_WORKER": str(_uuid.uuid4())}}
                 ref = _create_landscape_task.options(**_opts).remote(**job)
-                inflight[ref] = job_index
+                inflight[ref] = {"idx": job_index, "ts": _time.perf_counter()}
                 job_index += 1
                 submitted += 1
             return submitted
@@ -1031,16 +1135,25 @@ class FitnessSuperscape:
             now = _time.perf_counter()
             if done:
                 ref = done[0]
-                idx = inflight.pop(ref)
+                meta = inflight.pop(ref)
                 try:
                     L = ray.get(ref)
                 except Exception as e:
                     raise
                 landscapes.append(L)
                 if _show_progress:
-                    _logger.info('stream progress: %d completed', len(landscapes))
+                    elapsed = now - t_start
+                    done_count = len(landscapes)
+                    avg = (elapsed / done_count) if done_count else 0.0
+                    eta = (avg * ((total_hint or 0) - done_count)) if (done_count and total_hint) else None
+                    if total_hint:
+                        _logger.info('stream progress: %d/%d completed inflight=%d elapsed=%.1fs eta=%.1fs', done_count, total_hint, len(inflight), elapsed, eta or 0.0)
+                    else:
+                        _logger.info('stream progress: %d completed inflight=%d elapsed=%.1fs', done_count, len(inflight), elapsed)
                 # If a barrier is pending and inflight is now empty, clear and continue submitting
                 if pending_barrier and not inflight:
+                    if _show_progress:
+                        _logger.info('stream barrier passed; continuing submissions')
                     pending_barrier = False
                 _submit_next(batch=1)
                 # lightweight checkpoint
@@ -1060,7 +1173,8 @@ class FitnessSuperscape:
                         p = _psutil.Process()
                         rss_bytes = p.memory_info().rss
                         rss = f" rss={rss_bytes/1e9:.2f}GB"
-                    _logger.info('stream heartbeat: %d completed%s', len(landscapes), rss)
+                    elapsed = _time.perf_counter() - t_start
+                    _logger.info('stream heartbeat: %d completed inflight=%d elapsed=%.1fs%s', len(landscapes), len(inflight), elapsed, rss)
 
         return cls(
             landscapes=landscapes,
