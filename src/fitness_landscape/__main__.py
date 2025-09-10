@@ -688,23 +688,22 @@ def phylo_superscape(sequences,
                     "_hard_ancestors": True,
                 }
 
-                # Emit fanned or whole-block jobs
-                if fan_alignment:
-                    if not all([fan_alignment_window, fan_alignment_overlap]):
-                        raise click.UsageError("If --fan-alignment is set, both --fan-alignment-window and --fan-alignment-overlap must be provided.")
-                    for sub in iter_moving_window_alignment(block_aln, fan_alignment_window, fan_alignment_overlap):
-                        # Reuse the same trimming and per-sequence filtering logic as above
-                        sub2 = _trim_alignment(sub)
-                        sub2 = _drop_gappy_sequences(sub2)
-                        if sub2 is None:
-                            continue
-                        yield _emit_job(sub2)
-                else:
-                    yield _emit_job(block_aln)
+        # Emit fanned or whole-block jobs
+        if fan_alignment:
+            if not all([fan_alignment_window, fan_alignment_overlap]):
+                raise click.UsageError("If --fan-alignment is set, both --fan-alignment-window and --fan-alignment-overlap must be provided.")
+            for sub in iter_moving_window_alignment(block_aln, fan_alignment_window, fan_alignment_overlap):
+                sub2 = _trim_alignment(sub)
+                sub2 = _drop_gappy_sequences(sub2)
+                if sub2 is None:
+                    continue
+                yield _emit_job(sub2)
+        else:
+            yield _emit_job(block_aln)
 
-                # Insert barrier after each block to force sequential block processing
-                if b_idx < len(blocks) - 1:
-                    yield {"_barrier": True}
+        # Insert barrier after each block to force sequential block processing
+        if b_idx < len(blocks) - 1:
+            yield {"_barrier": True}
 
     bernoulli_beta = BernoulliBeta(alpha0=bernoulli_beta_alpha0, alpha1=bernoulli_beta_alpha1)
     
