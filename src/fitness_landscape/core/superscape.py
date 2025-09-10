@@ -471,7 +471,9 @@ class FitnessSuperscape:
                 observed_mappings.append({"node_id": node_id, "probability": probability, "graph_index": graph_idx})
 
             observed_mappings.sort(key=lambda x: x['probability'], reverse=True)
-            graph.nodes[latent_node_idx]['observed_node_mappings'] = observed_mappings
+            # Some stitched graphs may use non-consecutive/non-integer labels; guard assignment
+            if latent_node_idx in graph.nodes:
+                graph.nodes[latent_node_idx]['observed_node_mappings'] = observed_mappings
 
             if len(contributor_indices) == 0:
                 uniform_probability = 1.0 / len(self.alphabet)
@@ -480,8 +482,9 @@ class FitnessSuperscape:
                 latent_sequences.append(ambiguous_sequence)
                 gapped_arr = np.zeros((default_length, len(self.alphabet) + 1))
                 gapped_arr[:, :-1] = uniform_posterior
-                graph.nodes[latent_node_idx]['gapped_arr'] = gapped_arr
-                graph.nodes[latent_node_idx]['ungapped_arr'] = uniform_posterior
+                if latent_node_idx in graph.nodes:
+                    graph.nodes[latent_node_idx]['gapped_arr'] = gapped_arr
+                    graph.nodes[latent_node_idx]['ungapped_arr'] = uniform_posterior
                 continue
 
             ungapped_arrs_to_align = [np.ascontiguousarray(np.asarray(all_ungapped_arrs[i], dtype=np.float64)) for i in contributor_indices]
@@ -492,10 +495,12 @@ class FitnessSuperscape:
             total_prob_for_node = np.sum(contributor_probs) + 1e-12
             weighted_sum_posterior = np.einsum('i,ija->ja', contributor_probs, aligned_tensor)
             final_posterior = weighted_sum_posterior / total_prob_for_node
-            graph.nodes[latent_node_idx]['gapped_arr'] = final_posterior
+            if latent_node_idx in graph.nodes:
+                graph.nodes[latent_node_idx]['gapped_arr'] = final_posterior
             ungapped_arr = final_posterior[:, :-1]
             ungapped_arr = ungapped_arr / ungapped_arr.sum(axis=1, keepdims=True)
-            graph.nodes[latent_node_idx]['ungapped_arr'] = ungapped_arr
+            if latent_node_idx in graph.nodes:
+                graph.nodes[latent_node_idx]['ungapped_arr'] = ungapped_arr
             aa_posterior = final_posterior[:, :-1]
             gap_posterior = final_posterior[:, -1:]
             latent_sequences.append(SoftSequence(aa_posterior=aa_posterior, alphabet=self.alphabet, gap_posterior=gap_posterior))
