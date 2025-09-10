@@ -76,6 +76,8 @@ def cli():
 @click.option('--sequential-construction', is_flag=True, default=False, help='Construct each landscape sequentially (avoids Ray during construction); the diffusion graph internally parallelizes scoring.')
 @click.option('--meta-cpu-chains', required=False, type=int, default=os.cpu_count(), help='Number of CPU chains to use for the meta-alignment step in hierarchical alignment.')
 @click.option('--local-cpu-chains', required=False, type=int, default=(os.cpu_count()//10 if os.cpu_count()//10 > 1 else 1), help='Number of CPU chains to use for each parallel local alignment chain.')
+
+#NOTE: This is intractably slow.
 def diffusion_evol_superscape(sequences,
                                   output,
                                   k,
@@ -382,8 +384,13 @@ def diffusion_evol_superscape(sequences,
 
 # Phylogenetic inference
 @click.option('--directed-landscape', required=False, is_flag=True, default=False, help='Boolean flag to indicate if a directed phylogenetic fitness landscape should be constructed.')
+# Embedding controls (harmonized with diffusion CLI)
 @click.option('--compute-phylo-embeddings/--no-compute-phylo-embeddings', default=True, help='Compute embeddings for extant and ancestral sequences to attach to nodes.')
+@click.option('--compute-embeddings/--no-compute-embeddings', 'compute_phylo_embeddings', default=True, help='Alias of --compute-phylo-embeddings for consistency with diffusion CLI.')
 @click.option('--embedding-domain', required=False, type=click.Choice(['ohe', 'plm']), default='ohe', help='Embedding domain for node attributes (ohe or plm).')
+@click.option('--plm-model-name', required=False, type=str, default='facebook/esm2_t6_8M_UR50D', help='PLM model if embedding-domain=plm (harmonized with diffusion CLI).')
+@click.option('--plm-batch-size', required=False, type=int, default=64, help='Batch size for PLM embeddings (harmonized with diffusion CLI).')
+@click.option('--plm-device', required=False, type=str, default=None, help='Device for PLM embeddings (e.g., cpu or cuda).')
 @click.option('--replacement-matrix', required=False, multiple=True, default=['LG'], help='Replacement matrix/matrices for IQ-TREE model selection (e.g., LG). Can be provided multiple times.')
 @click.option('--model-fitting/--no-model-fitting', default=False, help='Whether to perform IQ-TREE model selection across the provided replacement matrices.')
 
@@ -439,6 +446,9 @@ def phylo_superscape(sequences,
                      directed_landscape,
                      compute_phylo_embeddings,
                      embedding_domain,
+                     plm_model_name,
+                     plm_batch_size,
+                     plm_device,
                      replacement_matrix,
                      model_fitting,
                      bernoulli_beta_alpha0,
@@ -663,6 +673,10 @@ def phylo_superscape(sequences,
                     "model_fitting": model_fitting,
                     "_compute_phylo_embeddings": compute_phylo_embeddings,
                     "embedding_domain": embedding_domain,
+                    # PLM knobs (used when _compute_phylo_embeddings and embedding_domain=plm)
+                    "model_name": plm_model_name,
+                    "batch_size": plm_batch_size,
+                    "device": plm_device,
                     "_log_progress": log_progress,
                     "_job_id": job_counter,
                     "_total_jobs": None,
@@ -679,6 +693,10 @@ def phylo_superscape(sequences,
                     "model_fitting": model_fitting,
                     "_compute_phylo_embeddings": compute_phylo_embeddings,
                     "embedding_domain": embedding_domain,
+                    # PLM knobs (used when _compute_phylo_embeddings and embedding_domain=plm)
+                    "model_name": plm_model_name,
+                    "batch_size": plm_batch_size,
+                    "device": plm_device,
                     "_log_progress": log_progress,
                     "_job_id": job_counter,
                     "_total_jobs": None,
@@ -785,6 +803,11 @@ def phylo_superscape(sequences,
 @click.option('--plm-model-name', type=str, default='facebook/esm2_t6_8M_UR50D', help='PLM model to use when embedding-domain=plm.')
 @click.option('--plm-batch-size', type=int, default=64, help='Batch size for PLM embeddings.')
 @click.option('--plm-device', type=str, default=None, help='Device for PLM embeddings (e.g., cpu or cuda).')
+
+# Checkpointing
+@click.option('--embeddings-in', type=click.Path(exists=True), default=None, help='Path to precomputed embeddings (.npy). Skips embedding computation.')
+@click.option('--embeddings-out', type=click.Path(), default=None, help='If provided, save computed or loaded embeddings to this path (.npy).')
+@click.option('--only-embeddings', is_flag=True, default=False, help='Stop after producing embeddings (use with --embeddings-out).')
 @click.option('--compute-hamming-edges/--no-compute-hamming-edges', default=True, help='Compute expected Hamming edge weights after phylo reconstruction.')
 @click.option('--lightweight-nodes/--no-lightweight-nodes', default=False, help='Return lightweight nodes (drop gapped_arr) to reduce memory.')
 @click.option('--hard-ancestors/--no-hard-ancestors', default=False, help='Collapse ancestral SoftSequence to hard argmax sequence to reduce memory.')
@@ -908,11 +931,14 @@ def evol_diffusion_landscape(sequences,
                              embedding_domain,
                              plm_model_name,
                              plm_batch_size,
-                             plm_device,
-                             log_file,
-                             log_level,
-                             log_progress,
-                             log_prefix):
+                            plm_device,
+                            embeddings_in,
+                            embeddings_out,
+                            only_embeddings,
+                            log_file,
+                            log_level,
+                            log_progress,
+                            log_prefix):
     """
     Construct a single evolutionary diffusion FitnessLandscape and save it to disk.
 
@@ -942,6 +968,7 @@ def evol_diffusion_landscape(sequences,
     # Read sequences: accept a FASTA file or a directory of FASTA files.
     # When a directory is provided, combine all FASTA files into one dataset.
     try:
+        _t_read0 = time.perf_counter(); _c_read0 = time.process_time()
         seq_path = Path(sequences)
         if seq_path.is_dir():
             fasta_files = sorted([p for p in seq_path.iterdir() if p.suffix.lower() in {'.fasta', '.fa', '.fas'}])
@@ -954,19 +981,31 @@ def evol_diffusion_landscape(sequences,
             logger.info('Combined sequences from %d FASTA files (total=%d)', len(fasta_files), len(seqs))
         else:
             seqs = fasta_to_prot20_sequences(seq_path, strict=False)
+        logger.info('Read sequences: n=%d wall=%.2fs cpu=%.2fs', len(seqs), time.perf_counter()-_t_read0, time.process_time()-_c_read0)
     except Exception as e:
         raise click.UsageError(str(e))
 
     if not seqs:
         raise click.UsageError('No sequences parsed from the provided input.')
 
-    # Embeddings
-    if not compute_embeddings:
-        raise click.UsageError('--no-compute-embeddings is not supported for this constructor; provide embeddings or enable computation.')
-
-    if embedding_domain == 'ohe':
+    # Embeddings: load from checkpoint or compute
+    if embeddings_in is not None:
+        _t_emb0 = time.perf_counter(); _c_emb0 = time.process_time()
+        import numpy as _np
+        logger.info('Loading embeddings from %s', embeddings_in)
+        try:
+            E = _np.load(embeddings_in)
+        except Exception as e:
+            raise click.UsageError(f'Failed to load embeddings from {embeddings_in}: {e}')
+        if getattr(E, 'shape', (None,))[0] != len(seqs):
+            raise click.UsageError(f'Embeddings count ({getattr(E, "shape", (None,))[0]}) does not match sequences ({len(seqs)}).')
+        logger.info('Embeddings loaded: shape=%s wall=%.2fs cpu=%.2fs', getattr(E, 'shape', None), time.perf_counter()-_t_emb0, time.process_time()-_c_emb0)
+    elif not compute_embeddings:
+        raise click.UsageError('--no-compute-embeddings provided but no --embeddings-in; supply precomputed embeddings or enable computation.')
+    elif embedding_domain == 'ohe':
         # If variable sequence lengths, fall back to a length-invariant
         # composition embedding to avoid OHE stacking errors.
+        _t_emb0 = time.perf_counter(); _c_emb0 = time.process_time()
         lengths = {len(s) for s in seqs}
         if len(lengths) == 1:
             from fitness_landscape.core.graph import _encode_multiallele
@@ -991,12 +1030,31 @@ def evol_diffusion_landscape(sequences,
                 else:
                     counts[:] = 1.0 / len(A)
                 E[r] = counts
+        logger.info('Embeddings (ohe/composition) built: shape=%s wall=%.2fs cpu=%.2fs', getattr(E, 'shape', None), time.perf_counter()-_t_emb0, time.process_time()-_c_emb0)
     else:
+        _t_emb0 = time.perf_counter(); _c_emb0 = time.process_time()
         E = _compute_embeddings_from_sequences(seqs, model_name=plm_model_name, batch_size=plm_batch_size, device=plm_device)
+        logger.info('Embeddings (PLM) built: shape=%s wall=%.2fs cpu=%.2fs', getattr(E, 'shape', None), time.perf_counter()-_t_emb0, time.process_time()-_c_emb0)
 
     logger.info('embeddings shape=%s', getattr(E, 'shape', None))
 
+    # Save embeddings checkpoint if requested
+    if embeddings_out is not None:
+        try:
+            import numpy as _np
+            _np.save(embeddings_out, E)
+            logger.info('Saved embeddings to %s', embeddings_out)
+        except Exception as e:
+            raise click.UsageError(f'Failed to save embeddings to {embeddings_out}: {e}')
+
+    # If only embeddings requested, stop here
+    if only_embeddings:
+        logger.info('only-embeddings set; skipping graph construction.')
+        logger.info('evol-diffusion-landscape: end wall=%.2fs cpu=%.2fs', time.perf_counter()-t0, time.process_time()-c0)
+        return
+
     # Build diffusion-evolution graph
+    _t_graph0 = time.perf_counter(); _c_graph0 = time.process_time()
     G = create_evol_diffusion_graph(
         sequences=seqs,
         embeddings=E,
@@ -1013,12 +1071,15 @@ def evol_diffusion_landscape(sequences,
         cpus=cpus,
         _compute_hamming_edges=compute_hamming_edges,
     )
+    logger.info('Graph constructed: nodes=%d edges=%d wall=%.2fs cpu=%.2fs', G.number_of_nodes(), G.number_of_edges(), time.perf_counter()-_t_graph0, time.process_time()-_c_graph0)
 
     landscape = FitnessLandscape.from_graph(G)
 
     # Save
     
+    _t_save0 = time.perf_counter(); _c_save0 = time.process_time()
     landscape.save(Path(output))
+    logger.info('Saved landscape: wall=%.2fs cpu=%.2fs', time.perf_counter()-_t_save0, time.process_time()-_c_save0)
 
     logger.info('Landscape saved to %s', output)
     logger.info('evol-diffusion-landscape: end wall=%.2fs cpu=%.2fs', time.perf_counter()-t0, time.process_time()-c0)

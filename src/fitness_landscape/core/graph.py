@@ -17,6 +17,8 @@ from softalign.soft_alignment import align_soft_sequences
 from scipy.sparse import csr_matrix
 from scipy.sparse import coo_matrix
 from scipy.sparse import triu as sp_triu
+import logging
+import time
 import faiss
 import ray
 
@@ -1307,6 +1309,8 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         k = n_sequences - 1
 
         # Use balltree algorithm (will fail as shape of embeddings >>>)
+    _logger = logging.getLogger('fitness_landscape')
+    _t_knn0 = time.perf_counter(); _c_knn0 = time.process_time()
     if backend == 'balltree':
         _, neighbor_indices = _find_knn_balltree(embeddings, k, tiebuffer)
     
@@ -1332,6 +1336,7 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                                            use_gpu=use_gpu,
                                            hnsw_M=hnsw_M,
                                            tiebuffer=tiebuffer) 
+    _logger.info('kNN prefilter done: backend=%s k=%d n=%d wall=%.2fs cpu=%.2fs', backend, k, n_sequences, time.perf_counter()-_t_knn0, time.process_time()-_c_knn0)
 
     pairs_to_align = set()
     for i in range(n_sequences):
@@ -1340,6 +1345,7 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                 # Add pairs in a canonical order to avoid duplicates
                 pair = tuple(sorted((i, j_idx)))
                 pairs_to_align.add(pair)
+    _logger.info('Pairs to align: count=%d (~%.2fxN)', len(pairs_to_align), (len(pairs_to_align)/max(n_sequences,1)))
 
     # Build sparse kernel only on neighbor pairs to avoid dense NxN
     rows_list = []
@@ -1347,16 +1353,18 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     data_list = []
 
     # Init ray for parallel computing.
+    _t_align0 = time.perf_counter(); _c_align0 = time.process_time()
     if not ray.is_initialized():
         ray.init()
     
     # Compute in parallel.
     refs = [_score_pair.options(num_cpus=cpus).remote(i, j, sequences[i], sequences[j], tau, replacement_matrix)
             for (i, j) in pairs_to_align]
-    
+    _logger.info('Submitted alignment tasks: %d', len(refs))
     for i, j, kv in ray.get(refs):
         rows_list.append(i); cols_list.append(j); data_list.append(float(kv))
         rows_list.append(j); cols_list.append(i); data_list.append(float(kv))
+    _logger.info('Alignments complete: wall=%.2fs cpu=%.2fs', time.perf_counter()-_t_align0, time.process_time()-_c_align0)
 
     if rows_list:
         K = coo_matrix((np.asarray(data_list, dtype=np.float32),
@@ -1366,6 +1374,7 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         K = csr_matrix((n_sequences, n_sequences), dtype=np.float32)
 
     # Row-normalize to get transition matrix
+    _t_norm0 = time.perf_counter(); _c_norm0 = time.process_time()
     row_sums = np.asarray(K.sum(axis=1)).ravel().astype(np.float32)
     row_sums[row_sums == 0.0] = 1.0
     # scale rows in-place
@@ -1373,10 +1382,12 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     K = K.tocsr()
     K.data *= np.repeat(inv, np.diff(K.indptr))
     Tmat = K  # transition matrix (CSR)
+    _logger.info('Row-normalized transition matrix: nnz=%d wall=%.2fs cpu=%.2fs', Tmat.nnz, time.perf_counter()-_t_norm0, time.process_time()-_c_norm0)
 
     # Compute T^t via sparse multiplies; prune tiny entries to keep sparsity
+    _t_pow0 = time.perf_counter(); _c_pow0 = time.process_time()
     P = Tmat.copy()
-    for _ in range(max(1, int(t)) - 1):
+    for step in range(max(1, int(t)) - 1):
         P = P @ Tmat
         # prune extremely small values to limit fill-in (safe via eliminate_zeros)
         if P.nnz:
@@ -1384,9 +1395,12 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
             if np.any(small):
                 P.data[small] = 0.0
                 P.eliminate_zeros()
+        _logger.info('Diffusion step %d/%d: nnz=%d', step+1, max(1, int(t)) - 1, P.nnz)
+    _logger.info('Diffusion power done: wall=%.2fs cpu=%.2fs', time.perf_counter()-_t_pow0, time.process_time()-_c_pow0)
 
     # Symmetrize and threshold
     # Symmetrize: (P + P.T)/2
+    _t_sym0 = time.perf_counter(); _c_sym0 = time.process_time()
     P_sym = (P + P.T).tocsr()
     if P_sym.nnz:
         P_sym.data *= 0.5
@@ -1404,7 +1418,9 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
             P_sym.eliminate_zeros()
     # upper triangle
     U = sp_triu(P_sym, k=1, format='coo') if P_sym.nnz else coo_matrix(P_sym)
+    _logger.info('Symmetrize + threshold: nnz=%d wall=%.2fs cpu=%.2fs', U.nnz, time.perf_counter()-_t_sym0, time.process_time()-_c_sym0)
 
+    _t_graph0 = time.perf_counter(); _c_graph0 = time.process_time()
     graph = nx.Graph()
     graph.add_nodes_from(range(n_sequences))
     # add edges with attribute
@@ -1416,12 +1432,15 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         graph.nodes[i]['sequence'] = seq
 
     # Optionally compute expected Hamming distances if available
+    _logger.info('Graph nodes/edges added: nodes=%d edges=%d wall=%.2fs cpu=%.2fs', graph.number_of_nodes(), graph.number_of_edges(), time.perf_counter()-_t_graph0, time.process_time()-_c_graph0)
+    _t_ham0 = time.perf_counter(); _c_ham0 = time.process_time()
     if _compute_hamming_edges and all(
         hasattr(seq, "ungapped_arr") and getattr(seq, "ungapped_arr", None) is not None
         and getattr(seq, "alphabet", None) == PROT_20
         for seq in sequences
     ):
         compute_edge_mutations_star(G=graph)
+        _logger.info('compute_edge_mutations_star done: wall=%.2fs cpu=%.2fs', time.perf_counter()-_t_ham0, time.process_time()-_c_ham0)
     return graph
     
 def expected_hamming_from_aligned(aligned_or_A: Sequence[np.ndarray] | np.ndarray,
