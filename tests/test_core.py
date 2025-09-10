@@ -369,7 +369,8 @@ def test_to_sequence_tensors_indexed_export(basic_landscape):
     Tests the export of a single sequence by its index.
     """
     try:
-        dataset = basic_landscape.to_sequence_tensors(sequence_idx=3)
+        # Explicitly request legacy behavior (OHE)
+        dataset = basic_landscape.to_sequence_tensors(sequence_idx=3, tokenizer=None)
     except (ImportError, NameError):
         pytest.skip("torch not installed.")
 
@@ -392,7 +393,8 @@ def test_to_sequence_tensors_sequence_string_export(basic_landscape):
     target_sequence_str = "".join(map(str, target_sequence_obj.to_array()))
 
     try:
-        dataset = basic_landscape.to_sequence_tensors(sequence=target_sequence_str)
+        # Explicitly request legacy behavior (OHE)
+        dataset = basic_landscape.to_sequence_tensors(sequence=target_sequence_str, tokenizer=None)
     except (ImportError, NameError):
         pytest.skip("torch not installed.")
 
