@@ -757,7 +757,7 @@ class FitnessSuperscape:
         return [obj.graph for obj in landscapes]
 
     # Delegate tensor methods to latent graph FitnessLandscape class.
-    def to_graph_tensor(self) -> 'Data':
+    def to_graph_tensor(self, *, tokenizer: Any | str | None = "facebook/esm2_t6_8M_UR50D") -> 'Data':
         """
         Exports the entire fitness landscape to a PyTorch Geometric
         Data object.
@@ -782,12 +782,13 @@ class FitnessSuperscape:
             raise RuntimeError("The latent landscape has not been constructed yet. "
                              "Run `construct_latent_landscape()` first.")
         
-        return self.latent_landscape.to_graph_tensor()
+        return self.latent_landscape.to_graph_tensor(tokenizer=tokenizer)
 
     def to_sequence_tensors(self,
                             *,
                             sequence_idx: Union[List[int], int] = None,
-                            sequence: Union[List[str], str] = None) -> List[Dict[str, Any]]:
+                            sequence: Union[List[str], str] = None,
+                            tokenizer: Any | str | None = "facebook/esm2_t6_8M_UR50D") -> List[Dict[str, Any]]:
         """
         Exports the sequences and their fitness layers as a list of
         dictionaries containing tensors. Supports indexing by sequence
@@ -821,7 +822,8 @@ class FitnessSuperscape:
             
         return self.latent_landscape.to_sequence_tensors(
             sequence_idx=sequence_idx,
-            sequence=sequence
+            sequence=sequence,
+            tokenizer=tokenizer
         )
     
     def save(self, filepath: Path):

@@ -672,7 +672,7 @@ class FitnessLandscape:
                        f"active={self.active_layer_name!r}")
 
 
-    def to_graph_tensor(self) -> 'Data':
+    def to_graph_tensor(self, *, tokenizer: Any | str | None = "facebook/esm2_t6_8M_UR50D") -> 'Data':
         """
         Exports the entire fitness landscape to a PyTorch Geometric
         Data object.
@@ -681,6 +681,13 @@ class FitnessLandscape:
         features (from embeddings or sequences), and all associated
         fitness layers into a format suitable for graph machine
         learning with PyTorch Geometric.
+
+        Parameters
+        ----------
+        tokenizer : huggingface tokenizer | str | None, default=`"facebook/esm2_t6_8M_UR50D"`
+            - If provided (as instance or model name), adds `token_ids` and `attention_mask`
+              tensors to the returned Data, padded to the longest tokenized sequence.
+            - If `None` or if tokenization is unavailable, these attributes are omitted.
 
         Returns
         -------
@@ -692,6 +699,8 @@ class FitnessLandscape:
             - edge_attr: Edge weights, if they exist.
             - Additional attributes corresponding to each fitness
             layer, named after the layer.
+            - token_ids (optional): LongTensor [N, Lmax] of token ids when tokenizer provided.
+            - attention_mask (optional): LongTensor [N, Lmax] mask (1=real token, 0=pad).
         """
         if not self.graph: raise ValueError("Graph not constructed.")
         pyg_data = from_networkx(self.graph)
@@ -703,12 +712,56 @@ class FitnessLandscape:
         for name, layer in self.fitness_layers.items():
             setattr(pyg_data, name, layer.get_tensor())
         pyg_data.num_nodes = self.graph.number_of_nodes()
+
+        # Optional: add tokenized sequences with padding
+        if tokenizer is not None:
+            tok = None
+            try:
+                if isinstance(tokenizer, str):
+                    try:
+                        from transformers import AutoTokenizer  # lazy import
+                    except Exception:
+                        tok = None
+                    else:
+                        tok = AutoTokenizer.from_pretrained(tokenizer)
+                else:
+                    tok = tokenizer
+            except Exception:
+                tok = None
+
+            if tok is not None:
+                seq_texts: list[str] = []
+                for s in self.sequences:
+                    arr = [str(x) for x in s.to_array()]
+                    arr = ['-' if x == 'gap' else x for x in arr]
+                    seq_texts.append(' '.join(arr))
+
+                input_id_list: list[torch.Tensor] = []
+                max_len = 0
+                for t in seq_texts:
+                    enc = tok(t, add_special_tokens=True, return_tensors='pt')
+                    ids = enc['input_ids'].squeeze(0).to(torch.long)
+                    input_id_list.append(ids)
+                    if ids.numel() > max_len:
+                        max_len = int(ids.numel())
+
+                N = len(input_id_list)
+                token_ids = torch.zeros((N, max_len), dtype=torch.long)
+                attn_mask = torch.zeros((N, max_len), dtype=torch.long)
+                for i, ids in enumerate(input_id_list):
+                    L = ids.numel()
+                    token_ids[i, :L] = ids
+                    attn_mask[i, :L] = 1
+                pyg_data.token_ids = token_ids
+                pyg_data.attention_mask = attn_mask
+
         return pyg_data
 
     def to_sequence_tensors(self,
                             *,
                             sequence_idx: Union[List[int], int] = None,
-                            sequence: Union[List[str], str] = None) -> List[Dict[str, Any]]:
+                            sequence: Union[List[str], str] = None,
+                            tokenizer: Any | str | None = "facebook/esm2_t6_8M_UR50D") -> List[Dict[str, Any]]:
         """
         Exports the sequences and their fitness layers as a list of
         dictionaries containing tensors. Supports indexing by sequence
@@ -723,6 +776,13 @@ class FitnessLandscape:
         sequence : List of str, default=`None`
             Sequence to export as tensors. If `None`, all sequences
             are exported.
+        
+        tokenizer : huggingface tokenizer | str | None, default=`"facebook/esm2_t6_8M_UR50D"`
+            - If a tokenizer instance or model name is provided, sequences are tokenized
+              using the Hugging Face tokenizer and the returned 'sequence_tensor' is a
+              1-D LongTensor of token ids (including special tokens as per the tokenizer).
+            - If explicitly set to `None`, behavior matches current defaults: sequences are
+              exported as one-hot tensors per position.
 
         Returns
         -------
@@ -750,9 +810,61 @@ class FitnessLandscape:
         else:
             target_indices = range(len(self.sequences))
         
-        return [{'sequence_tensor': torch.tensor(self.sequences[i].to_one_hot(), dtype=torch.float32),
-                 'fitness_tensors': {name: layer.get_tensor()[i] for name, layer in self.fitness_layers.items()}}
-                for i in target_indices]
+        # If tokenizer is provided (instance or model name), produce token id tensors.
+        if tokenizer is not None:
+            # Prepare tokenizer instance
+            tok = None
+            try:
+                if isinstance(tokenizer, str):
+                    try:
+                        from transformers import AutoTokenizer  # defer import
+                    except Exception:
+                        tok = None
+                    else:
+                        tok = AutoTokenizer.from_pretrained(tokenizer)
+                else:
+                    tok = tokenizer
+            except Exception:
+                tok = None
+
+            if tok is not None:
+                # First pass: tokenize and collect lengths
+                ids_list: list[torch.Tensor] = []
+                max_len = 0
+                seq_cache: dict[int, str] = {}
+                for i in target_indices:
+                    s = self.sequences[i]
+                    arr = [str(x) for x in s.to_array()]
+                    arr = ['-' if x == 'gap' else x for x in arr]
+                    seq_text = ''.join(arr)
+                    spaced = ' '.join(list(seq_text))
+                    seq_cache[i] = spaced
+                    enc = tok(spaced, add_special_tokens=True, return_tensors='pt')
+                    ids = enc['input_ids'].squeeze(0).to(torch.long)
+                    ids_list.append(ids)
+                    if ids.numel() > max_len:
+                        max_len = int(ids.numel())
+
+                # Second pass: pad and build output records
+                out: list[dict[str, Any]] = []
+                for ids, i in zip(ids_list, target_indices):
+                    L = ids.numel()
+                    padded = torch.zeros((max_len,), dtype=torch.long)
+                    mask = torch.zeros((max_len,), dtype=torch.long)
+                    padded[:L] = ids
+                    mask[:L] = 1
+                    out.append({
+                        'sequence_tensor': padded,
+                        'attention_mask': mask,
+                        'fitness_tensors': {name: layer.get_tensor()[i] for name, layer in self.fitness_layers.items()}
+                    })
+                return out
+
+        # Default: one-hot per-position tensor (current behavior)
+        return [{
+            'sequence_tensor': torch.tensor(self.sequences[i].to_one_hot(), dtype=torch.float32),
+            'fitness_tensors': {name: layer.get_tensor()[i] for name, layer in self.fitness_layers.items()}
+        } for i in target_indices]
 
 
     # Legacy methods for compatibility with old code.
