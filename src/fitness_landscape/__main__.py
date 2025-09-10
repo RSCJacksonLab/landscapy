@@ -295,17 +295,6 @@ def phylo_superscape(sequences,
         from fitness_landscape.utils import iter_moving_window_alignment
 
         job_counter = 0
-        for alignment in _iter_sub_alignments():
-            # Chunk by sequences if requested
-            names = list(alignment.names)
-            if max_seqs_per_block and max_seqs_per_block > 0 and len(names) > max_seqs_per_block:
-                blocks = [names[i:i+max_seqs_per_block] for i in range(0, len(names), max_seqs_per_block)]
-            else:
-                blocks = [names]
-
-            for b_idx, block_names in enumerate(blocks):
-                block_map = {n: str(alignment.get_gapped_seq(n)) for n in block_names}
-                block_aln = make_aligned_seqs(block_map, moltype='protein')
 
         def _emit_job(seq_aln):
             nonlocal job_counter
@@ -356,22 +345,38 @@ def phylo_superscape(sequences,
                     "_hard_ancestors": True,
                 }
 
-        # Emit fanned or whole-block jobs
-        if fan_alignment:
-            if not all([fan_alignment_window, fan_alignment_overlap]):
-                raise click.UsageError("If --fan-alignment is set, both --fan-alignment-window and --fan-alignment-overlap must be provided.")
-            for sub in iter_moving_window_alignment(block_aln, fan_alignment_window, fan_alignment_overlap):
-                sub2 = _trim_alignment(sub)
-                sub2 = _drop_gappy_sequences(sub2)
-                if sub2 is None:
-                    continue
-                yield _emit_job(sub2)
-        else:
-            yield _emit_job(block_aln)
+        for alignment in _iter_sub_alignments():
+            # Chunk by sequences if requested
+            names = list(alignment.names)
+            if max_seqs_per_block and max_seqs_per_block > 0 and len(names) > max_seqs_per_block:
+                blocks = [names[i:i+max_seqs_per_block] for i in range(0, len(names), max_seqs_per_block)]
+            else:
+                blocks = [names]
 
-        # Insert barrier after each block to force sequential block processing
-        if b_idx < len(blocks) - 1:
-            yield {"_barrier": True}
+            for b_idx, block_names in enumerate(blocks):
+                block_map = {n: str(alignment.get_gapped_seq(n)) for n in block_names}
+                block_aln = make_aligned_seqs(block_map, moltype='protein')
+
+                # Emit fanned or whole-block jobs per block
+                if fan_alignment:
+                    if not all([fan_alignment_window, fan_alignment_overlap]):
+                        raise click.UsageError("If --fan-alignment is set, both --fan-alignment-window and --fan-alignment-overlap must be provided.")
+                    for sub in iter_moving_window_alignment(block_aln, fan_alignment_window, fan_alignment_overlap):
+                        sub2 = _trim_alignment(sub)
+                        sub2 = _drop_gappy_sequences(sub2)
+                        if sub2 is None:
+                            continue
+                        yield _emit_job(sub2)
+                else:
+                    yield _emit_job(block_aln)
+
+                # Insert barrier after each block to force sequential block processing
+                if b_idx < len(blocks) - 1:
+                    yield {"_barrier": True}
+
+        
+
+        # (per-block emission handled above)
 
     bernoulli_beta = BernoulliBeta(alpha0=bernoulli_beta_alpha0, alpha1=bernoulli_beta_alpha1)
     
