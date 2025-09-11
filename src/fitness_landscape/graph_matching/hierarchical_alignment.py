@@ -22,7 +22,8 @@ import inspect
 @ray.remote
 def run_local_alignment_task(cluster_subgraphs: List[Union[nx.Graph, nx.DiGraph]],
                              aligner_params: Dict,
-                             _local_cpu_chains: int) -> Tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray], Dict[int, list]]:
+                             _local_cpu_chains: int,
+                             posterior_storage: Literal['compact','full','none'] = 'compact') -> Tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray], Dict[int, list]]:
     """
     Executes the local RJMCMC alignment for a cluster of subgraphs.
     This is a Ray remote task to parallelize the local alignments.
@@ -67,7 +68,77 @@ def run_local_alignment_task(cluster_subgraphs: List[Union[nx.Graph, nx.DiGraph]
     # Capture the order of nodes as the aligner sees them
     node_order = {i: list(g.nodes()) for i, g in enumerate(cluster_subgraphs)}
     
-    return blueprint, node_mapping, node_order, local_aligner.trace_E, local_aligner.trace_NL, local_aligner.trace_edges, local_aligner._stored_L, local_aligner._stored_pi
+    # Condense posterior on the worker according to policy to reduce driver memory/traffic
+    if posterior_storage == 'none':
+        stored_L = None
+        stored_pi = None
+    elif posterior_storage == 'full':
+        # Downcast to reduce size
+        stored_L = [np.asarray(Lm, dtype=np.uint8) for Lm in (local_aligner._stored_L or [])]
+        pi_comp: List[List[np.ndarray]] = []
+        for gidx in range(local_aligner.K):
+            arrs = local_aligner._stored_pi[gidx] if gidx < len(local_aligner._stored_pi) else []
+            pi_comp.append([np.asarray(p, dtype=np.int16) for p in arrs if p is not None and p.size > 0])
+        stored_pi = pi_comp
+    else:  # 'compact'
+        # Average blueprint adjacency over samples
+        if local_aligner._stored_L and len(local_aligner._stored_L) > 0:
+            max_nl = 0
+            for Lm in local_aligner._stored_L:
+                if Lm.shape[0] > max_nl:
+                    max_nl = int(Lm.shape[0])
+            tally = np.zeros((max_nl, max_nl), dtype=np.float32)
+            for Lm in local_aligner._stored_L:
+                nl = Lm.shape[0]
+                tally[:nl, :nl] += Lm.astype(np.float32)
+            stored_L = (tally / float(len(local_aligner._stored_L))).astype(np.float32, copy=False)
+        else:
+            stored_L = np.zeros((0, 0), dtype=np.float32)
+
+        # Build per-graph local-row probability tallies (rows = local rows per graph)
+        stored_pi = {}
+        # Determine max NL across stored permutations
+        max_nl = 0
+        for gidx in range(local_aligner.K):
+            for pk in local_aligner._stored_pi[gidx]:
+                if pk is not None and pk.size > 0:
+                    max_nl = max(max_nl, int(np.max(pk)) + 1)
+        if max_nl <= 0:
+            # fall back to blueprint size when permutations empty
+            max_nl = stored_L.shape[0] if isinstance(stored_L, np.ndarray) else 0
+        for gidx in range(local_aligner.K):
+            local_order = node_order.get(gidx, [])
+            R = len(local_order)
+            if R == 0 or max_nl <= 0:
+                stored_pi[gidx] = np.zeros((R, 0), dtype=np.float32)
+                continue
+            tally = np.zeros((R, max_nl), dtype=np.float32)
+            pis = local_aligner._stored_pi[gidx]
+            if pis is None:
+                pis = []
+            for pk in pis:
+                if pk is None or pk.size == 0:
+                    continue
+                for local_row, latent_slot in enumerate(pk):
+                    if latent_slot < 0:
+                        continue
+                    if local_row >= R:
+                        continue
+                    s = int(latent_slot)
+                    if s >= tally.shape[1]:
+                        extra = s + 1 - tally.shape[1]
+                        tally = np.pad(tally, ((0, 0), (0, extra)), constant_values=0.0)
+                    tally[local_row, s] += 1.0
+            # Normalize rows to probabilities if we have any samples
+            if len(pis) > 0:
+                with np.errstate(invalid='ignore'):
+                    row_sums = tally.sum(axis=1, keepdims=True)
+                    mask = (row_sums > 0)
+                    if np.any(mask):
+                        tally[mask[:, 0], :] /= row_sums[mask[:, 0], :]
+            stored_pi[gidx] = tally.astype(np.float32, copy=False)
+
+    return blueprint, node_mapping, node_order, local_aligner.trace_E, local_aligner.trace_NL, local_aligner.trace_edges, stored_L, stored_pi
 
 
 def _filter_kwargs_for_init(cls, kwargs: Dict) -> Dict:
@@ -434,7 +505,12 @@ class HierarchicalRJMCMCAligner:
             params['num_chains'] = num_chains_per_task
 
             num_cpus_needed = 1 + num_chains_per_task
-            obj_ref = run_local_alignment_task.options(num_cpus=num_cpus_needed).remote(subgraphs, params, self._local_cpu_chains)
+            obj_ref = run_local_alignment_task.options(num_cpus=num_cpus_needed).remote(
+                subgraphs,
+                params,
+                self._local_cpu_chains,
+                posterior_storage=self._posterior_storage,
+            )
             futures.append(obj_ref)
 
         # Prepare output container in input order
@@ -484,8 +560,10 @@ class HierarchicalRJMCMCAligner:
                     self.local_posterior_L[idx] = L_comp
                     self.local_posterior_pi[idx] = pi_comp
                 else:  # 'compact'
-                    # Compute averaged blueprint matrix (float32)
-                    if stored_L and len(stored_L) > 0:
+                    # Compute or accept averaged blueprint matrix (float32)
+                    if isinstance(stored_L, np.ndarray):
+                        L_avg = np.asarray(stored_L, dtype=np.float32)
+                    elif stored_L and len(stored_L) > 0:
                         max_nl = max(Lm.shape[0] for Lm in stored_L)
                         tally = np.zeros((max_nl, max_nl), dtype=np.float32)
                         for Lm in stored_L:
@@ -507,42 +585,55 @@ class HierarchicalRJMCMCAligner:
                         for k in range(self.K)
                     }
                     # Tally counts, then normalise per row
-                    # stored_pi is a list per graph of arrays (local-row -> latent slot)
-                    if stored_pi is None:
-                        stored_pi = [[] for _ in range(self.K)]
-                    for gidx in range(self.K):
-                        num_rows = self.original_graphs[gidx].number_of_nodes()
-                        if num_rows == 0:
-                            continue
-                        tally = np.zeros((num_rows, max(1, max_nl)), dtype=np.float32)
-                        pis = stored_pi[gidx] if gidx < len(stored_pi) else []
-                        # Build local-row -> original-row mapping from node_order
-                        local_order = node_order.get(gidx, [])
-                        for pk in pis:
-                            if pk is None or pk.size == 0:
+                    # stored_pi may be dict of local-row tallies (worker-compacted) or list of permutations
+                    if isinstance(stored_pi, dict):
+                        for gidx in range(self.K):
+                            local_order = node_order.get(gidx, [])
+                            num_rows = self.original_graphs[gidx].number_of_nodes()
+                            local_tally = stored_pi.get(gidx)
+                            if local_tally is None or local_tally.size == 0:
+                                pi_probs[gidx] = np.zeros((num_rows, 0), dtype=np.float32)
                                 continue
-                            for local_row, latent_slot in enumerate(pk):
-                                if latent_slot < 0:
-                                    continue
-                                if local_row >= len(local_order):
-                                    continue
-                                orig_node = local_order[local_row]
+                            tally = np.zeros((num_rows, local_tally.shape[1]), dtype=np.float32)
+                            for local_row, orig_node in enumerate(local_order):
+                                if local_row >= local_tally.shape[0]:
+                                    break
                                 orig_row = orig_row_lut[gidx].get(orig_node, None)
                                 if orig_row is None:
                                     continue
-                                if latent_slot >= tally.shape[1]:
-                                    # expand columns if needed
-                                    extra = int(latent_slot + 1 - tally.shape[1])
-                                    tally = np.pad(tally, ((0, 0), (0, extra)), constant_values=0.0)
-                                tally[orig_row, int(latent_slot)] += 1.0
-                        # Normalize rows
-                        with np.errstate(invalid='ignore'):
-                            row_sums = tally.sum(axis=1, keepdims=True)  # (R,1)
-                            mask = (row_sums > 0)  # (R,1) boolean
-                            if np.any(mask):
-                                # Normalize rows with broadcasting-safe indexing
-                                tally[mask[:, 0], :] /= row_sums[mask[:, 0], :]
-                        pi_probs[gidx] = tally.astype(np.float32, copy=False)
+                                tally[orig_row, :local_tally.shape[1]] = local_tally[local_row]
+                            pi_probs[gidx] = tally
+                    else:
+                        if stored_pi is None:
+                            stored_pi = [[] for _ in range(self.K)]
+                        for gidx in range(self.K):
+                            num_rows = self.original_graphs[gidx].number_of_nodes()
+                            if num_rows == 0:
+                                pi_probs[gidx] = np.zeros((0, L_avg.shape[0]), dtype=np.float32)
+                                continue
+                            tally = np.zeros((num_rows, max(1, max_nl)), dtype=np.float32)
+                            pis = stored_pi[gidx] if gidx < len(stored_pi) else []
+                            local_order = node_order.get(gidx, [])
+                            for pk in pis:
+                                if pk is None or pk.size == 0:
+                                    continue
+                                for local_row, latent_slot in enumerate(pk):
+                                    if latent_slot < 0 or local_row >= len(local_order):
+                                        continue
+                                    orig_node = local_order[local_row]
+                                    orig_row = orig_row_lut[gidx].get(orig_node, None)
+                                    if orig_row is None:
+                                        continue
+                                    if latent_slot >= tally.shape[1]:
+                                        extra = int(latent_slot + 1 - tally.shape[1])
+                                        tally = np.pad(tally, ((0, 0), (0, extra)), constant_values=0.0)
+                                    tally[orig_row, int(latent_slot)] += 1.0
+                            with np.errstate(invalid='ignore'):
+                                row_sums = tally.sum(axis=1, keepdims=True)
+                                mask = (row_sums > 0)
+                                if np.any(mask):
+                                    tally[mask[:, 0], :] /= row_sums[mask[:, 0], :]
+                            pi_probs[gidx] = tally.astype(np.float32, copy=False)
 
                     self.local_posterior_L[idx] = L_avg
                     self.local_posterior_pi[idx] = pi_probs
