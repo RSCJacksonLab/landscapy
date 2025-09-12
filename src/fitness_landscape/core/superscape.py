@@ -1157,7 +1157,6 @@ class FitnessSuperscape:
                     # Force worker isolation by using a unique runtime_env per task
                     import uuid as _uuid
                     _opts["runtime_env"] = {"env_vars": {"LANDSCAPY_FRESH_WORKER": str(_uuid.uuid4())}}
-                    _opts["max_calls"] = 1
                 ref = _create_landscape_task.options(**_opts).remote(**job)
                 inflight[ref] = {"idx": job_index, "ts": _time.perf_counter(), "summary": _job_summary(job), "job": job, "retries": 0}
                 job_index += 1
@@ -1210,7 +1209,6 @@ class FitnessSuperscape:
                             if _fresh_worker_per_job:
                                 import uuid as _uuid
                                 _opts["runtime_env"] = {"env_vars": {"LANDSCAPY_FRESH_WORKER": str(_uuid.uuid4())}}
-                                _opts["max_calls"] = 1
                             ref2 = _create_landscape_task.options(**_opts).remote(**job)
                             meta['retries'] = meta.get('retries', 0) + 1
                             inflight[ref2] = {"idx": meta.get('idx'), "ts": _time.perf_counter(), "summary": meta.get('summary'), "job": job, "retries": meta['retries']}
