@@ -64,8 +64,7 @@ class ASRConstructor:
                 model_fitting: bool = False,
                 replacement_matrix: List = ['NQ.pfam'],
                 _reconstruct_ancestral_states: bool = True,
-                _log_progress: bool = False,
-                _backend: str = 'iqtree') -> None:
+                _log_progress: bool = False) -> None:
 
         # Load alignment
         if isinstance(alignment, Path):
@@ -89,11 +88,10 @@ class ASRConstructor:
         for node, arr in zip(self.tip_names, self._boolean_gap_alignment):
             self.boolean_gap_alignment[node] = arr
 
-        # If no phylogenetic tree, infer one in selected backend.
+        # If no phylogenetic tree, infer one using IQ-TREE via piqtree.
         if phylogenetic_tree is None:
             self.build_tree(replacement_matrix=replacement_matrix,
-                            model_fitting=model_fitting,
-                            _backend=_backend)
+                            model_fitting=model_fitting)
         
         elif phylogenetic_tree is not None:
             
@@ -114,8 +112,7 @@ class ASRConstructor:
     def build_tree(self,
                    replacement_matrix: List[str] = ['NQ.pfam'],
                    model_fitting: bool = True,
-                   _model_override: str = None,
-                   _backend: str = 'iqtree') -> None: 
+                   _model_override: str = None) -> None: 
         """
         Method to construct a phylogenetic tree using the piqtree
         Python binding.
@@ -140,22 +137,6 @@ class ASRConstructor:
         _logger = _logging.getLogger('fitness_landscape')
         if self._log_progress:
             _logger.info('ASR.build_tree: start (models=%s, fit=%s)', replacement_matrix, model_fitting)
-
-        # If requested, use a pure-Python NJ backend to avoid native IQ-TREE
-        _backend = (_backend or 'iqtree').lower()
-        if _backend == 'nj':
-            try:
-                nj = get_app('nj')
-                phylogenetic_tree = nj(self.alignment)
-                self.phylogenetic_tree = phylogenetic_tree
-                if self._log_progress:
-                    _logger.info('ASR.build_tree: complete (backend=nj)')
-                return
-            except Exception as e:
-                # Fall through to IQ-TREE if NJ fails
-                if self._log_progress:
-                    _logger.warning('ASR.build_tree: nj backend failed (%r); falling back to iqtree', e)
-                _backend = 'iqtree'
         if _model_override is not None:
             # Expect a string model spec for newer piqtree; coerce if needed
             model = str(_model_override)

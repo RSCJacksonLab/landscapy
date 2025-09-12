@@ -43,7 +43,6 @@ def cli():
 @click.option('--plm-device', required=False, type=str, default=None, help='Device for PLM embeddings (e.g., cpu or cuda).')
 @click.option('--replacement-matrix', required=False, multiple=True, default=['LG'], help='Replacement matrix/matrices for IQ-TREE model selection (e.g., LG). Can be provided multiple times.')
 @click.option('--model-fitting/--no-model-fitting', default=False, help='Whether to perform IQ-TREE model selection across the provided replacement matrices.')
-@click.option('--phylo-backend', required=False, type=click.Choice(['iqtree','nj','auto']), default='iqtree', help='Phylogeny builder backend. iqtree uses IQ-TREE via piqtree; nj uses neighbor-joining (no native IQ-TREE). auto may pick nj for tiny windows.')
 
 # RJMCMC sampling
 @click.option('--bernoulli-beta-alpha0', required=False, type=float, default=1, help='Bernoulli-Beta prior alpha0 parameter.')
@@ -110,7 +109,6 @@ def phylo_superscape(sequences,
                      plm_device,
                      replacement_matrix,
                      model_fitting,
-                     phylo_backend,
                      bernoulli_beta_alpha0,
                      bernoulli_beta_alpha1,
                      rjmcmc_alpha,
@@ -301,15 +299,15 @@ def phylo_superscape(sequences,
                 if fan_alignment:
                     if not all([fan_alignment_window, fan_alignment_overlap]):
                         raise click.UsageError("If --fan-alignment is set, both --fan-alignment-window and --fan-alignment-overlap must be provided.")
-                    for sub in iter_moving_window_alignment(alignment, fan_alignment_window, fan_alignment_overlap):
+                    for w_idx, sub in enumerate(iter_moving_window_alignment(alignment, fan_alignment_window, fan_alignment_overlap)):
                         sub2 = _trim_alignment(sub)
                         sub2 = _drop_gappy_sequences(sub2)
                         sub2 = _dedupe_alignment(sub2)
                         if sub2 is None:
                             continue
-                        yield sub2
+                        yield _emit_job(sub2, source_label=alignment_path, block_idx=None, block_total=None, fan_index=w_idx)
                 else:
-                    yield alignment
+                    yield _emit_job(alignment, source_label=alignment_path, block_idx=None, block_total=None, fan_index=None)
         else:
             alignment = load_aligned_seqs(sequences, moltype='protein')
             alignment = sanitize_alignment(alignment)
@@ -329,15 +327,15 @@ def phylo_superscape(sequences,
             if fan_alignment:
                 if not all([fan_alignment_window, fan_alignment_overlap]):
                     raise click.UsageError("If --fan-alignment is set, both --fan-alignment-window and --fan-alignment-overlap must be provided.")
-                for sub in iter_moving_window_alignment(alignment, fan_alignment_window, fan_alignment_overlap):
+                for w_idx, sub in enumerate(iter_moving_window_alignment(alignment, fan_alignment_window, fan_alignment_overlap)):
                     sub2 = _trim_alignment(sub)
                     sub2 = _drop_gappy_sequences(sub2)
                     sub2 = _dedupe_alignment(sub2)
                     if sub2 is None:
                         continue
-                    yield sub2
+                    yield _emit_job(sub2, source_label=sequences, block_idx=None, block_total=None, fan_index=w_idx)
             else:
-                yield alignment
+                yield _emit_job(alignment, source_label=sequences, block_idx=None, block_total=None, fan_index=None)
 
     # Build a streaming job generator for (di)graph construction
     def _construction_job_iter():
@@ -353,21 +351,27 @@ def phylo_superscape(sequences,
 
         job_counter = 0
 
-        def _emit_job(seq_aln):
+        def _emit_job(seq_aln, *, source_label: str = None, block_idx: int | None = None, block_total: int | None = None, fan_index: int | None = None):
             nonlocal job_counter
             job_counter += 1
             try:
                 _n = len(list(seq_aln.names))
             except Exception:
                 _n = None
-            _lbl = f"phylo size={_n if _n is not None else '?'} directed={bool(directed_landscape)}"
+            t_src = (Path(source_label).name if source_label else Path(sequences).name)
+            parts = [f"phylo size={_n if _n is not None else '?'}", f"directed={bool(directed_landscape)}", f"src={t_src}"]
+            if block_idx is not None:
+                parts.append(f"blk={block_idx}")
+            if fan_index is not None:
+                parts.append(f"win={fan_index}")
+            _lbl = ' '.join(parts)
             if directed_landscape:
                 return {
                     "sequences": seq_aln,
                     "digraph_type": "phylogenetic",
                     "replacement_matrix": list(replacement_matrix),
                     "model_fitting": model_fitting,
-                    "phylo_backend": phylo_backend,
+                    
                     "_compute_phylo_embeddings": compute_phylo_embeddings,
                     "embedding_domain": embedding_domain,
                     # PLM knobs (used when _compute_phylo_embeddings and embedding_domain=plm)
@@ -381,6 +385,10 @@ def phylo_superscape(sequences,
                     "_nested_construction_parallel": False,
                     "_lightweight_nodes": True,
                     "_hard_ancestors": True,
+                    "_source_label": t_src,
+                    "_block_idx": block_idx,
+                    "_block_total": block_total,
+                    "_fan_index": fan_index,
                 }
             else:
                 return {
@@ -388,7 +396,7 @@ def phylo_superscape(sequences,
                     "graph_type": "phylogenetic",
                     "replacement_matrix": list(replacement_matrix),
                     "model_fitting": model_fitting,
-                    "phylo_backend": phylo_backend,
+                    
                     "_compute_phylo_embeddings": compute_phylo_embeddings,
                     "embedding_domain": embedding_domain,
                     # PLM knobs (used when _compute_phylo_embeddings and embedding_domain=plm)
@@ -402,6 +410,10 @@ def phylo_superscape(sequences,
                     "_nested_construction_parallel": False,
                     "_lightweight_nodes": True,
                     "_hard_ancestors": True,
+                    "_source_label": t_src,
+                    "_block_idx": block_idx,
+                    "_block_total": block_total,
+                    "_fan_index": fan_index,
                 }
 
         for alignment in _iter_sub_alignments():
@@ -433,15 +445,15 @@ def phylo_superscape(sequences,
                 if fan_alignment:
                     if not all([fan_alignment_window, fan_alignment_overlap]):
                         raise click.UsageError("If --fan-alignment is set, both --fan-alignment-window and --fan-alignment-overlap must be provided.")
-                    for sub in iter_moving_window_alignment(block_aln, fan_alignment_window, fan_alignment_overlap):
+                    for w_idx, sub in enumerate(iter_moving_window_alignment(block_aln, fan_alignment_window, fan_alignment_overlap)):
                         sub2 = _trim_alignment(sub)
                         sub2 = _drop_gappy_sequences(sub2)
                         sub2 = _dedupe_alignment(sub2)
                         if sub2 is None:
                             continue
-                        yield _emit_job(sub2)
+                        yield _emit_job(sub2, source_label=str(sequences), block_idx=b_idx, block_total=len(blocks), fan_index=w_idx)
                 else:
-                    yield _emit_job(block_aln)
+                    yield _emit_job(block_aln, source_label=str(sequences), block_idx=b_idx, block_total=len(blocks), fan_index=None)
 
                 # Insert barrier after each block to force sequential block processing
                 if b_idx < len(blocks) - 1:

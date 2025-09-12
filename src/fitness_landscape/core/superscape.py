@@ -1106,7 +1106,14 @@ class FitnessSuperscape:
 
         def _job_summary(job: dict) -> dict:
             """Return a lightweight summary of a construction job for logging."""
-            s = {"job_id": job.get("_job_id"), "label": job.get("_job_label"), "embedding_domain": job.get("embedding_domain")}
+            s = {
+                "job_id": job.get("_job_id"),
+                "label": job.get("_job_label"),
+                "embedding_domain": job.get("embedding_domain"),
+                "source": job.get("_source_label"),
+                "block_idx": job.get("_block_idx"),
+                "fan_index": job.get("_fan_index"),
+            }
             n = None; L = None
             try:
                 from cogent3.core.alignment import Alignment as _C3Alignment
@@ -1157,6 +1164,25 @@ class FitnessSuperscape:
                     # Force worker isolation by using a unique runtime_env per task
                     import uuid as _uuid
                     _opts["runtime_env"] = {"env_vars": {"LANDSCAPY_FRESH_WORKER": str(_uuid.uuid4())}}
+                # Persist sub-alignment FASTA for provenance if checkpointing dir provided
+                try:
+                    if ckpt_path is not None:
+                        ckpt_dir = Path(ckpt_path).parent
+                        jobs_dir = ckpt_dir / 'jobs'
+                        jobs_dir.mkdir(parents=True, exist_ok=True)
+                        from cogent3.core.alignment import Alignment as _C3Alignment
+                        aln = job.get('sequences')
+                        if isinstance(aln, _C3Alignment):
+                            src = job.get('_source_label') or 'input'
+                            blk = job.get('_block_idx')
+                            win = job.get('_fan_index')
+                            tag = f"job{job.get('_job_id')}_src-{src}_blk-{blk}_win-{win}".replace('/', '_')
+                            out_fp = jobs_dir / f"{tag}.fasta"
+                            with open(out_fp, 'w') as _f:
+                                for nm in aln.names:
+                                    _f.write(f">{nm}\n{str(aln.get_gapped_seq(nm))}\n")
+                except Exception:
+                    pass
                 ref = _create_landscape_task.options(**_opts).remote(**job)
                 inflight[ref] = {"idx": job_index, "ts": _time.perf_counter(), "summary": _job_summary(job), "job": job, "retries": 0}
                 job_index += 1
