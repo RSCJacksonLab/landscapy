@@ -95,11 +95,22 @@ def _create_landscape_task(
     _logger = _logging.getLogger('fitness_landscape')
     # Optional human-readable label for logs
     _job_label = kwargs.pop('_job_label', None)
+    # Pre-flight: summarize input size to aid debugging / OOM triage
+    _n = None; _L = None
+    try:
+        from cogent3.core.alignment import Alignment as _C3Alignment
+        if isinstance(sequences, _C3Alignment):
+            _names = list(sequences.names)
+            _n = len(_names)
+            if _names:
+                _L = len(str(sequences.get_gapped_seq(_names[0])))
+    except Exception:
+        pass
     if _log_progress:
         if _job_label:
-            _logger.info('[job %s/%s] start: %s', _job_id, _total_jobs, _job_label)
+            _logger.info('[job %s/%s] start: %s n=%s L=%s', _job_id, _total_jobs, _job_label, str(_n), str(_L))
         else:
-            _logger.info('[job %s/%s] start', _job_id, _total_jobs)
+            _logger.info('[job %s/%s] start n=%s L=%s', _job_id, _total_jobs, str(_n), str(_L))
     ts = _time.perf_counter()
     try:
         result = constructor_class.from_sequences(
@@ -110,12 +121,13 @@ def _create_landscape_task(
         if _log_progress:
             dt = _time.perf_counter()-ts
             if _job_label:
-                _logger.info('[job %s/%s] complete in %.2fs: %s', _job_id, _total_jobs, dt, _job_label)
+                _logger.info('[job %s/%s] complete in %.2fs: %s (n=%s L=%s)', _job_id, _total_jobs, dt, _job_label, str(_n), str(_L))
             else:
-                _logger.info('[job %s/%s] complete in %.2fs', _job_id, _total_jobs, dt)
+                _logger.info('[job %s/%s] complete in %.2fs (n=%s L=%s)', _job_id, _total_jobs, dt, str(_n), str(_L))
         return result
     except Exception as e:
-        msg = f"[job {_job_id}/{_total_jobs}] construction failed: {e}"
+        # Include size summary in the error to aid crash diagnosis
+        msg = f"[job {_job_id}/{_total_jobs}] construction failed (n={_n} L={_L} label={_job_label!r}): {e}"
         raise RuntimeError(msg) from e
 
 class FitnessSuperscape:
@@ -1044,6 +1056,11 @@ class FitnessSuperscape:
                                     _meta_cpu_chains: int | None = None,
                                     _fresh_worker_per_job: bool = False,
                                     _parent_task_cpus: float = 1.0,
+                                    _auto_backoff: bool = True,
+                                    _retry_max: int = 1,
+                                    _backoff_factor: float = 0.5,
+                                    _min_inflight: int = 1,
+                                    _retry_delay: float = 0.0,
                                     **sampler_kwargs: Any) -> "FitnessSuperscape":
         """
         Streaming variant of parallel construction. Consumes an iterator of
@@ -1073,6 +1090,10 @@ class FitnessSuperscape:
         import logging as _logging, time as _time
         _logger = _logging.getLogger('fitness_landscape')
         max_inflight = int(_meta_cpu_chains) if _meta_cpu_chains and _meta_cpu_chains > 0 else (os.cpu_count() or 1)
+        try:
+            _min_inflight = max(1, int(_min_inflight))
+        except Exception:
+            _min_inflight = 1
         inflight: dict[Any, dict] = {}
         landscapes: list[Union[FitnessLandscape, DirectedFitnessLandscape]] = []
         job_index = 0
@@ -1081,6 +1102,23 @@ class FitnessSuperscape:
         total_hint = None
 
         pending_barrier = False
+
+        def _job_summary(job: dict) -> dict:
+            """Return a lightweight summary of a construction job for logging."""
+            s = {"job_id": job.get("_job_id"), "label": job.get("_job_label"), "embedding_domain": job.get("embedding_domain")}
+            n = None; L = None
+            try:
+                from cogent3.core.alignment import Alignment as _C3Alignment
+                aln = job.get("sequences")
+                if isinstance(aln, _C3Alignment):
+                    names = list(aln.names)
+                    n = len(names)
+                    if names:
+                        L = len(str(aln.get_gapped_seq(names[0])))
+            except Exception:
+                pass
+            s.update({"n": n, "L": L})
+            return s
 
         def _submit_next(batch=1):
             nonlocal job_index, pending_barrier
@@ -1119,7 +1157,7 @@ class FitnessSuperscape:
                     import uuid as _uuid
                     _opts["runtime_env"] = {"env_vars": {"LANDSCAPY_FRESH_WORKER": str(_uuid.uuid4())}}
                 ref = _create_landscape_task.options(**_opts).remote(**job)
-                inflight[ref] = {"idx": job_index, "ts": _time.perf_counter()}
+                inflight[ref] = {"idx": job_index, "ts": _time.perf_counter(), "summary": _job_summary(job), "job": job, "retries": 0}
                 job_index += 1
                 submitted += 1
             return submitted
@@ -1141,6 +1179,49 @@ class FitnessSuperscape:
                 try:
                     L = ray.get(ref)
                 except Exception as e:
+                    # Auto backoff and retry
+                    if _auto_backoff and meta is not None and meta.get('retries', 0) < int(_retry_max):
+                        # reduce inflight window
+                        try:
+                            new_inflight = max(_min_inflight, int(max(1, int(max_inflight * float(_backoff_factor)))))
+                        except Exception:
+                            new_inflight = max(_min_inflight, max_inflight // 2 if max_inflight > 1 else 1)
+                        if new_inflight < max_inflight and _show_progress:
+                            _logger.info('backoff: inflight %d -> %d (retry %d/%d for job idx=%s)', max_inflight, new_inflight, meta.get('retries', 0) + 1, int(_retry_max), meta.get('idx'))
+                        max_inflight = max(_min_inflight, new_inflight)
+                        # optional delay
+                        if _retry_delay and _retry_delay > 0:
+                            import time as _time_mod
+                            try:
+                                _time_mod.sleep(float(_retry_delay))
+                            except Exception:
+                                pass
+                        # resubmit this exact job
+                        job = dict(meta.get('job', {}))
+                        if job:
+                            wants_plm = job.get("embedding_domain") == "plm"
+                            wants_compute = bool(job.get("_compute_phylo_embeddings", False) or job.get("_compute_embeddings", False))
+                            if not wants_compute and job.get("graph_type") == "evol_diffusion" and wants_plm:
+                                wants_compute = True
+                            num_gpus = 1 if (wants_plm and wants_compute) else 0
+                            _opts = {"num_gpus": num_gpus, "num_cpus": _parent_task_cpus}
+                            if _fresh_worker_per_job:
+                                import uuid as _uuid
+                                _opts["runtime_env"] = {"env_vars": {"LANDSCAPY_FRESH_WORKER": str(_uuid.uuid4())}}
+                            ref2 = _create_landscape_task.options(**_opts).remote(**job)
+                            meta['retries'] = meta.get('retries', 0) + 1
+                            inflight[ref2] = {"idx": meta.get('idx'), "ts": _time.perf_counter(), "summary": meta.get('summary'), "job": job, "retries": meta['retries']}
+                            if _show_progress:
+                                _logger.error('stream job failed: idx=%s summary=%s error=%r; retrying (%d/%d) with inflight=%d', meta.get('idx'), meta.get('summary'), e, meta['retries'], int(_retry_max), max_inflight)
+                            # continue without counting as done
+                            continue
+                    # Surface job context then re-raise
+                    info = meta or {}
+                    hint = "; consider lowering --meta-cpu-chains and/or --max-seqs-per-block"
+                    try:
+                        _logger.error('stream job failed: idx=%s summary=%s error=%r%s', info.get('idx'), info.get('summary'), e, hint)
+                    except Exception:
+                        pass
                     raise
                 landscapes.append(L)
                 if _show_progress:

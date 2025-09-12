@@ -87,6 +87,12 @@ def cli():
 @click.option('--ray-fresh-worker/--no-ray-fresh-worker', default=False, help='If set, each Ray job uses a fresh worker (max_calls=1) to avoid native library state reuse.')
 # Streaming memory control
 @click.option('--max-seqs-per-block', required=False, type=int, default=None, help='If set, split each input alignment into blocks of at most this many sequences and process blocks sequentially. Fanning within a block may still use parallel Ray jobs.')
+# Auto backoff & retry (streaming mode)
+@click.option('--auto-backoff/--no-auto-backoff', default=True, show_default=True, help='Enable auto backoff and retry on worker crash in streaming construction.')
+@click.option('--retry-max', type=int, default=1, show_default=True, help='Maximum retries per failed construction job (streaming mode).')
+@click.option('--backoff-factor', type=float, default=0.5, show_default=True, help='Multiply inflight window by this factor on each retry (clamped by min-meta-cpu-chains).')
+@click.option('--min-meta-cpu-chains', type=int, default=1, show_default=True, help='Lower bound for inflight concurrency during backoff.')
+@click.option('--retry-delay-seconds', type=float, default=0.0, show_default=True, help='Optional sleep before re-submitting a failed job.')
 
 def phylo_superscape(sequences,
                      output,
@@ -123,6 +129,11 @@ def phylo_superscape(sequences,
                      max_seq_gap_frac,
                      ray_fresh_worker,
                      max_seqs_per_block,
+                     auto_backoff,
+                     retry_max,
+                     backoff_factor,
+                     min_meta_cpu_chains,
+                     retry_delay_seconds,
                      sequential_construction,
                      log_file,
                      log_level,
@@ -435,6 +446,11 @@ def phylo_superscape(sequences,
             _fresh_worker_per_job=ray_fresh_worker,
             _show_progress=log_progress,
             _construct_checkpoint_dir=str(ckpt_dir),
+            _auto_backoff=auto_backoff,
+            _retry_max=retry_max,
+            _backoff_factor=backoff_factor,
+            _min_inflight=min_meta_cpu_chains,
+            _retry_delay=retry_delay_seconds,
             **sampler_kwargs
         )
 
