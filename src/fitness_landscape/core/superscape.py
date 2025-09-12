@@ -1061,6 +1061,7 @@ class FitnessSuperscape:
                                     _backoff_factor: float = 0.5,
                                     _min_inflight: int = 1,
                                     _retry_delay: float = 0.0,
+                                    _final_fallback_inprocess: bool = False,
                                     **sampler_kwargs: Any) -> "FitnessSuperscape":
         """
         Streaming variant of parallel construction. Consumes an iterator of
@@ -1156,6 +1157,7 @@ class FitnessSuperscape:
                     # Force worker isolation by using a unique runtime_env per task
                     import uuid as _uuid
                     _opts["runtime_env"] = {"env_vars": {"LANDSCAPY_FRESH_WORKER": str(_uuid.uuid4())}}
+                    _opts["max_calls"] = 1
                 ref = _create_landscape_task.options(**_opts).remote(**job)
                 inflight[ref] = {"idx": job_index, "ts": _time.perf_counter(), "summary": _job_summary(job), "job": job, "retries": 0}
                 job_index += 1
@@ -1208,6 +1210,7 @@ class FitnessSuperscape:
                             if _fresh_worker_per_job:
                                 import uuid as _uuid
                                 _opts["runtime_env"] = {"env_vars": {"LANDSCAPY_FRESH_WORKER": str(_uuid.uuid4())}}
+                                _opts["max_calls"] = 1
                             ref2 = _create_landscape_task.options(**_opts).remote(**job)
                             meta['retries'] = meta.get('retries', 0) + 1
                             inflight[ref2] = {"idx": meta.get('idx'), "ts": _time.perf_counter(), "summary": meta.get('summary'), "job": job, "retries": meta['retries']}
@@ -1222,7 +1225,23 @@ class FitnessSuperscape:
                         _logger.error('stream job failed: idx=%s summary=%s error=%r%s', info.get('idx'), info.get('summary'), e, hint)
                     except Exception:
                         pass
-                    raise
+                    # Final fallback in-process (sequential) if enabled
+                    if _final_fallback_inprocess and meta is not None:
+                        try:
+                            job = dict(meta.get('job', {}))
+                            constructor_class = job.pop('constructor_class', FitnessLandscape)
+                            sequences = job.pop('sequences', None)
+                            if sequences is None:
+                                raise RuntimeError('final fallback missing sequences')
+                            L = constructor_class.from_sequences(sequences=sequences, **job)
+                            if _show_progress:
+                                _logger.warning('final fallback succeeded: idx=%s summary=%s (in-process)', meta.get('idx'), meta.get('summary'))
+                            # proceed with successful result
+                        except Exception as _e2:
+                            # give up and re-raise original
+                            raise
+                    else:
+                        raise
                 landscapes.append(L)
                 if _show_progress:
                     elapsed = now - t_start

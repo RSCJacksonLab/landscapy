@@ -93,6 +93,7 @@ def cli():
 @click.option('--backoff-factor', type=float, default=0.5, show_default=True, help='Multiply inflight window by this factor on each retry (clamped by min-meta-cpu-chains).')
 @click.option('--min-meta-cpu-chains', type=int, default=1, show_default=True, help='Lower bound for inflight concurrency during backoff.')
 @click.option('--retry-delay-seconds', type=float, default=0.0, show_default=True, help='Optional sleep before re-submitting a failed job.')
+@click.option('--final-fallback-inprocess/--no-final-fallback-inprocess', default=False, show_default=True, help='After exhausting retries, attempt to construct the failed job in-process (sequentially, without Ray). Use with caution on HPC.')
 
 def phylo_superscape(sequences,
                      output,
@@ -134,6 +135,7 @@ def phylo_superscape(sequences,
                      backoff_factor,
                      min_meta_cpu_chains,
                      retry_delay_seconds,
+                     final_fallback_inprocess,
                      sequential_construction,
                      log_file,
                      log_level,
@@ -451,6 +453,7 @@ def phylo_superscape(sequences,
             _backoff_factor=backoff_factor,
             _min_inflight=min_meta_cpu_chains,
             _retry_delay=retry_delay_seconds,
+            _final_fallback_inprocess=final_fallback_inprocess,
             **sampler_kwargs
         )
 
