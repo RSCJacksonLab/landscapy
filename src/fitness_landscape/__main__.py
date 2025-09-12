@@ -305,9 +305,9 @@ def phylo_superscape(sequences,
                         sub2 = _dedupe_alignment(sub2)
                         if sub2 is None:
                             continue
-                        yield _emit_job(sub2, source_label=alignment_path, block_idx=None, block_total=None, fan_index=w_idx)
+                        yield sub2
                 else:
-                    yield _emit_job(alignment, source_label=alignment_path, block_idx=None, block_total=None, fan_index=None)
+                    yield alignment
         else:
             alignment = load_aligned_seqs(sequences, moltype='protein')
             alignment = sanitize_alignment(alignment)
@@ -333,9 +333,9 @@ def phylo_superscape(sequences,
                     sub2 = _dedupe_alignment(sub2)
                     if sub2 is None:
                         continue
-                    yield _emit_job(sub2, source_label=sequences, block_idx=None, block_total=None, fan_index=w_idx)
+                    yield sub2
             else:
-                yield _emit_job(alignment, source_label=sequences, block_idx=None, block_total=None, fan_index=None)
+                yield alignment
 
     # Build a streaming job generator for (di)graph construction
     def _construction_job_iter():
