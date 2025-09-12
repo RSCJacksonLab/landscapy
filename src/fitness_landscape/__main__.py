@@ -95,6 +95,8 @@ def cli():
 @click.option('--min-meta-cpu-chains', type=int, default=1, show_default=True, help='Lower bound for inflight concurrency during backoff.')
 @click.option('--retry-delay-seconds', type=float, default=0.0, show_default=True, help='Optional sleep before re-submitting a failed job.')
 @click.option('--final-fallback-inprocess/--no-final-fallback-inprocess', default=False, show_default=True, help='After exhausting retries, attempt to construct the failed job in-process (sequentially, without Ray). Use with caution on HPC.')
+@click.option('--submit-sleep-seconds', type=float, default=0.0, show_default=True, help='Optional sleep between submissions (and after completions) to throttle job launch rate.')
+@click.option('--skip-failed-jobs/--no-skip-failed-jobs', default=False, show_default=True, help='If enabled, skip jobs that still fail after retries/fallback, and continue the run.')
 
 def phylo_superscape(sequences,
                      output,
@@ -138,6 +140,8 @@ def phylo_superscape(sequences,
                      min_meta_cpu_chains,
                      retry_delay_seconds,
                      final_fallback_inprocess,
+                     submit_sleep_seconds,
+                     skip_failed_jobs,
                      sequential_construction,
                      log_file,
                      log_level,
@@ -526,6 +530,8 @@ def phylo_superscape(sequences,
             _min_inflight=min_meta_cpu_chains,
             _retry_delay=retry_delay_seconds,
             _final_fallback_inprocess=final_fallback_inprocess,
+            _submit_sleep=submit_sleep_seconds,
+            _skip_failed_jobs=skip_failed_jobs,
             **sampler_kwargs
         )
 

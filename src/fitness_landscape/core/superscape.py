@@ -1062,6 +1062,8 @@ class FitnessSuperscape:
                                     _min_inflight: int = 1,
                                     _retry_delay: float = 0.0,
                                     _final_fallback_inprocess: bool = False,
+                                    _submit_sleep: float = 0.0,
+                                    _skip_failed_jobs: bool = False,
                                     **sampler_kwargs: Any) -> "FitnessSuperscape":
         """
         Streaming variant of parallel construction. Consumes an iterator of
@@ -1097,6 +1099,7 @@ class FitnessSuperscape:
             _min_inflight = 1
         inflight: dict[Any, dict] = {}
         landscapes: list[Union[FitnessLandscape, DirectedFitnessLandscape]] = []
+        skipped_jobs: list[dict] = []
         job_index = 0
         last_ckpt = 0.0
         t_start = _time.perf_counter()
@@ -1187,6 +1190,11 @@ class FitnessSuperscape:
                 inflight[ref] = {"idx": job_index, "ts": _time.perf_counter(), "summary": _job_summary(job), "job": job, "retries": 0}
                 job_index += 1
                 submitted += 1
+                if _submit_sleep and _submit_sleep > 0:
+                    try:
+                        _time.sleep(float(_submit_sleep))
+                    except Exception:
+                        pass
             return submitted
 
         # Prime submissions
@@ -1265,6 +1273,15 @@ class FitnessSuperscape:
                             # give up and re-raise original
                             raise
                     else:
+                        if _skip_failed_jobs:
+                            # Record and continue
+                            try:
+                                skipped_jobs.append(info)
+                            except Exception:
+                                pass
+                            if _show_progress:
+                                _logger.warning('skipping failed job idx=%s summary=%s after retries/fallback', info.get('idx'), info.get('summary'))
+                            continue
                         raise
                 landscapes.append(L)
                 if _show_progress:
@@ -1281,12 +1298,17 @@ class FitnessSuperscape:
                     if _show_progress:
                         _logger.info('stream barrier passed; continuing submissions')
                     pending_barrier = False
+                if _submit_sleep and _submit_sleep > 0:
+                    try:
+                        _time.sleep(float(_submit_sleep))
+                    except Exception:
+                        pass
                 _submit_next(batch=1)
                 # lightweight checkpoint
                 if ckpt_path and now - last_ckpt >= 300:
                     try:
                         with open(ckpt_path, 'wb') as f:
-                            pickle.dump({'landscapes': landscapes, 'done_count': len(landscapes), 'ts': now}, f)
+                            pickle.dump({'landscapes': landscapes, 'done_count': len(landscapes), 'ts': now, 'skipped_jobs': skipped_jobs}, f)
                         last_ckpt = now
                         if _show_progress:
                             _logger.info('checkpoint written: %s', ckpt_path)
@@ -1302,9 +1324,12 @@ class FitnessSuperscape:
                     elapsed = _time.perf_counter() - t_start
                     _logger.info('stream heartbeat: %d completed inflight=%d elapsed=%.1fs%s', len(landscapes), len(inflight), elapsed, rss)
 
-        return cls(
+        result = cls(
             landscapes=landscapes,
             posterior_prob_cutoff=posterior_prob_cutoff,
             _show_progress=_show_progress,
             **sampler_kwargs,
         )
+        if _show_progress and skipped_jobs:
+            _logger.warning('completed with %d skipped jobs', len(skipped_jobs))
+        return result
