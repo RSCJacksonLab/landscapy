@@ -20,8 +20,10 @@ except Exception:
 import piqtree
 from piqtree import model_finder
 import math
+import sys
 import os
 import tempfile
+import subprocess as _subprocess
 from ..core.sequence import (
     BaseNumpySequence,
     SoftSequence
