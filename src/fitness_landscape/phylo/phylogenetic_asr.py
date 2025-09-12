@@ -226,33 +226,78 @@ class ASRConstructor:
                         pass
             except Exception:
                 pass
-            try:
-                phylogenetic_tree = _try_build(model)
-            except Exception as e:
-                primary_err = e
-                # Fallback 1: retry with first provided model or LG
+            # Optional process isolation to avoid native state leaks across runs
+            if os.environ.get('FITNESS_LANDSCAPE_IQTREE_SUBPROC', '').lower() in {'1','true','yes'}:
+                aln_fp = os.path.join(tmpdir, 'alignment_gapped.fasta')
+                out_pkl = os.path.join(tmpdir, 'tree.pkl')
+                code = (
+                    "import sys, pickle; "
+                    "import piqtree; "
+                    "from cogent3 import load_aligned_seqs; "
+                    "aln=load_aligned_seqs(sys.argv[1], moltype='protein'); "
+                    "model=sys.argv[2]; "
+                    "try:\n"
+                    "    t=piqtree.build_tree(aln, model, rand_seed=1)\n"
+                    "except TypeError:\n"
+                    "    t=piqtree.build_tree(aln, model)\n"
+                    "with open(sys.argv[3],'wb') as f: pickle.dump(t,f)"
+                )
+                child_env = os.environ.copy()
+                child_env.update(env_cap)
                 try:
-                    first = str(replacement_matrix[0]) if replacement_matrix else 'LG'
-                    phylogenetic_tree = _try_build(first)
-                except Exception as e2:
-                    # Provide detailed error context including original exceptions
-                    details = []
-                    details.append(f"primary model={model!r} error={type(primary_err).__name__}: {primary_err}")
-                    details.append(f"fallback model={first!r} error={type(e2).__name__}: {e2}")
-                    pv = getattr(piqtree, '__version__', '?')
-                    details.append(f"piqtree_version={pv}")
-                    details.append("Set FITNESS_LANDSCAPE_IQTREE_LOG_DIR to preserve IQ-TREE logs for debugging")
-                    msg = (
-                        "IQ-TREE (piqtree) tree building failed.\n" +
-                        "\n".join(details)
-                    )
-                    # Persist error text to the log directory for inspection
+                    _subprocess.check_call([os.environ.get('PYTHON', sys.executable), '-c', code, aln_fp, str(model), out_pkl], env=child_env)
+                    with open(out_pkl, 'rb') as f:
+                        phylogenetic_tree = pickle.load(f)
+                except Exception as e:
+                    primary_err = e
+                    # Fallback: try with the first provided model or LG
                     try:
-                        with open(os.path.join(tmpdir, 'error.txt'), 'w') as _ef:
-                            _ef.write(msg)
-                    except Exception:
-                        pass
-                    raise RuntimeError(msg) from e2
+                        first = str(replacement_matrix[0]) if replacement_matrix else 'LG'
+                        _subprocess.check_call([os.environ.get('PYTHON', sys.executable), '-c', code, aln_fp, first, out_pkl], env=child_env)
+                        with open(out_pkl, 'rb') as f:
+                            phylogenetic_tree = pickle.load(f)
+                    except Exception as e2:
+                        details = []
+                        details.append(f"primary model={model!r} error={type(primary_err).__name__}: {primary_err}")
+                        details.append(f"fallback model={first!r} error={type(e2).__name__}: {e2}")
+                        pv = getattr(piqtree, '__version__', '?')
+                        details.append(f"piqtree_version={pv}")
+                        details.append("Set FITNESS_LANDSCAPE_IQTREE_LOG_DIR to preserve IQ-TREE logs for debugging")
+                        msg = ("IQ-TREE (piqtree) tree building failed.\n" + "\n".join(details))
+                        try:
+                            with open(os.path.join(tmpdir, 'error.txt'), 'w') as _ef:
+                                _ef.write(msg)
+                        except Exception:
+                            pass
+                        raise RuntimeError(msg) from e2
+            else:
+                try:
+                    phylogenetic_tree = _try_build(model)
+                except Exception as e:
+                    primary_err = e
+                    # Fallback 1: retry with first provided model or LG
+                    try:
+                        first = str(replacement_matrix[0]) if replacement_matrix else 'LG'
+                        phylogenetic_tree = _try_build(first)
+                    except Exception as e2:
+                        # Provide detailed error context including original exceptions
+                        details = []
+                        details.append(f"primary model={model!r} error={type(primary_err).__name__}: {primary_err}")
+                        details.append(f"fallback model={first!r} error={type(e2).__name__}: {e2}")
+                        pv = getattr(piqtree, '__version__', '?')
+                        details.append(f"piqtree_version={pv}")
+                        details.append("Set FITNESS_LANDSCAPE_IQTREE_LOG_DIR to preserve IQ-TREE logs for debugging")
+                        msg = (
+                            "IQ-TREE (piqtree) tree building failed.\n" +
+                            "\n".join(details)
+                        )
+                        # Persist error text to the log directory for inspection
+                        try:
+                            with open(os.path.join(tmpdir, 'error.txt'), 'w') as _ef:
+                                _ef.write(msg)
+                        except Exception:
+                            pass
+                        raise RuntimeError(msg) from e2
         finally:
             # Restore environment and working directory; cleanup temp dir
             try:
