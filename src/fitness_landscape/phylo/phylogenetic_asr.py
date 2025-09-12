@@ -64,7 +64,8 @@ class ASRConstructor:
                 model_fitting: bool = False,
                 replacement_matrix: List = ['NQ.pfam'],
                 _reconstruct_ancestral_states: bool = True,
-                _log_progress: bool = False) -> None:
+                _log_progress: bool = False,
+                _backend: str = 'iqtree') -> None:
 
         # Load alignment
         if isinstance(alignment, Path):
@@ -88,10 +89,11 @@ class ASRConstructor:
         for node, arr in zip(self.tip_names, self._boolean_gap_alignment):
             self.boolean_gap_alignment[node] = arr
 
-        # If no phylogenetic tree, infer one in piqtree.
+        # If no phylogenetic tree, infer one in selected backend.
         if phylogenetic_tree is None:
             self.build_tree(replacement_matrix=replacement_matrix,
-                            model_fitting=model_fitting)
+                            model_fitting=model_fitting,
+                            _backend=_backend)
         
         elif phylogenetic_tree is not None:
             
@@ -112,7 +114,8 @@ class ASRConstructor:
     def build_tree(self,
                    replacement_matrix: List[str] = ['NQ.pfam'],
                    model_fitting: bool = True,
-                   _model_override: str = None) -> None: 
+                   _model_override: str = None,
+                   _backend: str = 'iqtree') -> None: 
         """
         Method to construct a phylogenetic tree using the piqtree
         Python binding.
@@ -131,14 +134,28 @@ class ASRConstructor:
         if not hasattr(self, 'alignment'):
             raise ValueError('expected alignment attribute.')
         
-        # Keep alignment as-is for maximum compatibility with IQ-TREE on tiny inputs
-        
-        # Keep call minimal; do not override threading env here
+        # Keep alignment as-is for maximum compatibility.
 
         import logging as _logging
         _logger = _logging.getLogger('fitness_landscape')
         if self._log_progress:
             _logger.info('ASR.build_tree: start (models=%s, fit=%s)', replacement_matrix, model_fitting)
+
+        # If requested, use a pure-Python NJ backend to avoid native IQ-TREE
+        _backend = (_backend or 'iqtree').lower()
+        if _backend == 'nj':
+            try:
+                nj = get_app('nj')
+                phylogenetic_tree = nj(self.alignment)
+                self.phylogenetic_tree = phylogenetic_tree
+                if self._log_progress:
+                    _logger.info('ASR.build_tree: complete (backend=nj)')
+                return
+            except Exception as e:
+                # Fall through to IQ-TREE if NJ fails
+                if self._log_progress:
+                    _logger.warning('ASR.build_tree: nj backend failed (%r); falling back to iqtree', e)
+                _backend = 'iqtree'
         if _model_override is not None:
             # Expect a string model spec for newer piqtree; coerce if needed
             model = str(_model_override)
@@ -177,9 +194,27 @@ class ASRConstructor:
         old_env = {k: os.environ.get(k) for k in env_cap}
         os.environ.update(env_cap)
 
+        # Choose working directory for IQ-TREE logs
         cwd0 = os.getcwd()
-        tmp_ctx = tempfile.TemporaryDirectory(prefix='iqtree_run_')
-        tmpdir = tmp_ctx.name
+        _cleanup_tmp = True
+        log_root = os.environ.get('FITNESS_LANDSCAPE_IQTREE_LOG_DIR')
+        if log_root:
+            try:
+                os.makedirs(log_root, exist_ok=True)
+                tag = f"iqtree_run_{int(os.getpid())}_{int(np.random.randint(1e9))}"
+                tmpdir = os.path.join(log_root, tag)
+                os.makedirs(tmpdir, exist_ok=True)
+                _cleanup_tmp = False
+                if self._log_progress:
+                    _logger.info('ASR.build_tree: logging IQ-TREE run to %s', tmpdir)
+            except Exception:
+                # Fall back to temporary directory if creation fails
+                tmp_ctx = tempfile.TemporaryDirectory(prefix='iqtree_run_')
+                tmpdir = tmp_ctx.name
+                _cleanup_tmp = True
+        else:
+            tmp_ctx = tempfile.TemporaryDirectory(prefix='iqtree_run_')
+            tmpdir = tmp_ctx.name
         primary_err = None
         try:
             os.chdir(tmpdir)
@@ -215,10 +250,12 @@ class ASRConstructor:
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
-            try:
-                tmp_ctx.cleanup()
-            except Exception:
-                pass
+            # Only cleanup if we created a temporary directory
+            if _cleanup_tmp:
+                try:
+                    tmp_ctx.cleanup()
+                except Exception:
+                    pass
 
         self.phylogenetic_tree = phylogenetic_tree
         if self._log_progress:

@@ -1148,6 +1148,7 @@ def create_phylo_graph(sequences: Union[Path, Alignment],
                        model_fitting: bool = True,
                        _log_progress: bool = False,
                        _nested_parallel: bool = False,
+                       phylo_backend: str = 'iqtree',
                        *,
                        _compute_hamming_edges: bool = True,
                        _lightweight_nodes: bool = False,
@@ -1177,10 +1178,30 @@ def create_phylo_graph(sequences: Union[Path, Alignment],
     G : nx.Graph
         The undirected graph output.
     """
+    # Auto backend selection: prefer NJ for tiny windows or duplicate sequences
+    _backend_sel = (phylo_backend or 'iqtree').lower()
+    if _backend_sel == 'auto':
+        try:
+            if isinstance(sequences, Alignment):
+                names = list(sequences.names)
+                n = len(names)
+                # detect duplicate sequence content
+                seqs = [str(sequences.get_gapped_seq(nm)) for nm in names]
+                has_dupes = (len(set(seqs)) != len(seqs))
+                if n <= 24 or has_dupes:
+                    _backend_sel = 'nj'
+                else:
+                    _backend_sel = 'iqtree'
+            else:
+                _backend_sel = 'iqtree'
+        except Exception:
+            _backend_sel = 'iqtree'
+
     constructor = ASRConstructor(sequences,
-                                 replacement_matrix = replacement_matrix,
-                                 model_fitting = model_fitting,
-                                 _log_progress=_log_progress)
+                                  replacement_matrix = replacement_matrix,
+                                  model_fitting = model_fitting,
+                                  _log_progress=_log_progress,
+                                  _backend=_backend_sel)
     
     graph = constructor.construct_dag(graph_type='undirected')
 

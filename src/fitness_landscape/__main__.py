@@ -43,6 +43,7 @@ def cli():
 @click.option('--plm-device', required=False, type=str, default=None, help='Device for PLM embeddings (e.g., cpu or cuda).')
 @click.option('--replacement-matrix', required=False, multiple=True, default=['LG'], help='Replacement matrix/matrices for IQ-TREE model selection (e.g., LG). Can be provided multiple times.')
 @click.option('--model-fitting/--no-model-fitting', default=False, help='Whether to perform IQ-TREE model selection across the provided replacement matrices.')
+@click.option('--phylo-backend', required=False, type=click.Choice(['iqtree','nj','auto']), default='iqtree', help='Phylogeny builder backend. iqtree uses IQ-TREE via piqtree; nj uses neighbor-joining (no native IQ-TREE). auto may pick nj for tiny windows.')
 
 # RJMCMC sampling
 @click.option('--bernoulli-beta-alpha0', required=False, type=float, default=1, help='Bernoulli-Beta prior alpha0 parameter.')
@@ -83,6 +84,7 @@ def cli():
 @click.option('--drop-all-gap-columns/--keep-all-gap-columns', default=True, help='Drop columns that are entirely gaps in each alignment.')
 @click.option('--max-gap-frac', required=False, type=float, default=None, help='If set in [0,1], drop columns with gap fraction strictly greater than this threshold.')
 @click.option('--max-seq-gap-frac', required=False, type=float, default=None, help='If set in [0,1], drop any sequence whose gap fraction exceeds this threshold (e.g., 0.5 drops sequences >50% gaps).')
+@click.option('--drop-duplicate-seqs/--keep-duplicate-seqs', default=True, help='Drop duplicate sequences (by gapped string) within each alignment/sub-alignment/block.')
 # Ray worker lifecycle
 @click.option('--ray-fresh-worker/--no-ray-fresh-worker', default=False, help='If set, each Ray job uses a fresh worker (max_calls=1) to avoid native library state reuse.')
 # Streaming memory control
@@ -108,6 +110,7 @@ def phylo_superscape(sequences,
                      plm_device,
                      replacement_matrix,
                      model_fitting,
+                     phylo_backend,
                      bernoulli_beta_alpha0,
                      bernoulli_beta_alpha1,
                      rjmcmc_alpha,
@@ -128,6 +131,7 @@ def phylo_superscape(sequences,
                      drop_all_gap_columns,
                      max_gap_frac,
                      max_seq_gap_frac,
+                     drop_duplicate_seqs,
                      ray_fresh_worker,
                      max_seqs_per_block,
                      auto_backoff,
@@ -241,6 +245,36 @@ def phylo_superscape(sequences,
         new_map = {n: str(alignment.get_gapped_seq(n)) for n in keep_names}
         return make_aligned_seqs(new_map, moltype='protein')
 
+    def _dedupe_alignment(alignment):
+        """Drop duplicate sequences by gapped string, keeping first occurrence."""
+        if not drop_duplicate_seqs or alignment is None:
+            return alignment
+        try:
+            names = list(alignment.names)
+            seqs = [str(alignment.get_gapped_seq(n)) for n in names]
+        except Exception:
+            return alignment
+        if not seqs:
+            return alignment
+        seen = set()
+        kept = []
+        for n, s in zip(names, seqs):
+            if s in seen:
+                continue
+            seen.add(s)
+            kept.append(n)
+        if len(kept) == len(names):
+            return alignment
+        if not kept:
+            return None
+        new_map = {n: str(alignment.get_gapped_seq(n)) for n in kept}
+        deduped = make_aligned_seqs(new_map, moltype='protein')
+        try:
+            logger.info('Removed %d duplicate sequences (by gapped content).', len(names) - len(kept))
+        except Exception:
+            pass
+        return deduped
+
     def _iter_sub_alignments():
         from fitness_landscape.utils import iter_moving_window_alignment
         if os.path.isdir(sequences):
@@ -259,6 +293,10 @@ def phylo_superscape(sequences,
                 if alignment is None:
                     logger.warning('Dropped alignment %s due to excessive sequence gaps.', alignment_path)
                     continue
+                alignment = _dedupe_alignment(alignment)
+                if alignment is None:
+                    logger.warning('Dropped alignment %s after duplicate removal (no sequences remain).', alignment_path)
+                    continue
                 logger.info(f'Loaded alignment from {alignment_path}')
                 if fan_alignment:
                     if not all([fan_alignment_window, fan_alignment_overlap]):
@@ -266,6 +304,7 @@ def phylo_superscape(sequences,
                     for sub in iter_moving_window_alignment(alignment, fan_alignment_window, fan_alignment_overlap):
                         sub2 = _trim_alignment(sub)
                         sub2 = _drop_gappy_sequences(sub2)
+                        sub2 = _dedupe_alignment(sub2)
                         if sub2 is None:
                             continue
                         yield sub2
@@ -282,6 +321,10 @@ def phylo_superscape(sequences,
             if alignment is None:
                 logger.warning('Input alignment dropped due to excessive sequence gaps.')
                 return
+            alignment = _dedupe_alignment(alignment)
+            if alignment is None:
+                logger.warning('Input alignment dropped after duplicate removal (no sequences remain).')
+                return
             logger.info(f'Loaded alignment from {sequences}')
             if fan_alignment:
                 if not all([fan_alignment_window, fan_alignment_overlap]):
@@ -289,6 +332,7 @@ def phylo_superscape(sequences,
                 for sub in iter_moving_window_alignment(alignment, fan_alignment_window, fan_alignment_overlap):
                     sub2 = _trim_alignment(sub)
                     sub2 = _drop_gappy_sequences(sub2)
+                    sub2 = _dedupe_alignment(sub2)
                     if sub2 is None:
                         continue
                     yield sub2
@@ -323,6 +367,7 @@ def phylo_superscape(sequences,
                     "digraph_type": "phylogenetic",
                     "replacement_matrix": list(replacement_matrix),
                     "model_fitting": model_fitting,
+                    "phylo_backend": phylo_backend,
                     "_compute_phylo_embeddings": compute_phylo_embeddings,
                     "embedding_domain": embedding_domain,
                     # PLM knobs (used when _compute_phylo_embeddings and embedding_domain=plm)
@@ -343,6 +388,7 @@ def phylo_superscape(sequences,
                     "graph_type": "phylogenetic",
                     "replacement_matrix": list(replacement_matrix),
                     "model_fitting": model_fitting,
+                    "phylo_backend": phylo_backend,
                     "_compute_phylo_embeddings": compute_phylo_embeddings,
                     "embedding_domain": embedding_domain,
                     # PLM knobs (used when _compute_phylo_embeddings and embedding_domain=plm)
@@ -367,6 +413,19 @@ def phylo_superscape(sequences,
                 blocks = [names]
 
             for b_idx, block_names in enumerate(blocks):
+                # Dedupe within block by gapped sequence content
+                if drop_duplicate_seqs:
+                    seen = set()
+                    deduped_names = []
+                    for n in block_names:
+                        s = str(alignment.get_gapped_seq(n))
+                        if s in seen:
+                            continue
+                        seen.add(s)
+                        deduped_names.append(n)
+                    if len(deduped_names) != len(block_names):
+                        logger.info('Block %d: removed %d duplicate sequences', b_idx, len(block_names) - len(deduped_names))
+                    block_names = deduped_names
                 block_map = {n: str(alignment.get_gapped_seq(n)) for n in block_names}
                 block_aln = make_aligned_seqs(block_map, moltype='protein')
 
@@ -377,6 +436,7 @@ def phylo_superscape(sequences,
                     for sub in iter_moving_window_alignment(block_aln, fan_alignment_window, fan_alignment_overlap):
                         sub2 = _trim_alignment(sub)
                         sub2 = _drop_gappy_sequences(sub2)
+                        sub2 = _dedupe_alignment(sub2)
                         if sub2 is None:
                             continue
                         yield _emit_job(sub2)
