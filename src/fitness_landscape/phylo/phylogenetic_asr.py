@@ -218,6 +218,33 @@ class ASRConstructor:
         primary_err = None
         try:
             os.chdir(tmpdir)
+            # Persist the current alignment and run metadata for offline debugging
+            try:
+                # Write gapped alignment to FASTA
+                aln_fp = os.path.join(tmpdir, 'alignment_gapped.fasta')
+                with open(aln_fp, 'w') as _f:
+                    for nm in self.tip_names:
+                        seq = str(self.alignment.get_gapped_seq(nm))
+                        _f.write(f">{nm}\n{seq}\n")
+                # Write simple metadata
+                meta_fp = os.path.join(tmpdir, 'run_meta.txt')
+                with open(meta_fp, 'w') as _mf:
+                    _mf.write(f"models={replacement_matrix}\n")
+                    _mf.write(f"model_fitting={model_fitting}\n")
+                    _mf.write(f"backend=iqtree\n")
+                    try:
+                        import piqtree as _pt
+                        _mf.write(f"piqtree_version={getattr(_pt, '__version__', '?')}\n")
+                    except Exception:
+                        pass
+                    _mf.write(f"n_tips={len(self.tip_names)}\n")
+                    try:
+                        first = self.tip_names[0]
+                        _mf.write(f"L={len(str(self.alignment.get_gapped_seq(first)))}\n")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             try:
                 phylogenetic_tree = _try_build(model)
             except Exception as e:
@@ -238,6 +265,12 @@ class ASRConstructor:
                         "IQ-TREE (piqtree) tree building failed.\n" +
                         "\n".join(details)
                     )
+                    # Persist error text to the log directory for inspection
+                    try:
+                        with open(os.path.join(tmpdir, 'error.txt'), 'w') as _ef:
+                            _ef.write(msg)
+                    except Exception:
+                        pass
                     raise RuntimeError(msg) from e2
         finally:
             # Restore environment and working directory; cleanup temp dir
