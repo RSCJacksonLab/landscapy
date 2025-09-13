@@ -153,8 +153,8 @@ class ASRConstructor:
             if _model_override is not None:
                 model = str(_model_override)
             else:
-                # For NJ, use provided model or WAG (WG01) by default to match cogent ASR
-                model = str(replacement_matrix[0]) if replacement_matrix else 'WAG'
+                # For cogent quick_tree backend, default to WG01 (WAG equivalent)
+                model = str(replacement_matrix[0]) if replacement_matrix else 'WG01'
         else:
             if _model_override is not None:
                 # Expect a string model spec for newer piqtree; coerce if needed
@@ -243,35 +243,75 @@ class ASRConstructor:
                         pass
             except Exception:
                 pass
-            # Backend: cogent3 neighbor-joining
+            # Backend: cogent3 neighbor-joining per cookbook
             if backend == 'cogent_nj':
-                # Build NJ tree using cogent3's documented Application API.
-                # 1) Compute empirical-protein distance matrix via substitution_model
-                # 2) Run neighbor-joining via get_app('nj') on that distance matrix
+                # Follow the documented API:
+                #   from cogent3.phylo import nj
+                #   dists = alignment.distance_matrix(calc='WG01')
+                #   tree = nj.nj(dists, show_progress=False)
                 try:
-                    from cogent3.evolve import substitution_model as _sm
-                    # Normalize model to an empirical protein matrix label
-                    mat = str(model).upper() if isinstance(model, str) else 'WAG'
-                    if mat == 'WG01':
-                        mat = 'WAG'
-                    if mat not in {'LG', 'WAG', 'JTT', 'BLOSUM62', 'DAYHOFF'}:
-                        mat = 'WAG'
-                    sm = _sm.EmpiricalProtein(matrix=mat)
-                    dm = sm.make_distance_matrix(self.alignment)
-                    # Official NJ app
-                    nj_app = get_app('nj')
-                    phylogenetic_tree = nj_app(dm)
-                except Exception as e:
-                    primary_err = e
-                    details = [f"cogent_nj error={type(e).__name__}: {e}"]
-                    details.append("Attempted get_app('nj') on EmpiricalProtein distance matrix.")
-                    msg = "Cogent3 NJ tree building failed.\n" + "\n".join(details)
+                    from cogent3.phylo import nj as _c3_nj
+                except Exception as _imp_err:
                     try:
-                        with open(os.path.join(tmpdir, 'error.txt'), 'w') as _ef:
-                            _ef.write(msg)
-                    except Exception:
-                        pass
-                    raise RuntimeError(msg) from e
+                        # Fallback: Application API
+                        nj_app = get_app('nj')
+                        phylogenetic_tree = nj_app(self.alignment)
+                    except Exception as e2:
+                        primary_err = e2
+                        details = [f"cogent_nj error={type(e2).__name__}: {e2}"]
+                        details.append("Attempted imports: 'from cogent3.phylo import nj' and get_app('nj')")
+                        msg = "Cogent3 NJ tree building failed.\n" + "\n".join(details)
+                        try:
+                            with open(os.path.join(tmpdir, 'error.txt'), 'w') as _ef:
+                                _ef.write(msg)
+                        except Exception:
+                            pass
+                        raise RuntimeError(msg) from e2
+                else:
+                    # Build distance matrix using requested/provided model, default WG01
+                    tried = []
+                    mat_candidates = []
+                    mat0 = str(model).upper() if isinstance(model, str) else 'WG01'
+                    if mat0 == 'WAG':
+                        mat0 = 'WG01'
+                    mat_candidates.append(mat0)
+                    # Reasonable fallbacks
+                    for alt in ('WAG', 'LG'):
+                        if alt not in mat_candidates:
+                            mat_candidates.append(alt)
+                    dists = None
+                    last_err = None
+                    for m in mat_candidates:
+                        try:
+                            dists = self.alignment.distance_matrix(calc=m)
+                            used_model = m
+                            break
+                        except Exception as ee:
+                            tried.append(f"calc={m} -> {type(ee).__name__}: {ee}")
+                            last_err = ee
+                    if dists is None:
+                        primary_err = last_err or Exception('unknown distance error')
+                        details = ["Failed to compute distance_matrix with candidates:"] + tried
+                        msg = "Cogent3 NJ distance computation failed.\n" + "\n".join(details)
+                        try:
+                            with open(os.path.join(tmpdir, 'error.txt'), 'w') as _ef:
+                                _ef.write(msg)
+                        except Exception:
+                            pass
+                        raise RuntimeError(msg) from primary_err
+                    try:
+                        phylogenetic_tree = _c3_nj.nj(dists, show_progress=False)
+                    except Exception as e:
+                        primary_err = e
+                        details = [f"cogent_nj error={type(e).__name__}: {e}"]
+                        details.append(f"distance calc used={used_model}")
+                        msg = "Cogent3 NJ tree building failed.\n" + "\n".join(details)
+                        try:
+                            with open(os.path.join(tmpdir, 'error.txt'), 'w') as _ef:
+                                _ef.write(msg)
+                        except Exception:
+                            pass
+                        raise RuntimeError(msg) from e
 
             # Backend: IQ-TREE via piqtree (in-process or subprocess)
             elif os.environ.get('FITNESS_LANDSCAPE_IQTREE_SUBPROC', '').lower() in {'1','true','yes'}:
