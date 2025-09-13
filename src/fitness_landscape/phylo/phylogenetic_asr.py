@@ -245,8 +245,9 @@ class ASRConstructor:
                 pass
             # Backend: cogent3 neighbor-joining
             if backend == 'cogent_nj':
-                # Build NJ tree using the official cogent3 API.
-                # Prefer EmpiricalProtein distance + NJ function; fallback to NJ app.
+                # Build NJ tree using cogent3's documented Application API.
+                # 1) Compute empirical-protein distance matrix via substitution_model
+                # 2) Run neighbor-joining via get_app('nj') on that distance matrix
                 try:
                     from cogent3.evolve import substitution_model as _sm
                     # Normalize model to an empirical protein matrix label
@@ -257,28 +258,13 @@ class ASRConstructor:
                         mat = 'WAG'
                     sm = _sm.EmpiricalProtein(matrix=mat)
                     dm = sm.make_distance_matrix(self.alignment)
-                    # Try multiple known NJ provider locations, else fall back to app
-                    _nj = None
-                    try:
-                        from cogent3.tree import nj as _nj  # modern path
-                    except Exception:
-                        try:
-                            from cogent3.tree.distance import nj as _nj  # alt path
-                        except Exception:
-                            _nj = None
-                    if _nj is not None:
-                        phylogenetic_tree = _nj(dm)
-                    else:
-                        # Use the application interface
-                        try:
-                            nj_app = get_app('nj', distance=mat)
-                        except Exception:
-                            nj_app = get_app('nj')
-                        phylogenetic_tree = nj_app(self.alignment)
+                    # Official NJ app
+                    nj_app = get_app('nj')
+                    phylogenetic_tree = nj_app(dm)
                 except Exception as e:
                     primary_err = e
                     details = [f"cogent_nj error={type(e).__name__}: {e}"]
-                    details.append("Tried: cogent3.tree.nj, cogent3.tree.distance.nj, and get_app('nj')")
+                    details.append("Attempted get_app('nj') on EmpiricalProtein distance matrix.")
                     msg = "Cogent3 NJ tree building failed.\n" + "\n".join(details)
                     try:
                         with open(os.path.join(tmpdir, 'error.txt'), 'w') as _ef:
