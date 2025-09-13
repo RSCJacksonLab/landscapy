@@ -20,6 +20,7 @@ except Exception:
 import piqtree
 from piqtree import model_finder
 import math
+import pickle
 import sys
 import os
 import tempfile
@@ -232,18 +233,22 @@ class ASRConstructor:
             if os.environ.get('FITNESS_LANDSCAPE_IQTREE_SUBPROC', '').lower() in {'1','true','yes'}:
                 aln_fp = os.path.join(tmpdir, 'alignment_gapped.fasta')
                 out_pkl = os.path.join(tmpdir, 'tree.pkl')
-                code = (
-                    "import sys, pickle; "
-                    "import piqtree; "
-                    "from cogent3 import load_aligned_seqs; "
-                    "aln=load_aligned_seqs(sys.argv[1], moltype='protein'); "
-                    "model=sys.argv[2]; "
-                    "try:\n"
-                    "    t=piqtree.build_tree(aln, model, rand_seed=1)\n"
-                    "except TypeError:\n"
-                    "    t=piqtree.build_tree(aln, model)\n"
-                    "with open(sys.argv[3],'wb') as f: pickle.dump(t,f)"
-                )
+                # IMPORTANT: keep compound statements (e.g., try:) on their own line.
+                # Python does not allow a 'try' to follow a semicolon on the same line.
+                code = "\n".join([
+                    "import sys, pickle",
+                    "import piqtree",
+                    "from cogent3 import load_aligned_seqs",
+                    # Read the FASTA we just wrote; be explicit about format for robustness
+                    "aln = load_aligned_seqs(sys.argv[1], moltype='protein', format='fasta')",
+                    "model = sys.argv[2]",
+                    "try:",
+                    "    t = piqtree.build_tree(aln, model, rand_seed=1)",
+                    "except TypeError:",
+                    "    t = piqtree.build_tree(aln, model)",
+                    "with open(sys.argv[3], 'wb') as f:",
+                    "    pickle.dump(t, f)",
+                ])
                 child_env = os.environ.copy()
                 child_env.update(env_cap)
                 try:
