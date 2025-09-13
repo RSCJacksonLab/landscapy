@@ -248,7 +248,10 @@ class ASRConstructor:
                 # Build NJ tree using cogent3 substitution model distances
                 try:
                     from cogent3.evolve import substitution_model as _sm
-                    from cogent3.evolve.tree_distance import nj as _nj
+                    try:
+                        from cogent3.tree import nj as _nj
+                    except Exception:
+                        from cogent3.tree.distance import nj as _nj
                     # Map replacement matrix to cogent3 empirical protein matrix
                     mat = str(model).upper() if isinstance(model, str) else 'WAG'
                     # Accept common aliases; WG01 corresponds to WAG
