@@ -1148,6 +1148,7 @@ def create_phylo_graph(sequences: Union[Path, Alignment],
                        model_fitting: bool = True,
                        _log_progress: bool = False,
                        _nested_parallel: bool = False,
+                       phylo_backend: str = 'iqtree',
                        *,
                        _compute_hamming_edges: bool = True,
                        _lightweight_nodes: bool = False,
@@ -1180,6 +1181,7 @@ def create_phylo_graph(sequences: Union[Path, Alignment],
     constructor = ASRConstructor(sequences,
                                   replacement_matrix = replacement_matrix,
                                   model_fitting = model_fitting,
+                                  phylo_backend=phylo_backend,
                                   _log_progress=_log_progress)
     
     graph = constructor.construct_dag(graph_type='undirected')

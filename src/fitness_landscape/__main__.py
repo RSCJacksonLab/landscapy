@@ -34,6 +34,7 @@ def cli():
 
 # Phylogenetic inference
 @click.option('--directed-landscape', required=False, is_flag=True, default=False, help='Boolean flag to indicate if a directed phylogenetic fitness landscape should be constructed.')
+@click.option('--phylo-backend', 'phylo_backend', required=False, type=click.Choice(['iqtree','cogent_nj']), default='iqtree', help="Backend for tree inference: 'iqtree' (piqtree) or 'cogent_nj' (cogent3 neighbor-joining).")
 # Embedding controls (harmonized with diffusion CLI)
 @click.option('--compute-phylo-embeddings/--no-compute-phylo-embeddings', default=True, help='Compute embeddings for extant and ancestral sequences to attach to nodes.')
 @click.option('--compute-embeddings/--no-compute-embeddings', 'compute_phylo_embeddings', default=True, help='Alias of --compute-phylo-embeddings for consistency with diffusion CLI.')
@@ -104,6 +105,7 @@ def phylo_superscape(sequences,
                      fan_alignment_window,
                      fan_alignment_overlap,
                      directed_landscape,
+                     phylo_backend,
                      compute_phylo_embeddings,
                      embedding_domain,
                      plm_model_name,
@@ -375,6 +377,7 @@ def phylo_superscape(sequences,
                     "digraph_type": "phylogenetic",
                     "replacement_matrix": list(replacement_matrix),
                     "model_fitting": model_fitting,
+                    "phylo_backend": phylo_backend,
                     
                     "_compute_phylo_embeddings": compute_phylo_embeddings,
                     "embedding_domain": embedding_domain,
@@ -400,6 +403,7 @@ def phylo_superscape(sequences,
                     "graph_type": "phylogenetic",
                     "replacement_matrix": list(replacement_matrix),
                     "model_fitting": model_fitting,
+                    "phylo_backend": phylo_backend,
                     
                     "_compute_phylo_embeddings": compute_phylo_embeddings,
                     "embedding_domain": embedding_domain,
@@ -548,6 +552,7 @@ def phylo_superscape(sequences,
 # Phylogenetic inference controls
 @click.option('--replacement-matrix', multiple=True, default=['LG'], help='Replacement matrix/matrices for IQ-TREE model selection (e.g., LG). Can be provided multiple times.')
 @click.option('--model-fitting/--no-model-fitting', default=True, help='Whether to fit and select the best model (AICc) from the provided set.')
+@click.option('--phylo-backend', 'phylo_backend', type=click.Choice(['iqtree','cogent_nj']), default='iqtree', show_default=True, help="Backend for tree inference: 'iqtree' (piqtree) or 'cogent_nj' (cogent3 neighbor-joining).")
 
 # Embeddings for node attributes
 @click.option('--compute-phylo-embeddings/--no-compute-phylo-embeddings', default=True, help='Compute embeddings for extant and ancestral sequences to attach to nodes.')
@@ -572,6 +577,7 @@ def phylo_landscape(sequences,
                     output,
                     replacement_matrix,
                     model_fitting,
+                    phylo_backend,
                     compute_phylo_embeddings,
                     embedding_domain,
                     plm_model_name,
@@ -620,6 +626,7 @@ def phylo_landscape(sequences,
         embedding_domain=embedding_domain,
         replacement_matrix=list(replacement_matrix),
         model_fitting=model_fitting,
+        phylo_backend=phylo_backend,
         model_name=plm_model_name,
         batch_size=plm_batch_size,
         device=plm_device,

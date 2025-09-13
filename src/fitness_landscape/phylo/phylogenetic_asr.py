@@ -66,6 +66,7 @@ class ASRConstructor:
                 phylogenetic_tree: Union[PhyloNode, Path] = None,
                 model_fitting: bool = False,
                 replacement_matrix: List = ['NQ.pfam'],
+                phylo_backend: str = 'iqtree',
                 _reconstruct_ancestral_states: bool = True,
                 _log_progress: bool = False) -> None:
 
@@ -94,7 +95,8 @@ class ASRConstructor:
         # If no phylogenetic tree, infer one using IQ-TREE via piqtree.
         if phylogenetic_tree is None:
             self.build_tree(replacement_matrix=replacement_matrix,
-                            model_fitting=model_fitting)
+                            model_fitting=model_fitting,
+                            phylo_backend=phylo_backend)
         
         elif phylogenetic_tree is not None:
             
@@ -115,7 +117,8 @@ class ASRConstructor:
     def build_tree(self,
                    replacement_matrix: List[str] = ['NQ.pfam'],
                    model_fitting: bool = True,
-                   _model_override: str = None) -> None: 
+                   _model_override: str = None,
+                   phylo_backend: str = 'iqtree') -> None: 
         """
         Method to construct a phylogenetic tree using the piqtree
         Python binding.
@@ -140,24 +143,35 @@ class ASRConstructor:
         _logger = _logging.getLogger('fitness_landscape')
         if self._log_progress:
             _logger.info('ASR.build_tree: start (models=%s, fit=%s)', replacement_matrix, model_fitting)
-        if _model_override is not None:
-            # Expect a string model spec for newer piqtree; coerce if needed
-            model = str(_model_override)
-        
-        elif model_fitting:
-            # Try model finding; if it fails (e.g., tiny datasets), fall back to first provided model
-            try:
-                result = model_finder(self.alignment, model_set=set(replacement_matrix))
-                # Choose model by AICc; newer piqtree returns a string
-                model = str(getattr(result, 'best_aicc', result))
-            except Exception:
-                model = str(replacement_matrix[0] if replacement_matrix else 'LG')
-        
-        # Use just the provided replacement matrix.
+        # Normalize backend selection
+        backend = (phylo_backend or 'iqtree').lower()
+        if backend not in {'iqtree', 'cogent_nj'}:
+            raise ValueError(f"Unsupported phylo_backend={phylo_backend!r}; use 'iqtree' or 'cogent_nj'.")
+
+        # Determine model string depending on backend
+        if backend == 'cogent_nj':
+            if _model_override is not None:
+                model = str(_model_override)
+            else:
+                # For NJ, use provided model or WAG (WG01) by default to match cogent ASR
+                model = str(replacement_matrix[0]) if replacement_matrix else 'WAG'
         else:
-            if len(replacement_matrix) > 1:
-                raise ValueError('Expected only single replacement matrix.')
-            model = str(replacement_matrix[0])
+            if _model_override is not None:
+                # Expect a string model spec for newer piqtree; coerce if needed
+                model = str(_model_override)
+            elif model_fitting:
+                # Try model finding; if it fails (e.g., tiny datasets), fall back to first provided model
+                try:
+                    result = model_finder(self.alignment, model_set=set(replacement_matrix))
+                    # Choose model by AICc; newer piqtree returns a string
+                    model = str(getattr(result, 'best_aicc', result))
+                except Exception:
+                    model = str(replacement_matrix[0] if replacement_matrix else 'LG')
+            else:
+                # Use just the provided replacement matrix.
+                if len(replacement_matrix) > 1:
+                    raise ValueError('Expected only single replacement matrix.')
+                model = str(replacement_matrix[0])
 
         # Minimal wrapper around piqtree.build_tree
         def _try_build(_model: str, *_):
@@ -215,7 +229,7 @@ class ASRConstructor:
                 with open(meta_fp, 'w') as _mf:
                     _mf.write(f"models={replacement_matrix}\n")
                     _mf.write(f"model_fitting={model_fitting}\n")
-                    _mf.write(f"backend=iqtree\n")
+                    _mf.write(f"backend={backend}\n")
                     try:
                         import piqtree as _pt
                         _mf.write(f"piqtree_version={getattr(_pt, '__version__', '?')}\n")
@@ -229,8 +243,37 @@ class ASRConstructor:
                         pass
             except Exception:
                 pass
-            # Optional process isolation to avoid native state leaks across runs
-            if os.environ.get('FITNESS_LANDSCAPE_IQTREE_SUBPROC', '').lower() in {'1','true','yes'}:
+            # Backend: cogent3 neighbor-joining
+            if backend == 'cogent_nj':
+                # Build NJ tree using cogent3 substitution model distances
+                try:
+                    from cogent3.evolve import substitution_model as _sm
+                    from cogent3.evolve.tree_distance import nj as _nj
+                    # Map replacement matrix to cogent3 empirical protein matrix
+                    mat = str(model).upper() if isinstance(model, str) else 'WAG'
+                    # Accept common aliases; WG01 corresponds to WAG
+                    if mat == 'WG01':
+                        mat = 'WAG'
+                    if mat not in {'LG', 'WAG', 'JTT', 'BLOSUM62', 'DAYHOFF'}:
+                        # Default to WAG to align with cogent ASR default (WG01)
+                        mat = 'WAG'
+                    sm = _sm.EmpiricalProtein(matrix=mat)
+                    dm = sm.make_distance_matrix(self.alignment)
+                    phylogenetic_tree = _nj(dm)
+                except Exception as e:
+                    primary_err = e
+                    details = [f"cogent_nj error={type(e).__name__}: {e}"]
+                    details.append("Ensure cogent3 empirical protein models are available.")
+                    msg = "Cogent3 NJ tree building failed.\n" + "\n".join(details)
+                    try:
+                        with open(os.path.join(tmpdir, 'error.txt'), 'w') as _ef:
+                            _ef.write(msg)
+                    except Exception:
+                        pass
+                    raise RuntimeError(msg) from e
+
+            # Backend: IQ-TREE via piqtree (in-process or subprocess)
+            elif os.environ.get('FITNESS_LANDSCAPE_IQTREE_SUBPROC', '').lower() in {'1','true','yes'}:
                 aln_fp = os.path.join(tmpdir, 'alignment_gapped.fasta')
                 out_pkl = os.path.join(tmpdir, 'tree.pkl')
                 # IMPORTANT: keep compound statements (e.g., try:) on their own line.
