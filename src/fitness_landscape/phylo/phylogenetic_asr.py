@@ -245,28 +245,40 @@ class ASRConstructor:
                 pass
             # Backend: cogent3 neighbor-joining
             if backend == 'cogent_nj':
-                # Build NJ tree using cogent3 substitution model distances
+                # Build NJ tree using the official cogent3 API.
+                # Prefer EmpiricalProtein distance + NJ function; fallback to NJ app.
                 try:
                     from cogent3.evolve import substitution_model as _sm
-                    try:
-                        from cogent3.tree import nj as _nj
-                    except Exception:
-                        from cogent3.tree.distance import nj as _nj
-                    # Map replacement matrix to cogent3 empirical protein matrix
+                    # Normalize model to an empirical protein matrix label
                     mat = str(model).upper() if isinstance(model, str) else 'WAG'
-                    # Accept common aliases; WG01 corresponds to WAG
                     if mat == 'WG01':
                         mat = 'WAG'
                     if mat not in {'LG', 'WAG', 'JTT', 'BLOSUM62', 'DAYHOFF'}:
-                        # Default to WAG to align with cogent ASR default (WG01)
                         mat = 'WAG'
                     sm = _sm.EmpiricalProtein(matrix=mat)
                     dm = sm.make_distance_matrix(self.alignment)
-                    phylogenetic_tree = _nj(dm)
+                    # Try multiple known NJ provider locations, else fall back to app
+                    _nj = None
+                    try:
+                        from cogent3.tree import nj as _nj  # modern path
+                    except Exception:
+                        try:
+                            from cogent3.tree.distance import nj as _nj  # alt path
+                        except Exception:
+                            _nj = None
+                    if _nj is not None:
+                        phylogenetic_tree = _nj(dm)
+                    else:
+                        # Use the application interface
+                        try:
+                            nj_app = get_app('nj', distance=mat)
+                        except Exception:
+                            nj_app = get_app('nj')
+                        phylogenetic_tree = nj_app(self.alignment)
                 except Exception as e:
                     primary_err = e
                     details = [f"cogent_nj error={type(e).__name__}: {e}"]
-                    details.append("Ensure cogent3 empirical protein models are available.")
+                    details.append("Tried: cogent3.tree.nj, cogent3.tree.distance.nj, and get_app('nj')")
                     msg = "Cogent3 NJ tree building failed.\n" + "\n".join(details)
                     try:
                         with open(os.path.join(tmpdir, 'error.txt'), 'w') as _ef:
