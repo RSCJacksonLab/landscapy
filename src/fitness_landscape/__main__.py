@@ -345,6 +345,114 @@ def phylo_superscape(sequences,
             else:
                 yield alignment
 
+    def _estimate_total_jobs():
+        """Estimate total number of construction jobs for progress logging.
+        Counts blocks and, if fanning is enabled, windows per block after
+        applying the same trimming and deduplication as the emitter.
+        """
+        total = 0
+        if os.path.isdir(sequences):
+            fasta_files = [f for f in os.listdir(sequences) if f.endswith(('.fasta', '.fa', '.fas'))]
+            for fasta_file in fasta_files:
+                alignment_path = os.path.join(sequences, fasta_file)
+                try:
+                    alignment = load_aligned_seqs(alignment_path, moltype='protein')
+                    alignment = sanitize_alignment(alignment)
+                    alignment = _trim_alignment(alignment)
+                    if alignment is None:
+                        continue
+                    alignment = _drop_gappy_sequences(alignment)
+                    if alignment is None:
+                        continue
+                    alignment = _dedupe_alignment(alignment)
+                    if alignment is None:
+                        continue
+                except Exception:
+                    continue
+                names = list(alignment.names)
+                if max_seqs_per_block and max_seqs_per_block > 0 and len(names) > max_seqs_per_block:
+                    blocks = [names[i:i+max_seqs_per_block] for i in range(0, len(names), max_seqs_per_block)]
+                else:
+                    blocks = [names]
+                for block_names in blocks:
+                    if drop_duplicate_seqs:
+                        seen = set(); deduped_names = []
+                        for n in block_names:
+                            s = str(alignment.get_gapped_seq(n))
+                            if s in seen:
+                                continue
+                            seen.add(s)
+                            deduped_names.append(n)
+                        block_names = deduped_names
+                    block_map = {n: str(alignment.get_gapped_seq(n)) for n in block_names}
+                    block_aln = make_aligned_seqs(block_map, moltype='protein')
+                    if fan_alignment:
+                        try:
+                            wins = moving_window_alignment(block_aln, fan_alignment_window, fan_alignment_overlap)
+                            # mirror downstream trimming
+                            count = 0
+                            for sub in wins:
+                                sub2 = _trim_alignment(sub)
+                                sub2 = _drop_gappy_sequences(sub2)
+                                sub2 = _dedupe_alignment(sub2)
+                                if sub2 is None:
+                                    continue
+                                count += 1
+                            total += count
+                        except Exception:
+                            total += 1
+                    else:
+                        total += 1
+        else:
+            try:
+                alignment = load_aligned_seqs(sequences, moltype='protein')
+                alignment = sanitize_alignment(alignment)
+                alignment = _trim_alignment(alignment)
+                if alignment is None:
+                    return 0
+                alignment = _drop_gappy_sequences(alignment)
+                if alignment is None:
+                    return 0
+                alignment = _dedupe_alignment(alignment)
+                if alignment is None:
+                    return 0
+            except Exception:
+                return 0
+            names = list(alignment.names)
+            if max_seqs_per_block and max_seqs_per_block > 0 and len(names) > max_seqs_per_block:
+                blocks = [names[i:i+max_seqs_per_block] for i in range(0, len(names), max_seqs_per_block)]
+            else:
+                blocks = [names]
+            for block_names in blocks:
+                if drop_duplicate_seqs:
+                    seen = set(); deduped_names = []
+                    for n in block_names:
+                        s = str(alignment.get_gapped_seq(n))
+                        if s in seen:
+                            continue
+                        seen.add(s)
+                        deduped_names.append(n)
+                    block_names = deduped_names
+                block_map = {n: str(alignment.get_gapped_seq(n)) for n in block_names}
+                block_aln = make_aligned_seqs(block_map, moltype='protein')
+                if fan_alignment:
+                    try:
+                        wins = moving_window_alignment(block_aln, fan_alignment_window, fan_alignment_overlap)
+                        count = 0
+                        for sub in wins:
+                            sub2 = _trim_alignment(sub)
+                            sub2 = _drop_gappy_sequences(sub2)
+                            sub2 = _dedupe_alignment(sub2)
+                            if sub2 is None:
+                                continue
+                            count += 1
+                        total += count
+                    except Exception:
+                        total += 1
+                else:
+                    total += 1
+        return total
+
     # Build a streaming job generator for (di)graph construction
     def _construction_job_iter():
         """
@@ -358,6 +466,9 @@ def phylo_superscape(sequences,
         from fitness_landscape.utils import iter_moving_window_alignment
 
         job_counter = 0
+        total_jobs_hint = _estimate_total_jobs()
+        if log_progress:
+            logger.info('Estimated total alignment jobs: %s', str(total_jobs_hint))
 
         def _emit_job(seq_aln, *, source_label: str = None, block_idx: int | None = None, block_total: int | None = None, fan_index: int | None = None):
             nonlocal job_counter
@@ -390,7 +501,7 @@ def phylo_superscape(sequences,
                     "device": plm_device,
                     "_log_progress": log_progress,
                     "_job_id": job_counter,
-                    "_total_jobs": None,
+                    "_total_jobs": total_jobs_hint,
                     "_job_label": _lbl,
                     "_nested_construction_parallel": False,
                     "_lightweight_nodes": True,
@@ -417,7 +528,7 @@ def phylo_superscape(sequences,
                     "device": plm_device,
                     "_log_progress": log_progress,
                     "_job_id": job_counter,
-                    "_total_jobs": None,
+                    "_total_jobs": total_jobs_hint,
                     "_job_label": _lbl,
                     "_nested_construction_parallel": False,
                     "_lightweight_nodes": True,
@@ -513,8 +624,12 @@ def phylo_superscape(sequences,
     # Optionally avoid Ray during per-alignment construction
     if sequential_construction:
         landscapes = []
+        total_jobs = _estimate_total_jobs()
+        if log_progress:
+            logger.info('Planned alignment jobs: %d', total_jobs)
         for j in _construction_job_iter():
             seqs = j.pop('sequences')
+            j['_total_jobs'] = total_jobs or None
             if directed_landscape:
                 from fitness_landscape.core.landscape import DirectedFitnessLandscape
                 landscapes.append(DirectedFitnessLandscape.from_sequences(sequences=seqs, **j))
@@ -523,7 +638,8 @@ def phylo_superscape(sequences,
                 landscapes.append(FitnessLandscape.from_sequences(sequences=seqs, **j))
         superscape = FitnessSuperscape(landscapes=landscapes, posterior_prob_cutoff=posterior_threshold, **sampler_kwargs)
     else:
-        logger.info('Launching streaming parallel construction (Ray)')
+        total_jobs = _estimate_total_jobs()
+        logger.info('Launching streaming parallel construction (Ray); planned jobs=%s', str(total_jobs))
         superscape = FitnessSuperscape.from_streaming_construction(
             constructor_type=('directed' if directed_landscape else 'undirected'),
             construction_job_iter=_construction_job_iter(),
