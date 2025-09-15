@@ -51,7 +51,7 @@ class ASRConstructor:
     replacement_matrix : List, defualt=`NQ_pfam`
         The replacement matrix used for tree-search. Multiple can be
         provided to fit the ML model. If `NQ_pfam`, output will be
-        directed. If LG, output will be undirected.
+        directed. If LG, output will byteste undirected.
 
     model_fitting : bool, default=`False`
         Boolean for whether or not to include ML model fitting and
@@ -67,7 +67,7 @@ class ASRConstructor:
                 model_fitting: bool = False,
                 replacement_matrix: List = ['NQ.pfam'],
                 phylo_backend: str = 'cogent_nj',
-                _dist_calc: Literal['paralinear', 'pdist', 'hamming'] = 'paralinear',
+                _dist_calc: Literal['paralinear', 'pdist', 'hamming'] = 'pdist',
                 _reconstruct_ancestral_states: bool = True,
                 _log_progress: bool = False) -> None:
 
@@ -120,10 +120,10 @@ class ASRConstructor:
                    replacement_matrix: List[str] = ['NQ.pfam'],
                    model_fitting: bool = True,
                    _model_override: str = None,
-                   _dist_calc: Literal['paralinear', 'pdist', 'hamming'] = 'paralinear',
+                   _dist_calc: Literal['paralinear', 'pdist', 'hamming'] = 'pdist',
                    phylo_backend: Literal['iqtree', 'cogent_nj'] = 'cogent_nj') -> None: 
         """
-        Method to construct a phylogenetic tree using the piqtree
+        Method to construct a phylogenetiphyloc tree using the piqtree
         Python binding.
         
         Parameters:
@@ -137,7 +137,7 @@ class ASRConstructor:
         _model_override : str, default=`None`
             A IQTREE convention model string to override the model. 
 
-        _dist_cal : str, default=`paralinear`
+        _dist_cal : str, default=`pdist`
             The distance calculation to use in computing neighbors and 
             distance matrices for neighbor-joining algorithms.
 
