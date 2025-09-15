@@ -67,6 +67,7 @@ class ASRConstructor:
                 model_fitting: bool = False,
                 replacement_matrix: List = ['NQ.pfam'],
                 phylo_backend: str = 'iqtree',
+                _dist_calc: Literal['paralinear', 'pdist', 'hamming'] = 'paralinear',
                 _reconstruct_ancestral_states: bool = True,
                 _log_progress: bool = False) -> None:
 
@@ -96,7 +97,8 @@ class ASRConstructor:
         if phylogenetic_tree is None:
             self.build_tree(replacement_matrix=replacement_matrix,
                             model_fitting=model_fitting,
-                            phylo_backend=phylo_backend)
+                            phylo_backend=phylo_backend,
+                            _dist_calc=_dist_calc)
         
         elif phylogenetic_tree is not None:
             
@@ -239,6 +241,11 @@ class ASRConstructor:
                     _mf.write(f"models={replacement_matrix}\n")
                     _mf.write(f"model_fitting={model_fitting}\n")
                     _mf.write(f"backend={backend}\n")
+                    if backend == 'cogent_nj':
+                        try:
+                            _mf.write(f"distance_calc={_dist_calc}\n")
+                        except Exception:
+                            pass
                     try:
                         import piqtree as _pt
                         _mf.write(f"piqtree_version={getattr(_pt, '__version__', '?')}\n")

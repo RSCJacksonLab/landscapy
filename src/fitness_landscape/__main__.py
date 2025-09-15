@@ -35,6 +35,7 @@ def cli():
 # Phylogenetic inference
 @click.option('--directed-landscape', required=False, is_flag=True, default=False, help='Boolean flag to indicate if a directed phylogenetic fitness landscape should be constructed.')
 @click.option('--phylo-backend', 'phylo_backend', required=False, type=click.Choice(['iqtree','cogent_nj']), default='iqtree', help="Backend for tree inference: 'iqtree' (piqtree) or 'cogent_nj' (cogent3 neighbor-joining).")
+@click.option('--phylo-distance-calc', 'phylo_distance_calc', required=False, type=str, default='paralinear', help='Distance calculator for NJ backend (e.g., paralinear, pdist, hamming, TN93).')
 # Embedding controls (harmonized with diffusion CLI)
 @click.option('--compute-phylo-embeddings/--no-compute-phylo-embeddings', default=True, help='Compute embeddings for extant and ancestral sequences to attach to nodes.')
 @click.option('--compute-embeddings/--no-compute-embeddings', 'compute_phylo_embeddings', default=True, help='Alias of --compute-phylo-embeddings for consistency with diffusion CLI.')
@@ -106,6 +107,7 @@ def phylo_superscape(sequences,
                      fan_alignment_overlap,
                      directed_landscape,
                      phylo_backend,
+                     phylo_distance_calc,
                      compute_phylo_embeddings,
                      embedding_domain,
                      plm_model_name,
@@ -378,6 +380,7 @@ def phylo_superscape(sequences,
                     "replacement_matrix": list(replacement_matrix),
                     "model_fitting": model_fitting,
                     "phylo_backend": phylo_backend,
+                    "_dist_calc": phylo_distance_calc,
                     
                     "_compute_phylo_embeddings": compute_phylo_embeddings,
                     "embedding_domain": embedding_domain,
@@ -404,6 +407,7 @@ def phylo_superscape(sequences,
                     "replacement_matrix": list(replacement_matrix),
                     "model_fitting": model_fitting,
                     "phylo_backend": phylo_backend,
+                    "_dist_calc": phylo_distance_calc,
                     
                     "_compute_phylo_embeddings": compute_phylo_embeddings,
                     "embedding_domain": embedding_domain,
@@ -553,6 +557,7 @@ def phylo_superscape(sequences,
 @click.option('--replacement-matrix', multiple=True, default=['LG'], help='Replacement matrix/matrices for IQ-TREE model selection (e.g., LG). Can be provided multiple times.')
 @click.option('--model-fitting/--no-model-fitting', default=True, help='Whether to fit and select the best model (AICc) from the provided set.')
 @click.option('--phylo-backend', 'phylo_backend', type=click.Choice(['iqtree','cogent_nj']), default='iqtree', show_default=True, help="Backend for tree inference: 'iqtree' (piqtree) or 'cogent_nj' (cogent3 neighbor-joining).")
+@click.option('--phylo-distance-calc', 'phylo_distance_calc', type=str, default='paralinear', show_default=True, help='Distance calculator for NJ backend (e.g., paralinear, pdist, hamming, TN93).')
 
 # Embeddings for node attributes
 @click.option('--compute-phylo-embeddings/--no-compute-phylo-embeddings', default=True, help='Compute embeddings for extant and ancestral sequences to attach to nodes.')
@@ -578,6 +583,7 @@ def phylo_landscape(sequences,
                     replacement_matrix,
                     model_fitting,
                     phylo_backend,
+                    phylo_distance_calc,
                     compute_phylo_embeddings,
                     embedding_domain,
                     plm_model_name,
@@ -627,6 +633,7 @@ def phylo_landscape(sequences,
         replacement_matrix=list(replacement_matrix),
         model_fitting=model_fitting,
         phylo_backend=phylo_backend,
+        _dist_calc=phylo_distance_calc,
         model_name=plm_model_name,
         batch_size=plm_batch_size,
         device=plm_device,
