@@ -34,7 +34,7 @@ def cli():
 
 # Phylogenetic inference
 @click.option('--directed-landscape', required=False, is_flag=True, default=False, help='Boolean flag to indicate if a directed phylogenetic fitness landscape should be constructed.')
-@click.option('--phylo-backend', 'phylo_backend', required=False, type=click.Choice(['iqtree','cogent_nj']), default='iqtree', help="Backend for tree inference: 'iqtree' (piqtree) or 'cogent_nj' (cogent3 neighbor-joining).")
+@click.option('--phylo-backend', 'phylo_backend', required=False, type=click.Choice(['iqtree','cogent_nj']), default='cogent_nj', help="Backend for tree inference: 'cogent_nj' (cogent3 neighbor-joining, default) or 'iqtree' (piqtree).")
 @click.option('--phylo-distance-calc', 'phylo_distance_calc', required=False, type=str, default='paralinear', help='Distance calculator for NJ backend (e.g., paralinear, pdist, hamming, TN93).')
 # Embedding controls (harmonized with diffusion CLI)
 @click.option('--compute-phylo-embeddings/--no-compute-phylo-embeddings', default=True, help='Compute embeddings for extant and ancestral sequences to attach to nodes.')
@@ -556,7 +556,7 @@ def phylo_superscape(sequences,
 # Phylogenetic inference controls
 @click.option('--replacement-matrix', multiple=True, default=['LG'], help='Replacement matrix/matrices for IQ-TREE model selection (e.g., LG). Can be provided multiple times.')
 @click.option('--model-fitting/--no-model-fitting', default=True, help='Whether to fit and select the best model (AICc) from the provided set.')
-@click.option('--phylo-backend', 'phylo_backend', type=click.Choice(['iqtree','cogent_nj']), default='iqtree', show_default=True, help="Backend for tree inference: 'iqtree' (piqtree) or 'cogent_nj' (cogent3 neighbor-joining).")
+@click.option('--phylo-backend', 'phylo_backend', type=click.Choice(['iqtree','cogent_nj']), default='cogent_nj', show_default=True, help="Backend for tree inference: 'cogent_nj' (cogent3 neighbor-joining, default) or 'iqtree' (piqtree).")
 @click.option('--phylo-distance-calc', 'phylo_distance_calc', type=str, default='paralinear', show_default=True, help='Distance calculator for NJ backend (e.g., paralinear, pdist, hamming, TN93).')
 
 # Embeddings for node attributes

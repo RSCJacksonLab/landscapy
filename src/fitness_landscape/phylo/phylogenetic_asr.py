@@ -66,7 +66,7 @@ class ASRConstructor:
                 phylogenetic_tree: Union[PhyloNode, Path] = None,
                 model_fitting: bool = False,
                 replacement_matrix: List = ['NQ.pfam'],
-                phylo_backend: str = 'iqtree',
+                phylo_backend: str = 'cogent_nj',
                 _dist_calc: Literal['paralinear', 'pdist', 'hamming'] = 'paralinear',
                 _reconstruct_ancestral_states: bool = True,
                 _log_progress: bool = False) -> None:
@@ -121,7 +121,7 @@ class ASRConstructor:
                    model_fitting: bool = True,
                    _model_override: str = None,
                    _dist_calc: Literal['paralinear', 'pdist', 'hamming'] = 'paralinear',
-                   phylo_backend: Literal['iqtree', 'cogent_nj'] = 'iqtree') -> None: 
+                   phylo_backend: Literal['iqtree', 'cogent_nj'] = 'cogent_nj') -> None: 
         """
         Method to construct a phylogenetic tree using the piqtree
         Python binding.
@@ -155,7 +155,7 @@ class ASRConstructor:
         if self._log_progress:
             _logger.info('ASR.build_tree: start (models=%s, fit=%s)', replacement_matrix, model_fitting)
         # Normalize backend selection
-        backend = (phylo_backend or 'iqtree').lower()
+        backend = (phylo_backend or 'cogent_nj').lower()
         if backend not in {'iqtree', 'cogent_nj'}:
             raise ValueError(f"Unsupported phylo_backend={phylo_backend!r}; use 'iqtree' or 'cogent_nj'.")
 
@@ -311,6 +311,10 @@ class ASRConstructor:
 
             # Backend: IQ-TREE via piqtree (in-process or subprocess)
             elif os.environ.get('FITNESS_LANDSCAPE_IQTREE_SUBPROC', '').lower() in {'1','true','yes'}:
+                try:
+                    _logger.warning('ASR.build_tree: using IQ-TREE via piqtree; this backend can be unstable and may segfault on some inputs/environments. Consider --phylo-backend cogent_nj for robustness.')
+                except Exception:
+                    pass
                 aln_fp = os.path.join(tmpdir, 'alignment_gapped.fasta')
                 out_pkl = os.path.join(tmpdir, 'tree.pkl')
                 # IMPORTANT: keep compound statements (e.g., try:) on their own line.
@@ -358,6 +362,10 @@ class ASRConstructor:
                             pass
                         raise RuntimeError(msg) from e2
             else:
+                try:
+                    _logger.warning('ASR.build_tree: using IQ-TREE via piqtree; this backend can be unstable and may segfault on some inputs/environments. Consider --phylo-backend cogent_nj for robustness.')
+                except Exception:
+                    pass
                 try:
                     phylogenetic_tree = _try_build(model)
                 except Exception as e:
