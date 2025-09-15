@@ -118,7 +118,8 @@ class ASRConstructor:
                    replacement_matrix: List[str] = ['NQ.pfam'],
                    model_fitting: bool = True,
                    _model_override: str = None,
-                   phylo_backend: str = 'iqtree') -> None: 
+                   _dist_calc: Literal['paralinear', 'pdist', 'hamming'] = 'paralinear',
+                   phylo_backend: Literal['iqtree', 'cogent_nj'] = 'iqtree') -> None: 
         """
         Method to construct a phylogenetic tree using the piqtree
         Python binding.
@@ -133,6 +134,14 @@ class ASRConstructor:
         
         _model_override : str, default=`None`
             A IQTREE convention model string to override the model. 
+
+        _dist_cal : str, default=`paralinear`
+            The distance calculation to use in computing neighbors and 
+            distance matrices for neighbor-joining algorithms.
+
+        phylo_backend : str, default=`iqtree`
+            The phylogenetic reconstruction backend to use. 
+
         """
         if not hasattr(self, 'alignment'):
             raise ValueError('expected alignment attribute.')
@@ -242,13 +251,10 @@ class ASRConstructor:
                     except Exception:
                         pass
             except Exception:
-                pass
+                pass           
+            
             # Backend: cogent3 neighbor-joining per cookbook
             if backend == 'cogent_nj':
-                # Follow the documented API:
-                #   from cogent3.phylo import nj
-                #   dists = alignment.distance_matrix(calc='WG01')
-                #   tree = nj.nj(dists, show_progress=False)
                 try:
                     from cogent3.phylo import nj as _c3_nj
                 except Exception as _imp_err:
@@ -268,27 +274,10 @@ class ASRConstructor:
                             pass
                         raise RuntimeError(msg) from e2
                 else:
-                    # Build distance matrix using requested/provided model, default WG01
-                    tried = []
-                    mat_candidates = []
-                    mat0 = str(model).upper() if isinstance(model, str) else 'WG01'
-                    if mat0 == 'WAG':
-                        mat0 = 'WG01'
-                    mat_candidates.append(mat0)
-                    # Reasonable fallbacks
-                    for alt in ('WAG', 'LG'):
-                        if alt not in mat_candidates:
-                            mat_candidates.append(alt)
                     dists = None
                     last_err = None
-                    for m in mat_candidates:
-                        try:
-                            dists = self.alignment.distance_matrix(calc=m)
-                            used_model = m
-                            break
-                        except Exception as ee:
-                            tried.append(f"calc={m} -> {type(ee).__name__}: {ee}")
-                            last_err = ee
+                    dists = self.alignment.distance_matrix(calc=_dist_calc)
+
                     if dists is None:
                         primary_err = last_err or Exception('unknown distance error')
                         details = ["Failed to compute distance_matrix with candidates:"] + tried
