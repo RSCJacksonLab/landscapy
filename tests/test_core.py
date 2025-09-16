@@ -1107,6 +1107,7 @@ def test_landscape_from_sequences_phylo_mismatched_embeddings_raises(phylo_test_
             sequences=phylo_test_data,
             graph_type='phylogenetic',
             embeddings=bad_embs,
+            phylo_backend='iqtree',
             _compute_phylo_embeddings=False
         )
 

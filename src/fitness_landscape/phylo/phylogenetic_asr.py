@@ -283,7 +283,27 @@ class ASRConstructor:
                 else:
                     dists = None
                     last_err = None
-                    dists = self.alignment.distance_matrix(calc=_dist_calc)
+                    tried: List[str] = []
+                    # Try requested calculator first, then fall back to cheaper ones that
+                    # avoid the numba parallel runtime (e.g. get_num_threads TypingError).
+                    candidates = []
+                    if _dist_calc:
+                        candidates.append(_dist_calc)
+                    for alt in ('paralinear', 'hamming'):
+                        if alt not in candidates:
+                            candidates.append(alt)
+                    used_model = None
+                    for calc_name in candidates:
+                        try:
+                            # Force serial computation to avoid numba parallel backend issues
+                            dists = self.alignment.distance_matrix(calc=calc_name, parallel=False)
+                        except Exception as e:
+                            last_err = e
+                            tried.append(f"{calc_name}: {type(e).__name__}: {e}")
+                            continue
+                        else:
+                            used_model = calc_name
+                            break
 
                     if dists is None:
                         primary_err = last_err or Exception('unknown distance error')
