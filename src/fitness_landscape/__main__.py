@@ -611,6 +611,9 @@ def phylo_superscape(sequences,
         "_resume_checkpoint": resume_checkpoint,
     }
 
+    # Ensure hierarchical aligner mirrors CLI progress flag
+    sampler_kwargs["_show_progress"] = bool(log_progress)
+
     # Default checkpoint directory (for CLI runs) if not explicitly provided
     if checkpoint_dir:
         ckpt_dir = Path(checkpoint_dir)
