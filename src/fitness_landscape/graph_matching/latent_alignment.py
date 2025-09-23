@@ -7,6 +7,13 @@ import numpy as np
 import networkx as nx
 from scipy.special import gammaln
 from ..utils import cosine_similarity_matrix
+# FAISS is optional; fall back to dense cosine similarity when unavailable.
+try:  # pragma: no cover
+    import faiss  # type: ignore
+    _FAISS_AVAILABLE = True
+except Exception:  # pragma: no cover
+    faiss = None
+    _FAISS_AVAILABLE = False
 import scipy.optimize
 import numba
 
@@ -1114,7 +1121,7 @@ class RJMCMCAligner:
             return prob_mapping
 
 
-#TODO: update to FAISS to scale > 1e4
+# Use FAISS HNSW for approximate search when available to avoid quadratic scaling.
 def auto_anchors_by_cosine( graphs: List[Union[nx.Graph], nx.DiGraph],
                            *,
                            emb_key: str = "emb_arr",
@@ -1141,7 +1148,7 @@ def auto_anchors_by_cosine( graphs: List[Union[nx.Graph], nx.DiGraph],
     """
     
     emb_list : List[np.ndarray] = []
-    backref : List[Tuple[int,int]] = []  # (graph_idx, node_idx)
+    backref : List[Tuple[int, int]] = []  # (graph_idx, node_idx)
     for k, G in enumerate(graphs):
         for i, v in enumerate(G.nodes()):
             emb = np.asarray(G.nodes[v][emb_key], float)
@@ -1149,12 +1156,20 @@ def auto_anchors_by_cosine( graphs: List[Union[nx.Graph], nx.DiGraph],
             backref.append((k, i))
 
     if not emb_list:
-        return    
+        return
 
-    E = np.vstack(emb_list) # (N, d)
-    S = cosine_similarity_matrix(E, E)
+    E = np.vstack(emb_list)
+    if E.size == 0:
+        return
 
-    parent = np.arange(len(E))
+    E = np.ascontiguousarray(E, dtype=np.float32)
+    cos_threshold = float(cos_threshold)
+    if cos_threshold > 1.0:
+        cos_threshold = 1.0
+    elif cos_threshold < -1.0:
+        cos_threshold = -1.0
+
+    parent = np.arange(E.shape[0])
 
     def find(a):
         while parent[a]!=a:
@@ -1166,10 +1181,48 @@ def auto_anchors_by_cosine( graphs: List[Union[nx.Graph], nx.DiGraph],
         if ra!=rb:
             parent[rb]=ra
 
-    # only union if from different graphs
-    for a,b in zip(*np.where(S>=cos_threshold)):
-        if a<b and backref[a][0] != backref[b][0]:
-            union(a,b)
+    use_faiss = (
+        _FAISS_AVAILABLE
+        and E.shape[0] >= 3
+        and E.shape[1] > 0
+    )
+
+    if use_faiss:
+        faiss.normalize_L2(E)
+        hnsw_M = max(2, min(32, E.shape[0] - 1))
+        try:
+            index = faiss.IndexHNSWFlat(E.shape[1], hnsw_M, faiss.METRIC_INNER_PRODUCT)
+        except TypeError:  # pragma: no cover - older faiss signature
+            index = faiss.IndexHNSWFlat(E.shape[1], hnsw_M)
+        if hasattr(index, "hnsw"):
+            index.hnsw.efConstruction = max(int(index.hnsw.efConstruction), 200)
+            index.hnsw.efSearch = max(int(index.hnsw.efSearch), 64)
+        index.add(E)
+
+        lims, D, I = index.range_search(E, cos_threshold)
+        lims = np.asarray(lims)
+        D = np.asarray(D)
+        I = np.asarray(I)
+
+        for a in range(E.shape[0]):
+            start, stop = lims[a], lims[a + 1]
+            if start == stop:
+                continue
+            ga = backref[a][0]
+            for pos in range(start, stop):
+                b = int(I[pos])
+                if b <= a:
+                    continue
+                if ga == backref[b][0]:
+                    continue
+                if D[pos] < cos_threshold:
+                    continue
+                union(a, b)
+    else:
+        S = cosine_similarity_matrix(E, E)
+        for a, b in zip(*np.where(S >= cos_threshold)):
+            if a < b and backref[a][0] != backref[b][0]:
+                union(a, b)
 
     # now assign anchor IDs, but only for clusters that span >1 graph
     root_to_members = {}
