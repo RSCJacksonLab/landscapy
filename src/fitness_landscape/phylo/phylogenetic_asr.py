@@ -20,8 +20,11 @@ except Exception:
 import piqtree
 from piqtree import model_finder
 import math
+import pickle
+import sys
 import os
 import tempfile
+import subprocess as _subprocess
 from ..core.sequence import (
     BaseNumpySequence,
     SoftSequence
@@ -48,7 +51,7 @@ class ASRConstructor:
     replacement_matrix : List, defualt=`NQ_pfam`
         The replacement matrix used for tree-search. Multiple can be
         provided to fit the ML model. If `NQ_pfam`, output will be
-        directed. If LG, output will be undirected.
+        directed. If LG, output will byteste undirected.
 
     model_fitting : bool, default=`False`
         Boolean for whether or not to include ML model fitting and
@@ -63,6 +66,8 @@ class ASRConstructor:
                 phylogenetic_tree: Union[PhyloNode, Path] = None,
                 model_fitting: bool = False,
                 replacement_matrix: List = ['NQ.pfam'],
+                phylo_backend: str = 'cogent_nj',
+                _dist_calc: Literal['paralinear', 'pdist', 'hamming'] = 'pdist',
                 _reconstruct_ancestral_states: bool = True,
                 _log_progress: bool = False) -> None:
 
@@ -88,10 +93,12 @@ class ASRConstructor:
         for node, arr in zip(self.tip_names, self._boolean_gap_alignment):
             self.boolean_gap_alignment[node] = arr
 
-        # If no phylogenetic tree, infer one in piqtree.
+        # If no phylogenetic tree, infer one using IQ-TREE via piqtree.
         if phylogenetic_tree is None:
             self.build_tree(replacement_matrix=replacement_matrix,
-                            model_fitting=model_fitting)
+                            model_fitting=model_fitting,
+                            phylo_backend=phylo_backend,
+                            _dist_calc=_dist_calc)
         
         elif phylogenetic_tree is not None:
             
@@ -112,9 +119,11 @@ class ASRConstructor:
     def build_tree(self,
                    replacement_matrix: List[str] = ['NQ.pfam'],
                    model_fitting: bool = True,
-                   _model_override: str = None) -> None: 
+                   _model_override: str = None,
+                   _dist_calc: Literal['paralinear', 'pdist', 'hamming'] = 'pdist',
+                   phylo_backend: Literal['iqtree', 'cogent_nj'] = 'cogent_nj') -> None: 
         """
-        Method to construct a phylogenetic tree using the piqtree
+        Method to construct a phylogenetiphyloc tree using the piqtree
         Python binding.
         
         Parameters:
@@ -127,36 +136,53 @@ class ASRConstructor:
         
         _model_override : str, default=`None`
             A IQTREE convention model string to override the model. 
+
+        _dist_cal : str, default=`pdist`
+            The distance calculation to use in computing neighbors and 
+            distance matrices for neighbor-joining algorithms.
+
+        phylo_backend : str, default=`iqtree`
+            The phylogenetic reconstruction backend to use. 
+
         """
         if not hasattr(self, 'alignment'):
             raise ValueError('expected alignment attribute.')
         
-        # Keep alignment as-is for maximum compatibility with IQ-TREE on tiny inputs
-        
-        # Keep call minimal; do not override threading env here
+        # Keep alignment as-is for maximum compatibility.
 
         import logging as _logging
         _logger = _logging.getLogger('fitness_landscape')
         if self._log_progress:
             _logger.info('ASR.build_tree: start (models=%s, fit=%s)', replacement_matrix, model_fitting)
-        if _model_override is not None:
-            # Expect a string model spec for newer piqtree; coerce if needed
-            model = str(_model_override)
-        
-        elif model_fitting:
-            # Try model finding; if it fails (e.g., tiny datasets), fall back to first provided model
-            try:
-                result = model_finder(self.alignment, model_set=set(replacement_matrix))
-                # Choose model by AICc; newer piqtree returns a string
-                model = str(getattr(result, 'best_aicc', result))
-            except Exception:
-                model = str(replacement_matrix[0] if replacement_matrix else 'LG')
-        
-        # Use just the provided replacement matrix.
+        # Normalize backend selection
+        backend = (phylo_backend or 'cogent_nj').lower()
+        if backend not in {'iqtree', 'cogent_nj'}:
+            raise ValueError(f"Unsupported phylo_backend={phylo_backend!r}; use 'iqtree' or 'cogent_nj'.")
+
+        # Determine model string depending on backend
+        if backend == 'cogent_nj':
+            if _model_override is not None:
+                model = str(_model_override)
+            else:
+                # For cogent quick_tree backend, default to WG01 (WAG equivalent)
+                model = str(replacement_matrix[0]) if replacement_matrix else 'WG01'
         else:
-            if len(replacement_matrix) > 1:
-                raise ValueError('Expected only single replacement matrix.')
-            model = str(replacement_matrix[0])
+            if _model_override is not None:
+                # Expect a string model spec for newer piqtree; coerce if needed
+                model = str(_model_override)
+            elif model_fitting:
+                # Try model finding; if it fails (e.g., tiny datasets), fall back to first provided model
+                try:
+                    result = model_finder(self.alignment, model_set=set(replacement_matrix))
+                    # Choose model by AICc; newer piqtree returns a string
+                    model = str(getattr(result, 'best_aicc', result))
+                except Exception:
+                    model = str(replacement_matrix[0] if replacement_matrix else 'LG')
+            else:
+                # Use just the provided replacement matrix.
+                if len(replacement_matrix) > 1:
+                    raise ValueError('Expected only single replacement matrix.')
+                model = str(replacement_matrix[0])
 
         # Minimal wrapper around piqtree.build_tree
         def _try_build(_model: str, *_):
@@ -177,33 +203,216 @@ class ASRConstructor:
         old_env = {k: os.environ.get(k) for k in env_cap}
         os.environ.update(env_cap)
 
+        # Choose working directory for IQ-TREE logs
         cwd0 = os.getcwd()
-        tmp_ctx = tempfile.TemporaryDirectory(prefix='iqtree_run_')
-        tmpdir = tmp_ctx.name
+        _cleanup_tmp = True
+        log_root = os.environ.get('FITNESS_LANDSCAPE_IQTREE_LOG_DIR')
+        if log_root:
+            try:
+                os.makedirs(log_root, exist_ok=True)
+                tag = f"iqtree_run_{int(os.getpid())}_{int(np.random.randint(1e9))}"
+                tmpdir = os.path.join(log_root, tag)
+                os.makedirs(tmpdir, exist_ok=True)
+                _cleanup_tmp = False
+                if self._log_progress:
+                    _logger.info('ASR.build_tree: logging IQ-TREE run to %s', tmpdir)
+            except Exception:
+                # Fall back to temporary directory if creation fails
+                tmp_ctx = tempfile.TemporaryDirectory(prefix='iqtree_run_')
+                tmpdir = tmp_ctx.name
+                _cleanup_tmp = True
+        else:
+            tmp_ctx = tempfile.TemporaryDirectory(prefix='iqtree_run_')
+            tmpdir = tmp_ctx.name
         primary_err = None
         try:
             os.chdir(tmpdir)
+            # Persist the current alignment and run metadata for offline debugging
             try:
-                phylogenetic_tree = _try_build(model)
-            except Exception as e:
-                primary_err = e
-                # Fallback 1: retry with first provided model or LG
+                # Write gapped alignment to FASTA
+                aln_fp = os.path.join(tmpdir, 'alignment_gapped.fasta')
+                with open(aln_fp, 'w') as _f:
+                    for nm in self.tip_names:
+                        seq = str(self.alignment.get_gapped_seq(nm))
+                        _f.write(f">{nm}\n{seq}\n")
+                # Write simple metadata
+                meta_fp = os.path.join(tmpdir, 'run_meta.txt')
+                with open(meta_fp, 'w') as _mf:
+                    _mf.write(f"models={replacement_matrix}\n")
+                    _mf.write(f"model_fitting={model_fitting}\n")
+                    _mf.write(f"backend={backend}\n")
+                    if backend == 'cogent_nj':
+                        try:
+                            _mf.write(f"distance_calc={_dist_calc}\n")
+                        except Exception:
+                            pass
+                    try:
+                        import piqtree as _pt
+                        _mf.write(f"piqtree_version={getattr(_pt, '__version__', '?')}\n")
+                    except Exception:
+                        pass
+                    _mf.write(f"n_tips={len(self.tip_names)}\n")
+                    try:
+                        first = self.tip_names[0]
+                        _mf.write(f"L={len(str(self.alignment.get_gapped_seq(first)))}\n")
+                    except Exception:
+                        pass
+            except Exception:
+                pass           
+            
+            # Backend: cogent3 neighbor-joining per cookbook
+            if backend == 'cogent_nj':
                 try:
-                    first = str(replacement_matrix[0]) if replacement_matrix else 'LG'
-                    phylogenetic_tree = _try_build(first)
-                except Exception as e2:
-                    # Provide detailed error context including original exceptions
-                    details = []
-                    details.append(f"primary model={model!r} error={type(primary_err).__name__}: {primary_err}")
-                    details.append(f"fallback model={first!r} error={type(e2).__name__}: {e2}")
-                    pv = getattr(piqtree, '__version__', '?')
-                    details.append(f"piqtree_version={pv}")
-                    details.append("Set FITNESS_LANDSCAPE_IQTREE_LOG_DIR to preserve IQ-TREE logs for debugging")
-                    msg = (
-                        "IQ-TREE (piqtree) tree building failed.\n" +
-                        "\n".join(details)
-                    )
-                    raise RuntimeError(msg) from e2
+                    from cogent3.phylo import nj as _c3_nj
+                except Exception as _imp_err:
+                    try:
+                        # Fallback: Application API
+                        nj_app = get_app('nj')
+                        phylogenetic_tree = nj_app(self.alignment)
+                    except Exception as e2:
+                        primary_err = e2
+                        details = [f"cogent_nj error={type(e2).__name__}: {e2}"]
+                        details.append("Attempted imports: 'from cogent3.phylo import nj' and get_app('nj')")
+                        msg = "Cogent3 NJ tree building failed.\n" + "\n".join(details)
+                        try:
+                            with open(os.path.join(tmpdir, 'error.txt'), 'w') as _ef:
+                                _ef.write(msg)
+                        except Exception:
+                            pass
+                        raise RuntimeError(msg) from e2
+                else:
+                    dists = None
+                    last_err = None
+                    tried: List[str] = []
+                    # Try requested calculator first, then fall back to cheaper ones that
+                    # avoid the numba parallel runtime (e.g. get_num_threads TypingError).
+                    candidates = []
+                    if _dist_calc:
+                        candidates.append(_dist_calc)
+                    for alt in ('paralinear', 'hamming'):
+                        if alt not in candidates:
+                            candidates.append(alt)
+                    used_model = None
+                    for calc_name in candidates:
+                        try:
+                            # Force serial computation to avoid numba parallel backend issues
+                            dists = self.alignment.distance_matrix(calc=calc_name, parallel=False)
+                        except Exception as e:
+                            last_err = e
+                            tried.append(f"{calc_name}: {type(e).__name__}: {e}")
+                            continue
+                        else:
+                            used_model = calc_name
+                            break
+
+                    if dists is None:
+                        primary_err = last_err or Exception('unknown distance error')
+                        details = ["Failed to compute distance_matrix with candidates:"] + tried
+                        msg = "Cogent3 NJ distance computation failed.\n" + "\n".join(details)
+                        try:
+                            with open(os.path.join(tmpdir, 'error.txt'), 'w') as _ef:
+                                _ef.write(msg)
+                        except Exception:
+                            pass
+                        raise RuntimeError(msg) from primary_err
+                    try:
+                        phylogenetic_tree = _c3_nj.nj(dists, show_progress=False)
+                    except Exception as e:
+                        primary_err = e
+                        details = [f"cogent_nj error={type(e).__name__}: {e}"]
+                        details.append(f"distance calc used={used_model}")
+                        msg = "Cogent3 NJ tree building failed.\n" + "\n".join(details)
+                        try:
+                            with open(os.path.join(tmpdir, 'error.txt'), 'w') as _ef:
+                                _ef.write(msg)
+                        except Exception:
+                            pass
+                        raise RuntimeError(msg) from e
+
+            # Backend: IQ-TREE via piqtree (in-process or subprocess)
+            elif os.environ.get('FITNESS_LANDSCAPE_IQTREE_SUBPROC', '').lower() in {'1','true','yes'}:
+                try:
+                    _logger.warning('ASR.build_tree: using IQ-TREE via piqtree; this backend can be unstable and may segfault on some inputs/environments. Consider --phylo-backend cogent_nj for robustness.')
+                except Exception:
+                    pass
+                aln_fp = os.path.join(tmpdir, 'alignment_gapped.fasta')
+                out_pkl = os.path.join(tmpdir, 'tree.pkl')
+                # IMPORTANT: keep compound statements (e.g., try:) on their own line.
+                # Python does not allow a 'try' to follow a semicolon on the same line.
+                code = "\n".join([
+                    "import sys, pickle",
+                    "import piqtree",
+                    "from cogent3 import load_aligned_seqs",
+                    # Read the FASTA we just wrote; be explicit about format for robustness
+                    "aln = load_aligned_seqs(sys.argv[1], moltype='protein', format='fasta')",
+                    "model = sys.argv[2]",
+                    "try:",
+                    "    t = piqtree.build_tree(aln, model, rand_seed=1)",
+                    "except TypeError:",
+                    "    t = piqtree.build_tree(aln, model)",
+                    "with open(sys.argv[3], 'wb') as f:",
+                    "    pickle.dump(t, f)",
+                ])
+                child_env = os.environ.copy()
+                child_env.update(env_cap)
+                try:
+                    _subprocess.check_call([os.environ.get('PYTHON', sys.executable), '-c', code, aln_fp, str(model), out_pkl], env=child_env)
+                    with open(out_pkl, 'rb') as f:
+                        phylogenetic_tree = pickle.load(f)
+                except Exception as e:
+                    primary_err = e
+                    # Fallback: try with the first provided model or LG
+                    try:
+                        first = str(replacement_matrix[0]) if replacement_matrix else 'LG'
+                        _subprocess.check_call([os.environ.get('PYTHON', sys.executable), '-c', code, aln_fp, first, out_pkl], env=child_env)
+                        with open(out_pkl, 'rb') as f:
+                            phylogenetic_tree = pickle.load(f)
+                    except Exception as e2:
+                        details = []
+                        details.append(f"primary model={model!r} error={type(primary_err).__name__}: {primary_err}")
+                        details.append(f"fallback model={first!r} error={type(e2).__name__}: {e2}")
+                        pv = getattr(piqtree, '__version__', '?')
+                        details.append(f"piqtree_version={pv}")
+                        details.append("Set FITNESS_LANDSCAPE_IQTREE_LOG_DIR to preserve IQ-TREE logs for debugging")
+                        msg = ("IQ-TREE (piqtree) tree building failed.\n" + "\n".join(details))
+                        try:
+                            with open(os.path.join(tmpdir, 'error.txt'), 'w') as _ef:
+                                _ef.write(msg)
+                        except Exception:
+                            pass
+                        raise RuntimeError(msg) from e2
+            else:
+                try:
+                    _logger.warning('ASR.build_tree: using IQ-TREE via piqtree; this backend can be unstable and may segfault on some inputs/environments. Consider --phylo-backend cogent_nj for robustness.')
+                except Exception:
+                    pass
+                try:
+                    phylogenetic_tree = _try_build(model)
+                except Exception as e:
+                    primary_err = e
+                    # Fallback 1: retry with first provided model or LG
+                    try:
+                        first = str(replacement_matrix[0]) if replacement_matrix else 'LG'
+                        phylogenetic_tree = _try_build(first)
+                    except Exception as e2:
+                        # Provide detailed error context including original exceptions
+                        details = []
+                        details.append(f"primary model={model!r} error={type(primary_err).__name__}: {primary_err}")
+                        details.append(f"fallback model={first!r} error={type(e2).__name__}: {e2}")
+                        pv = getattr(piqtree, '__version__', '?')
+                        details.append(f"piqtree_version={pv}")
+                        details.append("Set FITNESS_LANDSCAPE_IQTREE_LOG_DIR to preserve IQ-TREE logs for debugging")
+                        msg = (
+                            "IQ-TREE (piqtree) tree building failed.\n" +
+                            "\n".join(details)
+                        )
+                        # Persist error text to the log directory for inspection
+                        try:
+                            with open(os.path.join(tmpdir, 'error.txt'), 'w') as _ef:
+                                _ef.write(msg)
+                        except Exception:
+                            pass
+                        raise RuntimeError(msg) from e2
         finally:
             # Restore environment and working directory; cleanup temp dir
             try:
@@ -215,10 +424,12 @@ class ASRConstructor:
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
-            try:
-                tmp_ctx.cleanup()
-            except Exception:
-                pass
+            # Only cleanup if we created a temporary directory
+            if _cleanup_tmp:
+                try:
+                    tmp_ctx.cleanup()
+                except Exception:
+                    pass
 
         self.phylogenetic_tree = phylogenetic_tree
         if self._log_progress:

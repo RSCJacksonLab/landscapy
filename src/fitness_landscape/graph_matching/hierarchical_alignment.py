@@ -1,4 +1,5 @@
 from __future__ import annotations
+import logging
 import ray
 import numpy as np
 import networkx as nx
@@ -222,6 +223,9 @@ class HierarchicalRJMCMCAligner:
         self._resume_checkpoint = _resume_checkpoint
         self._posterior_storage = _posterior_storage
 
+        # Shared logger for progress reporting
+        self._logger = logging.getLogger('fitness_landscape')
+
         # Update aligner parameters with directed flag.
         if 'directed' not in self.aligner_params:
             self.aligner_params['directed'] = self.directed
@@ -252,6 +256,16 @@ class HierarchicalRJMCMCAligner:
         # Global slot union mapping built by overlap meta step
         self._slot_union_map: Dict[Tuple[int, int], int] = {}
 
+    def _log_progress(self, message: str, *args) -> None:
+        """Helper to gate progress logging behind the CLI flag."""
+        if not self._show_progress:
+            return
+        try:
+            self._logger.info(message, *args)
+        except Exception:
+            # Logging must never raise inside worker loops
+            pass
+
     def run_alignment(self) -> Tuple[Union[nx.Graph, nx.DiGraph], Dict[int, np.ndarray]]:
         """
         Executes the full, two-level hierarchical alignment process.
@@ -263,20 +277,25 @@ class HierarchicalRJMCMCAligner:
             - The final aligned graph.
             - A mapping of original graph nodes to latent space nodes.
         """
+        self._log_progress('Hierarchical alignment: start (graphs=%d directed=%s)', self.K, self.directed)
         # Local Alignments
-        
+
         # Paralleliztion at level of both hierarchical orchestration and RJMCMC class (self._local_cpu_chains.)
         local_results = self._run_local_alignments(num_chains_per_task=self._local_cpu_chains)
+        self._log_progress('Local alignment stage complete: %d clusters processed', len(local_results))
 
         # Global Meta-Alignment
         # Parallelization at level of RJMCMC class and self._meta_cpu_chains.
         meta_blueprint, meta_mappings = self._run_global_meta_alignment(local_results)
+        self._log_progress('Global meta alignment stage complete')
 
         # Collect full posterior samples.
         self._reconstruct_and_store_full_posterior(local_results, meta_blueprint, meta_mappings)
 
         # Stitch results into the final format
         final_graph, final_mappings = self._stitch_results(local_results, meta_blueprint, meta_mappings)
+        self._log_progress('Hierarchical alignment: stitched latent graph with %d nodes and %d edges',
+                           final_graph.number_of_nodes(), final_graph.number_of_edges())
 
         return final_graph, final_mappings
 
@@ -484,6 +503,22 @@ class HierarchicalRJMCMCAligner:
             except Exception:
                 pass
 
+        total_clusters = len(clusters)
+        resumed_clusters = len(completed)
+        new_clusters = total_clusters - resumed_clusters
+        cluster_sizes = [len(c.get('node_backrefs', [])) for c in clusters]
+        if cluster_sizes:
+            size_summary = f" (median={int(np.median(cluster_sizes))} min={min(cluster_sizes)} max={max(cluster_sizes)})"
+        else:
+            size_summary = ''
+        self._log_progress('Local alignment scheduling: clusters=%d resumed=%d new=%d local_cpu_chains=%d chains_per_task=%d%s',
+                           total_clusters,
+                           resumed_clusters,
+                           new_clusters,
+                           self._local_cpu_chains,
+                           num_chains_per_task,
+                           size_summary)
+
         # keep a stable index for each cluster (preserve order on output)
         for cluster_idx, cluster_info in enumerate(clusters):
             if cluster_idx in completed:
@@ -522,6 +557,11 @@ class HierarchicalRJMCMCAligner:
         # Map ObjectRef : cluster_idx.
         ref_to_idx: Dict[ray.ObjectRef, int] = {ref: i for i, ref in enumerate(futures)}
         pending = set(futures)
+
+        if not futures:
+            self._log_progress('Local alignment reuse: no new Ray tasks dispatched (all clusters resumed)')
+        else:
+            self._log_progress('Local alignment dispatch: %d Ray tasks submitted', len(futures))
 
         with tqdm(total=len(pending),
                 desc=self._local_desc,
@@ -645,6 +685,14 @@ class HierarchicalRJMCMCAligner:
 
                 pbar.update(1)
 
+                self._log_progress('Local alignment progress: %d/%d completed inflight=%d last_cluster=%d nodes=%d latent_nodes=%s',
+                                   resumed_clusters + pbar.n,
+                                   total_clusters,
+                                   len(pending),
+                                   idx,
+                                   len(results_in_order[idx].get('node_backrefs', [])),
+                                   blueprint.number_of_nodes() if blueprint is not None else '?')
+
                 # checkpoint locals after each result
                 if self._checkpoint_dir:
                     try:
@@ -664,6 +712,9 @@ class HierarchicalRJMCMCAligner:
                     except Exception:
                         pass
 
+        self._log_progress('Local alignment complete: %d clusters processed (%d resumed)',
+                           total_clusters,
+                           resumed_clusters)
         return results_in_order
 
     def _run_global_meta_alignment(self,
@@ -678,6 +729,7 @@ class HierarchicalRJMCMCAligner:
         """
         graph_constructor = nx.DiGraph if self.directed else nx.Graph
         if not local_results:
+            self._log_progress('Global meta alignment: skipped (no local results)')
             return graph_constructor(), {k: np.array([]) for k in range(self.K)}
 
         def _num_local_slots(res: Dict) -> int:
@@ -717,6 +769,11 @@ class HierarchicalRJMCMCAligner:
             linear_sum_assignment = None
 
         N = len(local_results)
+        self._log_progress('Global meta alignment: stitching %d local groups', N)
+        overlaps_considered = 0
+        pair_candidates = 0
+        unions_made = 0
+        log_interval = max(1, N // 10) if N > 0 else 1
         for i in range(N):
             res_i = local_results[i]
             slots_i = _num_local_slots(res_i)
@@ -732,6 +789,7 @@ class HierarchicalRJMCMCAligner:
                 overlap = list(set_i.intersection(set_j))
                 if not overlap:
                     continue
+                overlaps_considered += 1
 
                 C = np.zeros((slots_i, slots_j), dtype=np.float64)
                 total_mass = 0.0
@@ -780,10 +838,20 @@ class HierarchicalRJMCMCAligner:
                         used.add(cj)
                         pairs.append((ri, cj))
 
+                pair_candidates += len(pairs)
                 for si, sj in pairs:
                     score = C[si, sj] / max(total_mass, 1e-12)
                     if score >= self.global_thresh:
                         union((i, si), (j, sj))
+                        unions_made += 1
+
+            if (i + 1) % log_interval == 0 or i == N - 1:
+                self._log_progress('Global meta alignment progress: %d/%d windows processed overlaps=%d pairs=%d unions=%d',
+                                   i + 1,
+                                   N,
+                                   overlaps_considered,
+                                   pair_candidates,
+                                   unions_made)
 
         # Assign global IDs; include isolated slots
         gid = 0
@@ -804,6 +872,11 @@ class HierarchicalRJMCMCAligner:
                     gid += 1
 
         self._slot_union_map = slot_union_map
+        self._log_progress('Global meta alignment complete: latent_slots=%d overlaps=%d pairs=%d unions=%d',
+                           gid,
+                           overlaps_considered,
+                           pair_candidates,
+                           unions_made)
 
         # Return empty meta artefacts; stitching will use union map
         meta_blueprint = graph_constructor()
