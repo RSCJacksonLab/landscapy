@@ -1065,19 +1065,42 @@ class HierarchicalRJMCMCAligner:
             if num_samples == 0:
                 return # No samples to process
 
+            if self._posterior_storage == 'compact':
+                union_map = getattr(self, '_slot_union_map', {})
+                if not union_map:
+                    return
+                cluster_slot_counts: Dict[int, int] = {}
+                for (cluster_idx, local_slot), global_slot in union_map.items():
+                    cluster_slot_counts[cluster_idx] = max(cluster_slot_counts.get(cluster_idx, -1), local_slot)
+                for s_idx in range(num_samples):
+                    sample_graph = nx.DiGraph() if self.directed else nx.Graph()
+                    sample_mappings: Dict[int, np.ndarray] = {}
+                    for cluster_idx, res in enumerate(local_results):
+                        local_bp = res['blueprint']
+                        remap: Dict[int, int] = {}
+                        for node in local_bp.nodes():
+                            gid = union_map.get((cluster_idx, int(node)), None)
+                            if gid is None:
+                                continue
+                            remap[node] = gid
+                        if not remap:
+                            continue
+                        relabeled_bp = nx.relabel_nodes(local_bp, remap, copy=True)
+                        sample_graph = nx.compose(sample_graph, relabeled_bp)
+                    self.full_posterior_L.append(nx.to_numpy_array(sample_graph))
+                    self.full_posterior_mappings.append({})
+                return
+
             for s_idx in range(num_samples):
-                # Get the meta-graph for this specific sample
                 meta_L_sample_matrix = self.meta_posterior_L[s_idx]
                 meta_blueprint_sample = nx.from_numpy_array(
                     meta_L_sample_matrix, 
                     create_using=nx.DiGraph if self.directed else nx.Graph
                 )
 
-                # Use the stitching logic on this specific sample
                 graph_sample, mappings_sample = self._stitch_results(
                     local_results,
                     meta_blueprint_sample,
-                    # Pass the mean meta-mappings, _stitch_results will use sampled local pi
                     meta_mappings, 
                     sample_idx=s_idx)
                 

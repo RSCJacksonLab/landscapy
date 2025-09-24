@@ -57,6 +57,8 @@ def cli():
 @click.option('--sample-thin', required=False, type=int, default=50, help='Thinning interval for the RJMCMC sampler.')
 @click.option('--auto-anchor', required=False, is_flag=True, default=True, help='Boolean flag to auto-anchor nodes to latent slots by cosine similarity.')
 @click.option('--anchor-cosine-threshold', required=False, type=float, default=0.99, help='Cosine similarity threshold for auto-anchoring nodes to latent slots.')
+@click.option('--posterior-storage', required=False, type=click.Choice(['compact','full','none']), default='compact', show_default=True,
+              help="Posterior storage policy: 'compact' averages per cluster, 'full' keeps all samples, 'none' drops posteriors.")
 @click.option('--posterior-threshold', required=False, type=float, default=0.25, help='Posterior probability threshold to binarize the latent graph (used in stitching with sliding windows).')
 @click.option('--sequential-construction', is_flag=True, default=False, help='Construct each landscape sequentially (avoids Ray during construction).')
 @click.option('--seed', required=False, type=int, default=None, help='Seed for the random number generator to make results reproducible.')
@@ -125,6 +127,7 @@ def phylo_superscape(sequences,
                      sample_thin,
                      auto_anchor,
                      anchor_cosine_threshold,
+                     posterior_storage,
                      posterior_threshold,
                      seed,
                      meta_cpu_chains,
@@ -598,6 +601,7 @@ def phylo_superscape(sequences,
         "thin": sample_thin,
         "auto_anchor": auto_anchor,
         "cosine_anchor_threshold": anchor_cosine_threshold,
+        "posterior_storage": posterior_storage,
         "seed": seed,
         "local_cpu_chains": local_cpu_chains,
         # Optional sliding-window controls for hierarchical aligner
@@ -649,7 +653,6 @@ def phylo_superscape(sequences,
             posterior_prob_cutoff=posterior_threshold,
             _meta_cpu_chains=meta_cpu_chains,
             _fresh_worker_per_job=ray_fresh_worker,
-            _show_progress=log_progress,
             _construct_checkpoint_dir=str(ckpt_dir),
             _auto_backoff=auto_backoff,
             _retry_max=retry_max,
