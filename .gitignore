@@ -185,3 +185,6 @@ examples/
 
 # Temporarily remove docs
 docs/
+
+# Remove paper figures
+paper_figures/
