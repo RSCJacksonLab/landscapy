@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 import networkx as nx
+from typing import Any
 from fitness_landscape.core.sequence import *
 from fitness_landscape.core.graph import *
 from fitness_landscape.core.graph import _encode_multiallele 
@@ -723,7 +724,7 @@ def test_landscape_from_phylogeny_builds_expected_graph(tmp_path: Path):
     assert pytest.approx(edge_data['branch_length']) == 0.1
 
 
-def test_landscape_from_phylogeny_missing_sequence_raises(tmp_path: Path):
+def test_landscape_from_phylogeny_missing_internal_nodes_infers(tmp_path: Path):
     tree_path = tmp_path / "tree.nwk"
     tree_path.write_text("((seq1:0.1,seq2:0.2)anc1:0.3,seq3:0.4)root;")
 
@@ -735,12 +736,15 @@ def test_landscape_from_phylogeny_missing_sequence_raises(tmp_path: Path):
         ">root\nACDEYG\n"
     )
 
-    with pytest.raises(ValueError, match="missing for tree nodes"):
-        FitnessLandscape.from_phylogeny(
-            tree=tree_path,
-            fasta=fasta_path,
-            _compute_hamming_edges=False,
-        )
+    landscape = FitnessLandscape.from_phylogeny(
+        tree=tree_path,
+        fasta=fasta_path,
+        _compute_hamming_edges=False,
+        model_fitting=False,
+    )
+
+    assert 'anc1' in landscape.graph
+    assert 'root' in landscape.graph
 
 
 def test_landscape_from_phylogeny_can_retain_gaps(tmp_path: Path):
@@ -765,6 +769,82 @@ def test_landscape_from_phylogeny_can_retain_gaps(tmp_path: Path):
     assert 'gap' in seq2_record.alphabet
     assert 'gap' in seq2_record.to_array()
     assert landscape.graph.nodes['seq2']['gapped_arr'].shape == (4, 21)
+
+def test_landscape_from_phylogeny_infers_missing_nodes(monkeypatch):
+    class StubNode:
+        def __init__(self, name: str, length: float | None = None):
+            self.name = name
+            self.length = length
+            self.children: list['StubNode'] = []
+            self.parent: 'StubNode | None' = None
+
+        def add_child(self, child: 'StubNode', length: float) -> None:
+            child.length = length
+            child.parent = self
+            self.children.append(child)
+
+    root = StubNode('root')
+    anc = StubNode('anc1')
+    seq1_node = StubNode('seq1')
+    seq2_node = StubNode('seq2')
+
+    root.add_child(anc, 0.3)
+    anc.add_child(seq1_node, 0.1)
+    anc.add_child(seq2_node, 0.2)
+
+    class StubAlignment:
+        def __init__(self, seq_map: dict[str, str]):
+            self._seq_map = seq_map
+            self.names = list(seq_map.keys())
+
+        def get_gapped_seq(self, name: str) -> str:
+            return self._seq_map[name]
+
+    tip_alignment = StubAlignment({'seq1': 'ACDE', 'seq2': 'AC-E'})
+
+    fake_graph = nx.Graph()
+    fake_graph.add_edge('anc1', 'seq1')
+    fake_graph.add_edge('anc1', 'seq2')
+    fake_graph.add_edge('root', 'anc1')
+    for node in ['seq1', 'seq2', 'anc1', 'root']:
+        fake_graph.nodes[node]['sequence'] = BaseNumpySequence.from_string(
+            'ACE', alphabet=PROT_20, sequence_id=node
+        )
+        fake_graph.nodes[node]['gapped_arr'] = np.zeros((3, 21))
+
+    class DummyCtor:
+        calls: list[dict[str, Any]] = []
+
+        def __init__(self, alignment, phylogenetic_tree=None, **kwargs):
+            DummyCtor.calls.append({'alignment': alignment, 'tree': phylogenetic_tree, 'kwargs': kwargs})
+
+        def construct_dag(self, graph_type: str = 'undirected'):
+            assert graph_type == 'undirected'
+            return fake_graph.copy()
+
+    def stub_make_aligned_seqs(mapping: dict[str, str], moltype: str | None = None):
+        return StubAlignment(mapping)
+
+    monkeypatch.setattr('fitness_landscape.core.landscape.ASRConstructor', DummyCtor)
+    monkeypatch.setattr('fitness_landscape.core.landscape.make_aligned_seqs', stub_make_aligned_seqs)
+
+    landscape = FitnessLandscape.from_phylogeny(
+        tree=root,
+        fasta=tip_alignment,
+        _compute_hamming_edges=False,
+    )
+
+    assert DummyCtor.calls, "ASRConstructor should be invoked when ancestral sequences are missing."
+    inferred_alignment = DummyCtor.calls[0]['alignment']
+    assert inferred_alignment.names == ['seq1', 'seq2']
+    assert str(inferred_alignment.get_gapped_seq('seq1')) == 'ACE'
+    assert str(inferred_alignment.get_gapped_seq('seq2')) == 'ACE'
+
+    assert set(landscape.graph.nodes()) == {'seq1', 'seq2', 'anc1', 'root'}
+    assert pytest.approx(landscape.graph['anc1']['seq1']['branch_length']) == 0.1
+    assert pytest.approx(landscape.graph['anc1']['seq2']['branch_length']) == 0.2
+    assert pytest.approx(landscape.graph['root']['anc1']['branch_length']) == 0.3
+
 
 def test_create_evol_diffusion_graph_is_undirected_and_symmetric(diffusion_test_data):
     """
