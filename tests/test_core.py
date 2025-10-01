@@ -687,6 +687,85 @@ def test_phylo_graph_is_a_tree(phylo_test_data):
     assert nx.is_connected(graph), "The phylogenetic graph must be a single connected component."
     assert graph.number_of_edges() == graph.number_of_nodes() - 1, "The graph should have N-1 edges to be a tree."
 
+
+def test_landscape_from_phylogeny_builds_expected_graph(tmp_path: Path):
+    tree_path = tmp_path / "tree.nwk"
+    tree_path.write_text("((seq1:0.1,seq2:0.2)anc1:0.3,seq3:0.4)root;")
+
+    fasta_path = tmp_path / "states.fasta"
+    fasta_path.write_text(
+        ">seq1\nACDEFG\n"
+        ">seq2\nACD-EG\n"
+        ">seq3\nACNEFG\n"
+        ">anc1\nACDEFG\n"
+        ">root\nACDEYG\n"
+    )
+
+    landscape = FitnessLandscape.from_phylogeny(
+        tree=tree_path,
+        fasta=fasta_path,
+        strip_gap_columns=True,
+        _compute_hamming_edges=False,
+    )
+
+    assert set(landscape.graph.nodes()) == {"seq1", "seq2", "seq3", "anc1", "root"}
+    expected_edges = {frozenset({"anc1", "seq1"}),
+                      frozenset({"anc1", "seq2"}),
+                      frozenset({"root", "anc1"}),
+                      frozenset({"root", "seq3"})}
+    actual_edges = {frozenset(edge[:2]) for edge in landscape.graph.edges()}
+    assert actual_edges == expected_edges
+
+    assert all(len(data['sequence']) == 5 for _, data in landscape.graph.nodes(data=True))
+    assert landscape.graph.nodes['seq2']['gapped_arr'].shape[0] == 6
+
+    edge_data = landscape.graph.get_edge_data('anc1', 'seq1')
+    assert pytest.approx(edge_data['branch_length']) == 0.1
+
+
+def test_landscape_from_phylogeny_missing_sequence_raises(tmp_path: Path):
+    tree_path = tmp_path / "tree.nwk"
+    tree_path.write_text("((seq1:0.1,seq2:0.2)anc1:0.3,seq3:0.4)root;")
+
+    fasta_path = tmp_path / "states.fasta"
+    fasta_path.write_text(
+        ">seq1\nACDEFG\n"
+        ">seq2\nACD-EG\n"
+        ">seq3\nACNEFG\n"
+        ">root\nACDEYG\n"
+    )
+
+    with pytest.raises(ValueError, match="missing for tree nodes"):
+        FitnessLandscape.from_phylogeny(
+            tree=tree_path,
+            fasta=fasta_path,
+            _compute_hamming_edges=False,
+        )
+
+
+def test_landscape_from_phylogeny_can_retain_gaps(tmp_path: Path):
+    tree_path = tmp_path / "tree.nwk"
+    tree_path.write_text("(seq1:0.1,seq2:0.2)root;")
+
+    fasta_path = tmp_path / "states.fasta"
+    fasta_path.write_text(
+        ">seq1\nACDE\n"
+        ">seq2\nA-CD\n"
+        ">root\nACDE\n"
+    )
+
+    landscape = FitnessLandscape.from_phylogeny(
+        tree=tree_path,
+        fasta=fasta_path,
+        strip_gap_columns=False,
+        _compute_hamming_edges=False,
+    )
+
+    seq2_record = landscape.graph.nodes['seq2']['sequence']
+    assert 'gap' in seq2_record.alphabet
+    assert 'gap' in seq2_record.to_array()
+    assert landscape.graph.nodes['seq2']['gapped_arr'].shape == (4, 21)
+
 def test_create_evol_diffusion_graph_is_undirected_and_symmetric(diffusion_test_data):
     """
     Tests that the evolutionary diffusion graph is undirected and its
