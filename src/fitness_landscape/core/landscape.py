@@ -5,7 +5,7 @@ import networkx as nx
 import torch
 from torch_geometric.data import Data
 from torch_geometric.utils import from_networkx
-from typing import List, Union, Dict, Any, Iterable, Literal,  Protocol, runtime_checkable, Hashable, Union, Tuple, Mapping, Callable, Optional
+from typing import List, Union, Dict, Any, Iterable, Literal,  Protocol, runtime_checkable, Hashable, Union, Tuple, Mapping, Callable, Optional, Sequence
 from dataclasses import dataclass
 from .sequence import BaseNumpySequence, make_sequence
 from .graph import (
@@ -16,6 +16,7 @@ from .graph import (
     _encode_multiallele,
     create_phylo_graph,
     create_evol_diffusion_graph,
+    compute_edge_mutations_star,
 )
 from .digraph import create_phylo_digraph, create_evol_diffusion_digraph, create_particle_filter_digraph
 from .fitness import NumericFitness, CategoricalFitness, BaseFitnessLayer, ProbabilisticCategoricalFitness
@@ -23,11 +24,16 @@ from abc import ABC, abstractmethod
 from ..utils import _compute_embeddings_from_sequences, alignment_to_base_numpy_sequences
 import inspect
 from collections import defaultdict
-from cogent3 import load_aligned_seqs
-from cogent3.core.alignment import Alignment
+from cogent3 import load_aligned_seqs, load_tree
+from cogent3.core.alignment import Alignment, make_aligned_seqs
+try:
+    from cogent3.core.tree import PhyloNode
+except Exception:  # pragma: no cover - optional during typing only environments
+    PhyloNode = None  # type: ignore
 from pathlib import Path
 import warnings
-from .._const import PROT_20
+from .._const import PROT_20, ALPHABET_21
+from ..phylo.phylogenetic_asr import ASRConstructor
 
 GraphCtor = Callable[..., nx.Graph]
 
@@ -1277,6 +1283,282 @@ class FitnessLandscape:
                    graph=G,
                    fitness_layers=fitness_layers,
                    embeddings=(E if attach_embeddings else None),
+                   emb_arr_key=emb_arr_key)
+
+    @classmethod
+    def from_phylogeny(cls,
+                       tree: Union[str, Path, 'PhyloNode'],
+                       fasta: Union[str, Path, Alignment],
+                       *,
+                       fitness_layers: dict[str, BaseFitnessLayer] | None = None,
+                       strip_gap_columns: bool = True,
+                       emb_arr_key: str = "emb_arr",
+                       moltype: str = "protein",
+                       _compute_hamming_edges: bool = True,
+                       replacement_matrix: Sequence[str] = ("LG",),
+                       model_fitting: bool = False,
+                       phylo_backend: str = "cogent_nj",
+                       _dist_calc: Literal['paralinear', 'pdist', 'hamming'] = 'pdist',
+                       _log_progress: bool = False,
+                       _nested_parallel: bool = False) -> "FitnessLandscape":
+        """
+        Construct a FitnessLandscape directly from a supplied phylogeny and
+        an alignment containing both ancestral and extant sequences.
+
+        Parameters
+        ----------
+        tree : str | Path | PhyloNode
+            Newick string, file path, or cogent3 PhyloNode describing the tree.
+            Every node must be named so that it can be matched to sequences.
+        fasta : str | Path | Alignment
+            FASTA alignment (path or Alignment object). If ancestral sequences
+            are missing, they will be inferred using the supplied tree.
+        strip_gap_columns : bool, default=True
+            If True, remove alignment columns that contain a gap in any sequence
+            before constructing the hard sequences (ensures PROT_20 alphabet).
+            When False, the stored sequences retain gaps using the 21-character
+            alphabet that includes ``"gap"``.
+        moltype : str, default="protein"
+            Moltype hint passed to cogent3 sequence constructors.
+        _compute_hamming_edges : bool, default=True
+            Whether to annotate edges with expected Hamming counts using the
+            existing soft-alignment routine.
+        replacement_matrix : Sequence[str], default=("LG",)
+            Replacement model(s) passed to the ancestral reconstruction
+            workflow when inference is required.
+        model_fitting : bool, default=False
+            Whether to perform model selection during ancestral
+            reconstruction when inference is triggered.
+        phylo_backend : str, default="cogent_nj"
+            Backend hint forwarded to the ancestral reconstruction engine.
+        _dist_calc : {'paralinear', 'pdist', 'hamming'}, default='pdist'
+            Distance metric used when the reconstruction backend computes
+            pairwise distances (only relevant if inference is required).
+        _log_progress : bool, default=False
+            Enable verbose logging during ancestral sequence reconstruction.
+        _nested_parallel : bool, default=False
+            Forwarded to the edge annotation helper to allow nested parallelism
+            when computing expected mutation statistics.
+
+        Returns
+        -------
+        FitnessLandscape
+            Landscape whose nodes follow the supplied phylogeny and whose
+            sequences are taken directly from the FASTA records.
+        """
+
+        def _coerce_tree(obj: Union[str, Path, 'PhyloNode']):
+            if PhyloNode is not None and isinstance(obj, PhyloNode):
+                return obj
+            if hasattr(obj, 'children') and hasattr(obj, 'name'):
+                return obj
+            if isinstance(obj, Path):
+                return load_tree(str(obj))
+            if isinstance(obj, str):
+                candidate = Path(obj)
+                if candidate.exists():
+                    return load_tree(str(candidate))
+                return load_tree(obj)
+            raise TypeError("tree must be a Newick string, Path, or PhyloNode")
+
+        def _coerce_alignment(obj: Union[str, Path, Alignment]) -> Alignment:
+            if isinstance(obj, Alignment):
+                return obj
+            if hasattr(obj, 'names') and hasattr(obj, 'get_gapped_seq'):
+                return obj  # duck-typed Alignment-like object
+            if isinstance(obj, Path):
+                return load_aligned_seqs(str(obj), moltype=moltype)
+            if isinstance(obj, str):
+                candidate = Path(obj)
+                if candidate.exists():
+                    return load_aligned_seqs(str(candidate), moltype=moltype)
+                return load_aligned_seqs(obj, moltype=moltype)
+            raise TypeError("fasta must be an Alignment, FASTA string, or Path")
+
+        tree_obj = _coerce_tree(tree)
+        alignment = _coerce_alignment(fasta)
+
+        names = [str(n) for n in alignment.names]
+        if not names:
+            raise ValueError("Alignment is empty; no sequences were provided.")
+        if len(names) != len(set(names)):
+            raise ValueError("Alignment contains duplicate sequence identifiers.")
+
+        legal = set(PROT_20)
+
+        def _clean_char(ch: str, seq_name: str) -> str:
+            if ch in {'-', '.'}:
+                return '-'
+            up = ch.upper()
+            if up not in legal:
+                raise ValueError(f"Non-canonical residue '{ch}' found in sequence '{seq_name}'.")
+            return up
+
+        gapped_strings: dict[str, str] = {}
+        for raw_name in names:
+            seq_str = str(alignment.get_gapped_seq(raw_name))
+            cleaned = ''.join(_clean_char(ch, raw_name) for ch in seq_str)
+            gapped_strings[raw_name] = cleaned
+
+        aln_len = len(next(iter(gapped_strings.values())))
+        if any(len(seq) != aln_len for seq in gapped_strings.values()):
+            raise ValueError("Alignment sequences must all have the same length.")
+
+        keep_mask: list[bool]
+        if strip_gap_columns:
+            keep_mask = [all(seq[pos] != '-' for seq in gapped_strings.values()) for pos in range(aln_len)]
+            if not any(keep_mask):
+                raise ValueError("All alignment columns contain gaps; cannot build ungapped sequences.")
+        else:
+            keep_mask = [True] * aln_len
+
+        if strip_gap_columns:
+            alignment_map_for_asr = {
+                name: ''.join(ch for ch, keep in zip(seq, keep_mask) if keep)
+                for name, seq in gapped_strings.items()
+            }
+            for name, trimmed in alignment_map_for_asr.items():
+                if not trimmed:
+                    raise ValueError(f"Sequence '{name}' is empty after removing gap columns.")
+        else:
+            alignment_map_for_asr = dict(gapped_strings)
+
+        node_lookup: dict[str, Any] = {}
+
+        def _dfs(node) -> None:
+            node_name = getattr(node, 'name', None)
+            if not node_name:
+                raise ValueError("Encountered an unnamed node in the tree; all nodes must be labelled.")
+            key = str(node_name)
+            if key in node_lookup:
+                raise ValueError(f"Duplicate node name '{key}' encountered in the tree.")
+            node_lookup[key] = node
+            for child in getattr(node, 'children', []) or []:
+                _dfs(child)
+
+        _dfs(tree_obj)
+
+        provided_names = set(gapped_strings)
+        missing = sorted(set(node_lookup) - provided_names)
+        extra = sorted(provided_names - set(node_lookup))
+        if extra:
+            raise ValueError(f"Sequences provided without matching tree nodes: {', '.join(extra)}")
+
+        if missing:
+            tips = {
+                name for name, node in node_lookup.items()
+                if not (getattr(node, 'children', []) or [])
+            }
+            missing_tips = sorted(set(missing) & tips)
+            if missing_tips:
+                raise ValueError(
+                    "Sequences are missing for tree tip nodes: " + ', '.join(missing_tips)
+                )
+
+            aln_for_asr = make_aligned_seqs(alignment_map_for_asr, moltype=moltype)
+            constructor = ASRConstructor(
+                aln_for_asr,
+                phylogenetic_tree=tree_obj,
+                model_fitting=model_fitting,
+                replacement_matrix=list(replacement_matrix),
+                phylo_backend=phylo_backend,
+                _dist_calc=_dist_calc,
+                _log_progress=_log_progress,
+            )
+
+            graph = constructor.construct_dag(graph_type='undirected')
+
+            # Stamp branch lengths from the supplied tree onto the inferred graph.
+            for child_name, child_node in node_lookup.items():
+                parent_node = getattr(child_node, 'parent', None)
+                if parent_node is None:
+                    continue
+                parent_name = getattr(parent_node, 'name', None)
+                if not parent_name:
+                    continue
+                if graph.has_edge(parent_name, child_name):
+                    branch_length = getattr(child_node, 'length', None)
+                    if branch_length is not None:
+                        try:
+                            graph[parent_name][child_name]['branch_length'] = float(branch_length)
+                        except (TypeError, ValueError):
+                            pass
+
+            if _compute_hamming_edges and graph.number_of_edges() > 0:
+                compute_edge_mutations_star(
+                    graph,
+                    _log_progress=_log_progress,
+                    _nested_parallel=_nested_parallel,
+                )
+
+            node_order = list(graph.nodes())
+            sequences = [graph.nodes[name]['sequence'] for name in node_order]
+
+            return cls(sequences=sequences,
+                       graph=graph,
+                       fitness_layers=fitness_layers,
+                       embeddings=None,
+                       emb_arr_key=emb_arr_key)
+
+        seq_records: dict[str, dict[str, Any]] = {}
+        for name, gapped in gapped_strings.items():
+            gapped_seq = BaseNumpySequence(list(gapped),
+                                           sequence_id=name,
+                                           alphabet=ALPHABET_21,
+                                           moltype=moltype)
+            if strip_gap_columns:
+                ungapped = alignment_map_for_asr[name]
+                hard_seq = BaseNumpySequence.from_string(ungapped,
+                                                         alphabet=PROT_20,
+                                                         moltype=moltype,
+                                                         sequence_id=name)
+            else:
+                hard_seq = gapped_seq
+            seq_records[name] = {
+                'sequence': hard_seq,
+                'gapped_arr': gapped_seq.to_one_hot(),
+            }
+
+        edges: list[tuple[str, str, dict[str, float]]] = []
+        for child_name, child_node in node_lookup.items():
+            parent_node = getattr(child_node, 'parent', None)
+            if parent_node is None:
+                continue
+            parent_name = getattr(parent_node, 'name', None)
+            if not parent_name:
+                raise ValueError(f"Parent of node '{child_name}' lacks a name; unable to create edge.")
+            attr: dict[str, float] = {}
+            branch_length = getattr(child_node, 'length', None)
+            if branch_length is not None:
+                try:
+                    attr['branch_length'] = float(branch_length)
+                except (TypeError, ValueError):
+                    pass
+            edges.append((str(parent_name), child_name, attr))
+
+        G = nx.Graph()
+        G.add_nodes_from(node_lookup.keys())
+        for parent_name, child_name, attr in edges:
+            G.add_edge(parent_name, child_name, **attr)
+
+        for name, record in seq_records.items():
+            G.nodes[name]['sequence'] = record['sequence']
+            G.nodes[name]['gapped_arr'] = record['gapped_arr']
+
+        if _compute_hamming_edges and G.number_of_edges() > 0:
+            compute_edge_mutations_star(
+                G,
+                _log_progress=_log_progress,
+                _nested_parallel=_nested_parallel,
+            )
+
+        node_order = list(G.nodes())
+        sequences = [G.nodes[name]['sequence'] for name in node_order]
+
+        return cls(sequences=sequences,
+                   graph=G,
+                   fitness_layers=fitness_layers,
+                   embeddings=None,
                    emb_arr_key=emb_arr_key)
 
     @classmethod
