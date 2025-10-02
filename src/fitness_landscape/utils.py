@@ -767,6 +767,51 @@ def iter_moving_window_alignment(alignment: Alignment,
         # to guarantee coverage.
         # In typical use, the loop above already yielded the tail.
 
+
+def iter_random_subalignment(alignment: Alignment,
+                             sample_size: int,
+                             n_samples: int,
+                             *,
+                             replace: bool = False,
+                             rng: Optional[np.random.Generator] = None):
+    """Yield sub-alignments built by sampling tips uniformly at random.
+
+    Parameters
+    ----------
+    alignment : Alignment
+        Source alignment to sample from.
+    sample_size : int
+        Number of sequences (tips) per sampled sub-alignment.
+    n_samples : int
+        Total number of sub-alignments to generate.
+    replace : bool, default=False
+        Whether to sample with replacement. When False and ``sample_size``
+        equals the number of tips, each sample simply returns the full
+        alignment.
+    rng : numpy.random.Generator, optional
+        Random number generator to use. If ``None``, a default generator
+        (``np.random.default_rng()``) is used.
+    """
+    names = list(alignment.names)
+    n_tips = len(names)
+    if n_tips == 0 or sample_size <= 0 or n_samples <= 0:
+        return
+    if sample_size > n_tips and not replace:
+        raise ValueError("sample_size exceeds number of tips; enable replace=True to allow repeats.")
+
+    rng = rng or np.random.default_rng()
+    seq_map = {name: str(alignment.get_gapped_seq(name)) for name in names}
+    for _ in range(n_samples):
+        if replace:
+            chosen = rng.choice(names, size=sample_size, replace=True)
+        else:
+            if sample_size == n_tips:
+                chosen = names
+            else:
+                chosen = rng.choice(names, size=sample_size, replace=False)
+        sub = {name: seq_map[name] for name in chosen}
+        yield make_aligned_seqs(sub, moltype='protein')
+
 @dataclass
 class HammingCheckResult:
     is_full_hamming: bool

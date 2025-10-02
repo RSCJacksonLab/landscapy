@@ -95,6 +95,8 @@ def _create_landscape_task(
     _logger = _logging.getLogger('fitness_landscape')
     # Optional human-readable label for logs
     _job_label = kwargs.pop('_job_label', None)
+    _fan_kind = kwargs.pop('_fan_kind', None)
+    _emb_save_path = kwargs.pop('_embeddings_save_path', None)
     # Pre-flight: summarize input size to aid debugging / OOM triage
     _n = None; _L = None
     try:
@@ -118,6 +120,16 @@ def _create_landscape_task(
             fitness_layers=fitness_layers,
             **kwargs
         )
+        if _emb_save_path:
+            try:
+                import numpy as _np
+                from pathlib import Path as _Path
+                if getattr(result, 'embeddings', None) is not None:
+                    _Path(_emb_save_path).parent.mkdir(parents=True, exist_ok=True)
+                    _np.save(_emb_save_path, result.embeddings)
+            except Exception as _exc:
+                if _log_progress:
+                    _logger.warning('[job %s/%s] failed to save embeddings to %s: %s', _job_id, _total_jobs, _emb_save_path, _exc)
         if _log_progress:
             dt = _time.perf_counter()-ts
             if _job_label:
@@ -240,6 +252,10 @@ class FitnessSuperscape:
             _hier_kwargs['_local_cpu_chains'] = _lc
         if _mc is not None:
             _hier_kwargs['_meta_cpu_chains'] = _mc
+
+        _gbt = _pop_any(_sampler_kwargs, ['global_bridge_threshold', '_global_bridge_threshold'], None)
+        if _gbt is not None:
+            _hier_kwargs['global_bridge_threshold'] = _gbt
 
         # Progress / checkpoint controls
         _show = _pop_any(_sampler_kwargs, ['_show_progress', 'show_progress'], None)

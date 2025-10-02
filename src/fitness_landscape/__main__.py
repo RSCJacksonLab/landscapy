@@ -5,9 +5,15 @@ import json
 from pathlib import Path
 import logging
 import time
+import numpy as np
 from fitness_landscape.core.superscape import FitnessSuperscape
 from fitness_landscape.core.landscape import DirectedFitnessLandscape
-from fitness_landscape.utils import moving_window_alignment, sanitize_alignment
+from fitness_landscape.utils import (
+    moving_window_alignment,
+    sanitize_alignment,
+    iter_moving_window_alignment,
+    iter_random_subalignment,
+)
 from fitness_landscape.graph_matching.latent_alignment import BernoulliBeta
 from cogent3 import load_aligned_seqs
 import pickle
@@ -16,6 +22,61 @@ from fitness_landscape.core.graph import create_evol_diffusion_graph
 from fitness_landscape.core.sequence import read_from_fasta
 from fitness_landscape.utils import _compute_embeddings_from_sequences, fasta_to_prot20_sequences
 from fitness_landscape._const import PROT_20
+
+
+def _disable_cogent3_numba_parallel():
+    """Work around numba get_num_threads typing errors by using Python fallbacks."""
+    try:
+        import cogent3.evolve.pairwise_distance_numba as _pdn
+    except Exception:
+        return
+    try:
+        import numba
+    except Exception:
+        numba = None
+
+    patched = False
+    for _name in (
+        '_calc_tn93_dist',
+        '_count_states',
+        '_get_matrix_and_counts',
+        '_paralinear',
+        'jc69_dist_matrix',
+        'num_diffs_and_valid',
+        'paralinear_distance_matrix',
+        'simple_distance_matrix',
+        'tn93_dist_matrix',
+    ):
+        fn = getattr(_pdn, _name, None)
+        py = getattr(fn, 'py_func', None)
+        if py is not None:
+            setattr(_pdn, _name, py)
+            patched = True
+
+    if patched:
+        try:
+            import warnings
+            warnings.warn(
+                'numba distance kernels disabled; using Python fallbacks. '
+                'Set FITNESS_LANDSCAPE_ENABLE_NUMBA=1 to opt back in.',
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        except Exception:
+            pass
+
+    if numba is not None:
+        try:
+            numba.set_num_threads(1)
+        except Exception:
+            pass
+        try:
+            numba.get_num_threads()
+        except Exception:
+            try:
+                numba.get_num_threads = lambda: 1  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
 @click.group()
 def cli():
@@ -28,9 +89,12 @@ def cli():
 @click.option('--output', required=True, type=click.Path(), help='Path to save the serialized FitnessSuperscape object.')
 
 # Processing alignment input
-@click.option('--fan-alignment', required=False, is_flag=True, default=False, help='Boolean flag to indicate if the input alignment should be fanned into sub-alignments for parallel processing.')
-@click.option('--fan-alignment-window', required=False, type=int, help='Moving window size for fanning the input alignment into sub-alignments.')
-@click.option('--fan-alignment-overlap', required=False, type=int, help='Overlap size for fanning the input alignment into sub-alignments.')
+@click.option('--fan-alignment', required=False, is_flag=True, default=False, help='Enable construction of multiple sub-alignments (either sliding windows or random samples).')
+@click.option('--fan-mode', required=False, type=click.Choice(['window', 'random', 'both']), default='window', help='Fanning strategy: sliding windows (`window`), random sampling (`random`), or both.')
+@click.option('--fan-alignment-window', required=False, type=int, help='Sliding window size (number of tips). Required when --fan-mode=window.')
+@click.option('--fan-alignment-overlap', required=False, type=int, help='Sliding window overlap (tips). Required when --fan-mode=window.')
+@click.option('--fan-random-size', required=False, type=int, help='Number of tips per randomly sampled sub-alignment when --fan-mode=random.')
+@click.option('--fan-random-count', required=False, type=int, help='How many random sub-alignments to sample when --fan-mode=random.')
 
 # Phylogenetic inference
 @click.option('--directed-landscape', required=False, is_flag=True, default=False, help='Boolean flag to indicate if a directed phylogenetic fitness landscape should be constructed.')
@@ -43,6 +107,9 @@ def cli():
 @click.option('--plm-model-name', required=False, type=str, default='facebook/esm2_t6_8M_UR50D', help='PLM model if embedding-domain=plm (harmonized with diffusion CLI).')
 @click.option('--plm-batch-size', required=False, type=int, default=64, help='Batch size for PLM embeddings (harmonized with diffusion CLI).')
 @click.option('--plm-device', required=False, type=str, default=None, help='Device for PLM embeddings (e.g., cpu or cuda).')
+@click.option('--embeddings-dir-in', required=False, type=click.Path(exists=True, file_okay=False), default=None, help='Directory containing precomputed per-job embeddings (job_XXXXX.npy).')
+@click.option('--embeddings-dir-out', required=False, type=click.Path(file_okay=False), default=None, help='Directory to write per-job embeddings (job_XXXXX.npy).')
+@click.option('--only-embeddings', is_flag=True, default=False, help='Compute per-job embeddings and exit without running the superscape alignment.')
 @click.option('--replacement-matrix', required=False, multiple=True, default=['LG'], help='Replacement matrix/matrices for IQ-TREE model selection (e.g., LG). Can be provided multiple times.')
 @click.option('--model-fitting/--no-model-fitting', default=False, help='Whether to perform IQ-TREE model selection across the provided replacement matrices.')
 
@@ -60,6 +127,7 @@ def cli():
 @click.option('--posterior-storage', required=False, type=click.Choice(['compact','full','none']), default='compact', show_default=True,
               help="Posterior storage policy: 'compact' averages per cluster, 'full' keeps all samples, 'none' drops posteriors.")
 @click.option('--posterior-threshold', required=False, type=float, default=0.25, help='Posterior probability threshold to binarize the latent graph (used in stitching with sliding windows).')
+@click.option('--global-bridge-threshold', required=False, type=float, default=0.5, show_default=True, help='Posterior overlap threshold for merging local windows during hierarchical alignment.')
 @click.option('--sequential-construction', is_flag=True, default=False, help='Construct each landscape sequentially (avoids Ray during construction).')
 @click.option('--seed', required=False, type=int, default=None, help='Seed for the random number generator to make results reproducible.')
 
@@ -105,8 +173,11 @@ def cli():
 def phylo_superscape(sequences,
                      output,
                      fan_alignment,
+                     fan_mode,
                      fan_alignment_window,
                      fan_alignment_overlap,
+                     fan_random_size,
+                     fan_random_count,
                      directed_landscape,
                      phylo_backend,
                      phylo_distance_calc,
@@ -115,6 +186,9 @@ def phylo_superscape(sequences,
                      plm_model_name,
                      plm_batch_size,
                      plm_device,
+                     embeddings_dir_in,
+                     embeddings_dir_out,
+                     only_embeddings,
                      replacement_matrix,
                      model_fitting,
                      bernoulli_beta_alpha0,
@@ -150,6 +224,7 @@ def phylo_superscape(sequences,
                      submit_sleep_seconds,
                      skip_failed_jobs,
                      sequential_construction,
+                     global_bridge_threshold,
                      log_file,
                      log_level,
                      log_progress,
@@ -185,12 +260,44 @@ def phylo_superscape(sequences,
             logger.addHandler(fh)
     t0 = time.perf_counter(); c0 = time.process_time()
     logger.info('phylo-superscape: start')
+    if os.environ.get('FITNESS_LANDSCAPE_ENABLE_NUMBA', '').lower() not in {'1', 'true', 'yes'}:
+        _disable_cogent3_numba_parallel()
     logger.info('RJMCMC: alpha=%.3f burn-in=%d samples=%d thin=%d auto_anchor=%s', rjmcmc_alpha, burn_in_samples, total_samples, sample_thin, str(auto_anchor))
     logger.info('Parallelism: meta_cpu_chains=%s local_cpu_chains=%s sequential_construction=%s', str(meta_cpu_chains), str(local_cpu_chains), str(sequential_construction))
+    logger.info('Hierarchical alignment: global_bridge_threshold=%.3f', global_bridge_threshold)
     if fan_alignment:
-        logger.info('Fanning enabled: window=%s overlap=%s', str(fan_alignment_window), str(fan_alignment_overlap))
+        if fan_mode in {'window', 'both'}:
+            logger.info('Fanning includes sliding windows: window=%s overlap=%s', str(fan_alignment_window), str(fan_alignment_overlap))
+        if fan_mode in {'random', 'both'}:
+            logger.info('Fanning includes random sampling: sample_size=%s samples=%s', str(fan_random_size), str(fan_random_count))
     if max_seqs_per_block:
         logger.info('Sequence blocking: max_seqs_per_block=%s', str(max_seqs_per_block))
+
+    embeddings_dir_in = Path(embeddings_dir_in) if embeddings_dir_in is not None else None
+    embeddings_dir_out = Path(embeddings_dir_out) if embeddings_dir_out is not None else None
+
+    if only_embeddings and embeddings_dir_out is None:
+        raise click.UsageError('--only-embeddings requires --embeddings-dir-out to be specified.')
+    if embeddings_dir_out is not None:
+        embeddings_dir_out.mkdir(parents=True, exist_ok=True)
+    if embeddings_dir_in is not None and not embeddings_dir_in.exists():
+        raise click.UsageError(f'Embeddings directory {embeddings_dir_in} does not exist.')
+    if only_embeddings and embeddings_dir_in is not None:
+        raise click.UsageError('--only-embeddings cannot be combined with --embeddings-dir-in.')
+    if embeddings_dir_in is not None and compute_phylo_embeddings:
+        logger.info('Precomputed embeddings supplied; disabling per-job embedding computation.')
+    if only_embeddings and not compute_phylo_embeddings:
+        raise click.UsageError('--only-embeddings requires embeddings to be computed; remove --no-compute-phylo-embeddings.')
+
+    def _embedding_out_path(job_id: int) -> Path:
+        if embeddings_dir_out is None:
+            raise RuntimeError('Embedding output directory not available.')
+        return embeddings_dir_out / f'job_{job_id:05d}.npy'
+
+    def _embedding_in_path(job_id: int) -> Path:
+        if embeddings_dir_in is None:
+            raise RuntimeError('Embedding input directory not available.')
+        return embeddings_dir_in / f'job_{job_id:05d}.npy'
 
     # Helpers hoisted so both sub-iterators can reuse them
     from cogent3.core.alignment import make_aligned_seqs
@@ -286,6 +393,14 @@ def phylo_superscape(sequences,
 
     def _iter_sub_alignments():
         from fitness_landscape.utils import iter_moving_window_alignment
+        if fan_alignment and fan_mode not in {'window', 'random'}:
+            raise click.UsageError("--fan-mode must be 'window' or 'random'.")
+
+        if fan_alignment and fan_mode in {'window', 'both'} and not all([fan_alignment_window, fan_alignment_overlap]):
+            raise click.UsageError("--fan-alignment-window and --fan-alignment-overlap are required when --fan-mode includes 'window'.")
+        if fan_alignment and fan_mode in {'random', 'both'} and not all([fan_random_size, fan_random_count]):
+            raise click.UsageError("--fan-random-size and --fan-random-count are required when --fan-mode includes 'random'.")
+
         if os.path.isdir(sequences):
             fasta_files = [f for f in os.listdir(sequences) if f.endswith(('.fasta', '.fa', '.fas'))]
             if not fasta_files:
@@ -307,10 +422,9 @@ def phylo_superscape(sequences,
                     logger.warning('Dropped alignment %s after duplicate removal (no sequences remain).', alignment_path)
                     continue
                 logger.info(f'Loaded alignment from {alignment_path}')
-                if fan_alignment:
-                    if not all([fan_alignment_window, fan_alignment_overlap]):
-                        raise click.UsageError("If --fan-alignment is set, both --fan-alignment-window and --fan-alignment-overlap must be provided.")
-                    for w_idx, sub in enumerate(iter_moving_window_alignment(alignment, fan_alignment_window, fan_alignment_overlap)):
+                if fan_alignment and fan_mode == 'window':
+                    iterator = iter_moving_window_alignment(alignment, fan_alignment_window, fan_alignment_overlap)
+                    for sub in iterator:
                         sub2 = _trim_alignment(sub)
                         sub2 = _drop_gappy_sequences(sub2)
                         sub2 = _dedupe_alignment(sub2)
@@ -335,10 +449,9 @@ def phylo_superscape(sequences,
                 logger.warning('Input alignment dropped after duplicate removal (no sequences remain).')
                 return
             logger.info(f'Loaded alignment from {sequences}')
-            if fan_alignment:
-                if not all([fan_alignment_window, fan_alignment_overlap]):
-                    raise click.UsageError("If --fan-alignment is set, both --fan-alignment-window and --fan-alignment-overlap must be provided.")
-                for w_idx, sub in enumerate(iter_moving_window_alignment(alignment, fan_alignment_window, fan_alignment_overlap)):
+            if fan_alignment and fan_mode == 'window':
+                iterator = iter_moving_window_alignment(alignment, fan_alignment_window, fan_alignment_overlap)
+                for sub in iterator:
                     sub2 = _trim_alignment(sub)
                     sub2 = _drop_gappy_sequences(sub2)
                     sub2 = _dedupe_alignment(sub2)
@@ -390,20 +503,22 @@ def phylo_superscape(sequences,
                     block_map = {n: str(alignment.get_gapped_seq(n)) for n in block_names}
                     block_aln = make_aligned_seqs(block_map, moltype='protein')
                     if fan_alignment:
-                        try:
-                            wins = moving_window_alignment(block_aln, fan_alignment_window, fan_alignment_overlap)
-                            # mirror downstream trimming
-                            count = 0
-                            for sub in wins:
-                                sub2 = _trim_alignment(sub)
-                                sub2 = _drop_gappy_sequences(sub2)
-                                sub2 = _dedupe_alignment(sub2)
-                                if sub2 is None:
-                                    continue
+                        count = 0
+                        if fan_mode in {'window', 'both'}:
+                            try:
+                                wins = moving_window_alignment(block_aln, fan_alignment_window, fan_alignment_overlap)
+                                for sub in wins:
+                                    sub2 = _trim_alignment(sub)
+                                    sub2 = _drop_gappy_sequences(sub2)
+                                    sub2 = _dedupe_alignment(sub2)
+                                    if sub2 is None:
+                                        continue
+                                    count += 1
+                            except Exception:
                                 count += 1
-                            total += count
-                        except Exception:
-                            total += 1
+                        if fan_mode in {'random', 'both'} and fan_random_count:
+                            count += int(fan_random_count)
+                        total += max(count, 1)
                     else:
                         total += 1
         else:
@@ -439,19 +554,22 @@ def phylo_superscape(sequences,
                 block_map = {n: str(alignment.get_gapped_seq(n)) for n in block_names}
                 block_aln = make_aligned_seqs(block_map, moltype='protein')
                 if fan_alignment:
-                    try:
-                        wins = moving_window_alignment(block_aln, fan_alignment_window, fan_alignment_overlap)
-                        count = 0
-                        for sub in wins:
-                            sub2 = _trim_alignment(sub)
-                            sub2 = _drop_gappy_sequences(sub2)
-                            sub2 = _dedupe_alignment(sub2)
-                            if sub2 is None:
-                                continue
+                    count = 0
+                    if fan_mode in {'window', 'both'}:
+                        try:
+                            wins = moving_window_alignment(block_aln, fan_alignment_window, fan_alignment_overlap)
+                            for sub in wins:
+                                sub2 = _trim_alignment(sub)
+                                sub2 = _drop_gappy_sequences(sub2)
+                                sub2 = _dedupe_alignment(sub2)
+                                if sub2 is None:
+                                    continue
+                                count += 1
+                        except Exception:
                             count += 1
-                        total += count
-                    except Exception:
-                        total += 1
+                    if fan_mode in {'random', 'both'} and fan_random_count:
+                        count += int(fan_random_count)
+                    total += max(count, 1)
                 else:
                     total += 1
         return total
@@ -466,14 +584,22 @@ def phylo_superscape(sequences,
         before moving on.
         """
         from cogent3.core.alignment import make_aligned_seqs
-        from fitness_landscape.utils import iter_moving_window_alignment
+        from fitness_landscape.utils import iter_moving_window_alignment, iter_random_subalignment
 
         job_counter = 0
         total_jobs_hint = _estimate_total_jobs()
         if log_progress:
             logger.info('Estimated total alignment jobs: %s', str(total_jobs_hint))
 
-        def _emit_job(seq_aln, *, source_label: str = None, block_idx: int | None = None, block_total: int | None = None, fan_index: int | None = None):
+        effective_compute_embeddings = compute_phylo_embeddings and (embeddings_dir_in is None)
+
+        def _emit_job(seq_aln,
+                      *,
+                      source_label: str = None,
+                      block_idx: int | None = None,
+                      block_total: int | None = None,
+                      fan_index: int | None = None,
+                      fan_kind: str | None = None):
             nonlocal job_counter
             job_counter += 1
             try:
@@ -486,19 +612,20 @@ def phylo_superscape(sequences,
                 parts.append(f"blk={block_idx}")
             if fan_index is not None:
                 parts.append(f"win={fan_index}")
+            if fan_kind:
+                parts.append(f"fan={fan_kind}")
             _lbl = ' '.join(parts)
+            job_id = job_counter
             if directed_landscape:
-                return {
+                job_dict = {
                     "sequences": seq_aln,
                     "digraph_type": "phylogenetic",
                     "replacement_matrix": list(replacement_matrix),
                     "model_fitting": model_fitting,
                     "phylo_backend": phylo_backend,
                     "_dist_calc": phylo_distance_calc,
-                    
-                    "_compute_phylo_embeddings": compute_phylo_embeddings,
+                    "_compute_phylo_embeddings": effective_compute_embeddings,
                     "embedding_domain": embedding_domain,
-                    # PLM knobs (used when _compute_phylo_embeddings and embedding_domain=plm)
                     "model_name": plm_model_name,
                     "batch_size": plm_batch_size,
                     "device": plm_device,
@@ -515,17 +642,15 @@ def phylo_superscape(sequences,
                     "_fan_index": fan_index,
                 }
             else:
-                return {
+                job_dict = {
                     "sequences": seq_aln,
                     "graph_type": "phylogenetic",
                     "replacement_matrix": list(replacement_matrix),
                     "model_fitting": model_fitting,
                     "phylo_backend": phylo_backend,
                     "_dist_calc": phylo_distance_calc,
-                    
-                    "_compute_phylo_embeddings": compute_phylo_embeddings,
+                    "_compute_phylo_embeddings": effective_compute_embeddings,
                     "embedding_domain": embedding_domain,
-                    # PLM knobs (used when _compute_phylo_embeddings and embedding_domain=plm)
                     "model_name": plm_model_name,
                     "batch_size": plm_batch_size,
                     "device": plm_device,
@@ -541,6 +666,22 @@ def phylo_superscape(sequences,
                     "_block_total": block_total,
                     "_fan_index": fan_index,
                 }
+
+            if embeddings_dir_out is not None:
+                job_dict['_embeddings_save_path'] = str(_embedding_out_path(job_id))
+
+            if embeddings_dir_in is not None:
+                from numpy import load as _np_load
+                emb_path = _embedding_in_path(job_id)
+                if not emb_path.exists():
+                    raise click.UsageError(f'Embeddings file {emb_path} not found for job {job_id}.')
+                job_dict['embeddings'] = _np_load(emb_path)
+                job_dict['_compute_phylo_embeddings'] = False
+
+            if fan_kind:
+                job_dict['_fan_kind'] = fan_kind
+
+            return job_dict
 
         for alignment in _iter_sub_alignments():
             # Chunk by sequences if requested
@@ -569,17 +710,44 @@ def phylo_superscape(sequences,
 
                 # Emit fanned or whole-block jobs per block
                 if fan_alignment:
-                    if not all([fan_alignment_window, fan_alignment_overlap]):
-                        raise click.UsageError("If --fan-alignment is set, both --fan-alignment-window and --fan-alignment-overlap must be provided.")
-                    for w_idx, sub in enumerate(iter_moving_window_alignment(block_aln, fan_alignment_window, fan_alignment_overlap)):
-                        sub2 = _trim_alignment(sub)
-                        sub2 = _drop_gappy_sequences(sub2)
-                        sub2 = _dedupe_alignment(sub2)
-                        if sub2 is None:
-                            continue
-                        yield _emit_job(sub2, source_label=str(sequences), block_idx=b_idx, block_total=len(blocks), fan_index=w_idx)
+                    fan_serial = 0
+                    if fan_mode in {'window', 'both'}:
+                        for sub in iter_moving_window_alignment(block_aln, fan_alignment_window, fan_alignment_overlap):
+                            sub2 = _trim_alignment(sub)
+                            sub2 = _drop_gappy_sequences(sub2)
+                            sub2 = _dedupe_alignment(sub2)
+                            if sub2 is None:
+                                continue
+                            yield _emit_job(sub2,
+                                            source_label=str(sequences),
+                                            block_idx=b_idx,
+                                            block_total=len(blocks),
+                                            fan_index=fan_serial,
+                                            fan_kind='window')
+                            fan_serial += 1
+                    if fan_mode in {'random', 'both'}:
+                        for sub in iter_random_subalignment(block_aln, fan_random_size, fan_random_count, rng=rng):
+                            sub2 = _trim_alignment(sub)
+                            sub2 = _drop_gappy_sequences(sub2)
+                            sub2 = _dedupe_alignment(sub2)
+                            if sub2 is None:
+                                continue
+                            yield _emit_job(sub2,
+                                            source_label=str(sequences),
+                                            block_idx=b_idx,
+                                            block_total=len(blocks),
+                                            fan_index=fan_serial,
+                                            fan_kind='random')
+                            fan_serial += 1
+                    if fan_serial == 0:
+                        yield _emit_job(block_aln,
+                                        source_label=str(sequences),
+                                        block_idx=b_idx,
+                                        block_total=len(blocks),
+                                        fan_index=None,
+                                        fan_kind=None)
                 else:
-                    yield _emit_job(block_aln, source_label=str(sequences), block_idx=b_idx, block_total=len(blocks), fan_index=None)
+                    yield _emit_job(block_aln, source_label=str(sequences), block_idx=b_idx, block_total=len(blocks), fan_index=None, fan_kind=None)
 
                 # Insert barrier after each block to force sequential block processing
                 if b_idx < len(blocks) - 1:
@@ -618,6 +786,41 @@ def phylo_superscape(sequences,
     # Ensure hierarchical aligner mirrors CLI progress flag
     sampler_kwargs["_show_progress"] = bool(log_progress)
 
+    if only_embeddings:
+        metadata_records = []
+        saved = 0
+        for job in _construction_job_iter():
+            if job.get('_barrier'):
+                continue
+            job = dict(job)
+            seqs = job.pop('sequences')
+            emb_path_str = job.pop('_embeddings_save_path', None)
+            job_id = job.get('_job_id')
+            emb_path = Path(emb_path_str) if emb_path_str is not None else _embedding_out_path(job_id)
+            job.pop('embeddings', None)
+            fan_kind = job.pop('_fan_kind', None)
+            constructor = DirectedFitnessLandscape if directed_landscape else FitnessLandscape
+            landscape = constructor.from_sequences(sequences=seqs, **job)
+            if landscape.embeddings is None:
+                raise click.ClickException(f'Embeddings were not generated for job {job.get("_job_label", job_id)}.')
+            from numpy import save as _np_save
+            _np_save(emb_path, landscape.embeddings)
+            metadata_records.append({
+                "job_id": job_id,
+                "label": job.get('_job_label'),
+                "path": str(emb_path),
+                "n_nodes": landscape.graph.number_of_nodes(),
+                "directed": bool(directed_landscape),
+                "fan_kind": fan_kind,
+            })
+            saved += 1
+        meta_path = embeddings_dir_out / 'metadata.json'
+        meta_path.write_text(json.dumps({"jobs": metadata_records}, indent=2))
+        logger.info('Computed embeddings for %d jobs; arrays saved under %s', saved, embeddings_dir_out)
+        logger.info('Embedding metadata written to %s', meta_path)
+        logger.info('phylo-superscape: embeddings-only mode complete in %.2fs (cpu %.2fs)', time.perf_counter()-t0, time.process_time()-c0)
+        return
+
     # Default checkpoint directory (for CLI runs) if not explicitly provided
     if checkpoint_dir:
         ckpt_dir = Path(checkpoint_dir)
@@ -636,6 +839,7 @@ def phylo_superscape(sequences,
             logger.info('Planned alignment jobs: %d', total_jobs)
         for j in _construction_job_iter():
             seqs = j.pop('sequences')
+            j.pop('_fan_kind', None)
             j['_total_jobs'] = total_jobs or None
             if directed_landscape:
                 from fitness_landscape.core.landscape import DirectedFitnessLandscape
