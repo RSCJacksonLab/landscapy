@@ -767,6 +767,82 @@ def iter_moving_window_alignment(alignment: Alignment,
         # to guarantee coverage.
         # In typical use, the loop above already yielded the tail.
 
+
+def iter_random_subalignment(alignment: Alignment,
+                             sample_size: int,
+                             n_samples: int,
+                             *,
+                             replace: bool = False,
+                             rng: Optional[np.random.Generator] = None,
+                             seed_fraction: float = 0.1,
+                             seed_count: Optional[int] = None,
+                             force_seed: bool = True):
+    """Yield sub-alignments built by sampling tips uniformly at random.
+
+    Parameters
+    ----------
+    alignment : Alignment
+        Source alignment to sample from.
+    sample_size : int
+        Number of sequences (tips) per sampled sub-alignment.
+    n_samples : int
+        Total number of sub-alignments to generate.
+    replace : bool, default=False
+        Whether to sample with replacement. When False and ``sample_size``
+        equals the number of tips, each sample simply returns the full
+        alignment.
+    rng : numpy.random.Generator, optional
+        Random number generator to use. If ``None``, a default generator
+        (``np.random.default_rng()``) is used.
+    """
+    names = list(alignment.names)
+    n_tips = len(names)
+    if n_tips == 0 or sample_size <= 0 or n_samples <= 0:
+        return
+    if sample_size > n_tips and not replace:
+        raise ValueError("sample_size exceeds number of tips; enable replace=True to allow repeats.")
+
+    rng = rng or np.random.default_rng()
+    seq_map = {name: str(alignment.get_gapped_seq(name)) for name in names}
+
+    if force_seed:
+        if seed_count is None:
+            seed_count = max(1, int(round(seed_fraction * n_tips)))
+        else:
+            seed_count = int(seed_count)
+        seed_count = min(seed_count, sample_size, n_tips)
+        seed_names = rng.choice(names, size=seed_count, replace=False)
+        seed_set = set(seed_names)
+        pool_no_seed = [n for n in names if n not in seed_set]
+    else:
+        seed_set = set()
+        pool_no_seed = names
+
+    for _ in range(n_samples):
+        if force_seed and seed_set:
+            needed = sample_size - len(seed_set)
+            if needed <= 0:
+                chosen = list(seed_set)
+            else:
+                if replace:
+                    extra = rng.choice(names, size=needed, replace=True)
+                else:
+                    if needed >= len(pool_no_seed):
+                        extra = pool_no_seed
+                    else:
+                        extra = rng.choice(pool_no_seed, size=needed, replace=False)
+                chosen = list(seed_set) + list(extra)
+        else:
+            if replace:
+                chosen = rng.choice(names, size=sample_size, replace=True)
+            else:
+                if sample_size >= n_tips:
+                    chosen = names
+                else:
+                    chosen = rng.choice(names, size=sample_size, replace=False)
+        sub = {name: seq_map[name] for name in chosen}
+        yield make_aligned_seqs(sub, moltype='protein')
+
 @dataclass
 class HammingCheckResult:
     is_full_hamming: bool
