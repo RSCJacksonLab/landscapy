@@ -704,6 +704,158 @@ class FitnessSuperscape:
             fitness_layers=latent_fitness_layers,
             graph=graph_sample)
 
+    def posterior_graph_probability(self,
+                                    candidate: Union[FitnessLandscape, DirectedFitnessLandscape, nx.Graph, nx.DiGraph],
+                                    *,
+                                    method: Literal['empirical', 'edge_factorized'] = 'empirical',
+                                    use_isomorphism: bool = False,
+                                    eps: float = 1e-12) -> float:
+        """
+        Compute the probability of sampling a given candidate graph/landscape
+        from the superscape posterior.
+
+        Parameters
+        ----------
+        candidate : FitnessLandscape | DirectedFitnessLandscape | nx.Graph | nx.DiGraph
+            The target object whose posterior sampling probability is desired.
+            If a FitnessLandscape is provided, its underlying `graph` is used.
+
+        method : {'empirical', 'edge_factorized'}, default='empirical'
+            - 'empirical': frequency of exact matches among stored posterior samples
+              (requires that full posterior samples were stored).
+            - 'edge_factorized': computes a product of Bernoulli probabilities over
+              edges using the per-edge posterior means estimated from stored samples.
+
+        use_isomorphism : bool, default=False
+            If True (empirical method only), compare up to graph isomorphism rather than
+            exact node-index equality. This is more expensive, as it requires constructing
+            a networkx graph per posterior sample and running an isomorphism test.
+
+        eps : float, default=1e-12
+            Numerical stabilizer when computing factorized probabilities. Edge
+            probabilities are clipped into [eps, 1-eps], and the log-probability is
+            accumulated to avoid underflow; the final probability is exp of that sum.
+
+        Returns
+        -------
+        float
+            The estimated posterior probability of the candidate.
+
+        Notes
+        -----
+        - This method requires that the hierarchical aligner retained posterior samples
+          (i.e., constructed with `_posterior_storage` set to 'full' or 'compact').
+          For 'empirical' and 'edge_factorized', we specifically need full posterior L
+          samples (`self._hierarchical_aligner.full_posterior_L`). If unavailable, a
+          RuntimeError is raised with guidance.
+        - The empirical method compares the candidate adjacency to each stored sample's
+          latent adjacency matrix. Samples with different latent sizes never match; they
+          still contribute to the denominator (i.e., true posterior mass).
+        - The edge_factorized method assumes per-edge independence using the sample
+          mean adjacency as Bernoulli parameters. This matches how the latent graph
+          is thresholded in `construct_latent_landscape` and provides a smooth estimate
+          even when the empirical frequency is zero.
+        """
+
+        # Resolve graph input
+        if isinstance(candidate, (FitnessLandscape, DirectedFitnessLandscape)):
+            Gc = candidate.graph
+        elif isinstance(candidate, (nx.Graph, nx.DiGraph)):
+            Gc = candidate
+        else:
+            raise TypeError(f"Unsupported candidate type: {type(candidate)}")
+
+        # Require posterior samples
+        if not hasattr(self, '_hierarchical_aligner') or not getattr(self._hierarchical_aligner, 'full_posterior_L', None):
+            raise RuntimeError(
+                "Posterior samples are not available on this superscape. "
+                "Reconstruct with posterior storage enabled (e.g., posterior_storage='full')."
+            )
+
+        posterior_L = self._hierarchical_aligner.full_posterior_L
+        if not posterior_L:
+            raise RuntimeError(
+                "No stored posterior adjacency samples found. "
+                "Use posterior_storage='full' when constructing the superscape."
+            )
+
+        directed = isinstance(Gc, nx.DiGraph)
+        # Sanity check: candidate directedness should match superscape setting when known
+        if hasattr(self, '_hierarchical_aligner') and getattr(self._hierarchical_aligner, 'directed', None) is not None:
+            if bool(self._hierarchical_aligner.directed) != bool(directed):
+                raise ValueError("Directedness mismatch between candidate graph and superscape posterior.")
+
+        # Build candidate adjacency matrix with a canonical node ordering
+        cand_nodes = list(Gc.nodes())
+        # Try to sort if nodes are sortable; otherwise preserve insertion order
+        try:
+            nodelist = sorted(cand_nodes)
+        except Exception:
+            nodelist = cand_nodes
+        A_c = nx.to_numpy_array(Gc, nodelist=nodelist)
+        A_c = (A_c > 0).astype(int)
+        np.fill_diagonal(A_c, 0)
+
+        if method == 'empirical':
+            # Exact adjacency equality across stored samples
+            matches = 0
+            total = len(posterior_L)
+
+            if use_isomorphism:
+                # Compare up to graph isomorphism (costly)
+                G_c_norm = nx.from_numpy_array(A_c, create_using=nx.DiGraph if directed else nx.Graph)
+                for Ls in posterior_L:
+                    if Ls.shape[0] != A_c.shape[0]:
+                        continue
+                    Gs = nx.from_numpy_array(Ls, create_using=nx.DiGraph if directed else nx.Graph)
+                    if nx.is_isomorphic(Gs, G_c_norm):
+                        matches += 1
+                return matches / float(total)
+            else:
+                for Ls in posterior_L:
+                    if Ls.shape[0] != A_c.shape[0]:
+                        continue
+                    if np.array_equal(Ls, A_c):
+                        matches += 1
+                return matches / float(total)
+
+        elif method == 'edge_factorized':
+            # Compute per-edge posterior means by averaging stored samples into a common frame
+            max_nl = max(L.shape[0] for L in posterior_L)
+            tally = np.zeros((max_nl, max_nl), dtype=float)
+            for Ls in posterior_L:
+                nl = Ls.shape[0]
+                tally[:nl, :nl] += Ls
+            P = tally / max(1, len(posterior_L))
+
+            # Truncate to candidate size
+            n = A_c.shape[0]
+            if n > max_nl:
+                # No mass assigned to graphs larger than the observed posterior support
+                return 0.0
+            Pn = np.clip(P[:n, :n], eps, 1.0 - eps)
+            # Ensure zero diagonal
+            np.fill_diagonal(Pn, np.clip(0.0, eps, 1.0 - eps))
+
+            # Compute log-probability under independent Bernoulli edges
+            if directed:
+                mask = ~np.eye(n, dtype=bool)
+                A_flat = A_c[mask]
+                P_flat = Pn[mask]
+            else:
+                iu = np.triu_indices(n, k=1)
+                A_flat = A_c[iu]
+                P_flat = Pn[iu]
+
+            # log p = sum_{e} [ A_e * log P_e + (1 - A_e) * log (1 - P_e) ]
+            logp = (A_flat * np.log(P_flat) + (1.0 - A_flat) * np.log(1.0 - P_flat)).sum()
+            # Convert back to probability (may underflow for large n)
+            prob = float(np.exp(logp))
+            return prob
+
+        else:
+            raise ValueError(f"Unknown method: {method!r}")
+
     @staticmethod
     def _validate_embeddings(graphs: list[Union[nx.Graph, nx.DiGraph]]) -> None:
         """
