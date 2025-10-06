@@ -773,7 +773,10 @@ def iter_random_subalignment(alignment: Alignment,
                              n_samples: int,
                              *,
                              replace: bool = False,
-                             rng: Optional[np.random.Generator] = None):
+                             rng: Optional[np.random.Generator] = None,
+                             seed_fraction: float = 0.1,
+                             seed_count: Optional[int] = None,
+                             force_seed: bool = True):
     """Yield sub-alignments built by sampling tips uniformly at random.
 
     Parameters
@@ -801,14 +804,42 @@ def iter_random_subalignment(alignment: Alignment,
 
     rng = rng or np.random.default_rng()
     seq_map = {name: str(alignment.get_gapped_seq(name)) for name in names}
-    for _ in range(n_samples):
-        if replace:
-            chosen = rng.choice(names, size=sample_size, replace=True)
+
+    if force_seed:
+        if seed_count is None:
+            seed_count = max(1, int(round(seed_fraction * n_tips)))
         else:
-            if sample_size == n_tips:
-                chosen = names
+            seed_count = int(seed_count)
+        seed_count = min(seed_count, sample_size, n_tips)
+        seed_names = rng.choice(names, size=seed_count, replace=False)
+        seed_set = set(seed_names)
+        pool_no_seed = [n for n in names if n not in seed_set]
+    else:
+        seed_set = set()
+        pool_no_seed = names
+
+    for _ in range(n_samples):
+        if force_seed and seed_set:
+            needed = sample_size - len(seed_set)
+            if needed <= 0:
+                chosen = list(seed_set)
             else:
-                chosen = rng.choice(names, size=sample_size, replace=False)
+                if replace:
+                    extra = rng.choice(names, size=needed, replace=True)
+                else:
+                    if needed >= len(pool_no_seed):
+                        extra = pool_no_seed
+                    else:
+                        extra = rng.choice(pool_no_seed, size=needed, replace=False)
+                chosen = list(seed_set) + list(extra)
+        else:
+            if replace:
+                chosen = rng.choice(names, size=sample_size, replace=True)
+            else:
+                if sample_size >= n_tips:
+                    chosen = names
+                else:
+                    chosen = rng.choice(names, size=sample_size, replace=False)
         sub = {name: seq_map[name] for name in chosen}
         yield make_aligned_seqs(sub, moltype='protein')
 

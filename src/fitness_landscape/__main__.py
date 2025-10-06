@@ -95,6 +95,9 @@ def cli():
 @click.option('--fan-alignment-overlap', required=False, type=int, help='Sliding window overlap (tips). Required when --fan-mode=window.')
 @click.option('--fan-random-size', required=False, type=int, help='Number of tips per randomly sampled sub-alignment when --fan-mode=random.')
 @click.option('--fan-random-count', required=False, type=int, help='How many random sub-alignments to sample when --fan-mode=random.')
+@click.option('--fan-random-seed-fraction', required=False, type=float, default=0.1, show_default=True, help='Fraction of tips to force into every random sub-alignment.')
+@click.option('--fan-random-seed-count', required=False, type=int, default=None, help='Explicit number of seed tips to force into every random sub-alignment (overrides fraction).')
+@click.option('--fan-random-no-seed', required=False, is_flag=True, default=False, help='Disable seed tips in random sub-alignments.')
 
 # Phylogenetic inference
 @click.option('--directed-landscape', required=False, is_flag=True, default=False, help='Boolean flag to indicate if a directed phylogenetic fitness landscape should be constructed.')
@@ -178,6 +181,9 @@ def phylo_superscape(sequences,
                      fan_alignment_overlap,
                      fan_random_size,
                      fan_random_count,
+                     fan_random_seed_fraction,
+                     fan_random_seed_count,
+                     fan_random_no_seed,
                      directed_landscape,
                      phylo_backend,
                      phylo_distance_calc,
@@ -289,6 +295,8 @@ def phylo_superscape(sequences,
     if only_embeddings and not compute_phylo_embeddings:
         raise click.UsageError('--only-embeddings requires embeddings to be computed; remove --no-compute-phylo-embeddings.')
 
+    rng = np.random.default_rng(seed if seed is not None else None)
+
     def _embedding_out_path(job_id: int) -> Path:
         if embeddings_dir_out is None:
             raise RuntimeError('Embedding output directory not available.')
@@ -393,8 +401,8 @@ def phylo_superscape(sequences,
 
     def _iter_sub_alignments():
         from fitness_landscape.utils import iter_moving_window_alignment
-        if fan_alignment and fan_mode not in {'window', 'random'}:
-            raise click.UsageError("--fan-mode must be 'window' or 'random'.")
+        if fan_alignment and fan_mode not in {'window', 'random', 'both'}:
+            raise click.UsageError("--fan-mode must be 'window', 'random', or 'both'.")
 
         if fan_alignment and fan_mode in {'window', 'both'} and not all([fan_alignment_window, fan_alignment_overlap]):
             raise click.UsageError("--fan-alignment-window and --fan-alignment-overlap are required when --fan-mode includes 'window'.")
@@ -726,7 +734,14 @@ def phylo_superscape(sequences,
                                             fan_kind='window')
                             fan_serial += 1
                     if fan_mode in {'random', 'both'}:
-                        for sub in iter_random_subalignment(block_aln, fan_random_size, fan_random_count, rng=rng):
+                        for sub in iter_random_subalignment(
+                                block_aln,
+                                fan_random_size,
+                                fan_random_count,
+                                rng=rng,
+                                seed_fraction=fan_random_seed_fraction,
+                                seed_count=fan_random_seed_count,
+                                force_seed=not fan_random_no_seed):
                             sub2 = _trim_alignment(sub)
                             sub2 = _drop_gappy_sequences(sub2)
                             sub2 = _dedupe_alignment(sub2)
