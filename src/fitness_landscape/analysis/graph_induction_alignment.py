@@ -8,6 +8,9 @@ from typing import List, Union, Tuple, Dict, Optional
 from ..transforms.eigenmode import eigenmode_decomposition
 from ..core.landscape import FitnessLandscape
 import statistics as stats
+from scipy.optimize import linear_sum_assignment
+from ..graph_matching import isorank_with_features
+from ..utils import _compute_embeddings_from_sequences
 
 
 def _edge_set(G: nx.Graph) -> set:
@@ -45,7 +48,7 @@ def _common_edges(Ga: nx.Graph,
     set
         The set of common edges between `Ga` and `Gb`
     """
-    Ea, Eb = edge_set(Ga), _edge_set(Gb)
+    Ea, Eb = _edge_set(Ga), _edge_set(Gb)
     return Ea & Eb
 
 def _total_weight(G: nx.Graph,
@@ -530,4 +533,270 @@ def evaluate_reconstruction(G_lat_truth: Union[FitnessLandscape, nx.Graph],
         "recon_edge_length_stats": stats_rec,
         "total_weight_true": _total_weight(G_lat_truth),
         "total_weight_recon": _total_weight(G_lat_recon),
+    }
+
+def _ensure_graph(obj: Union[FitnessLandscape, nx.Graph]) -> nx.Graph:
+    if isinstance(obj, FitnessLandscape):
+        obj = obj.graph
+    if isinstance(obj, nx.DiGraph):
+        return obj.to_undirected()
+    if not isinstance(obj, nx.Graph):
+        raise TypeError("Expected FitnessLandscape or networkx Graph/Digraph")
+    return obj
+
+def _collect_features(G: nx.Graph,
+                      *,
+                      prefer_attrs: Tuple[str, ...] = ("emb_arr",),
+                      spectral_k: int = 16,
+                      plm_fallback: bool = True,
+                      plm_model_name: str = 'facebook/esm2_t6_8M_UR50D',
+                      plm_device: Optional[str] = None,
+                      plm_batch_size: int = 64,
+                      original_obj: Optional[Union[FitnessLandscape, nx.Graph]] = None) -> np.ndarray:
+    nodes = list(G.nodes())
+    n = len(nodes)
+    # Try preferred node attributes first
+    for key in prefer_attrs:
+        vals = []
+        ok = True
+        d0: Optional[int] = None
+        for u in nodes:
+            x = G.nodes[u].get(key)
+            if x is None:
+                ok = False
+                break
+            xv = np.asarray(x)
+            if xv.ndim > 1:
+                xv = xv.reshape(-1)
+            if d0 is None:
+                d0 = int(xv.shape[0])
+            if xv.shape[0] != d0:
+                ok = False
+                break
+            vals.append(xv)
+        if ok and d0 is not None:
+            return np.vstack(vals)
+
+    # Fallback 1: PLM embeddings from sequences
+    if plm_fallback:
+        seqs = []
+        have_all = True
+        for u in nodes:
+            s = G.nodes[u].get('sequence', None)
+            if s is None:
+                have_all = False
+                break
+            seqs.append(s)
+        if not have_all and isinstance(original_obj, FitnessLandscape):
+            try:
+                seqs = list(original_obj.sequences)
+                have_all = len(seqs) == n
+            except Exception:
+                have_all = False
+        if have_all and len(seqs) == n:
+            try:
+                E = _compute_embeddings_from_sequences(seqs,
+                                                      model_name=plm_model_name,
+                                                      device=plm_device,
+                                                      batch_size=plm_batch_size)
+                return np.asarray(E)
+            except Exception:
+                # fall through to spectral
+                pass
+
+    # Fallback 2: spectral features (non-trivial modes)
+    if n == 0:
+        return np.zeros((0, 0), dtype=float)
+    k = min(max(2, spectral_k + 1), n)
+    _, U = eigenmode_decomposition(G, k=k, matrix='norm_laplacian')
+    if U.shape[1] > 1:
+        return U[:, 1:min(k, U.shape[1])]
+    deg = np.array([G.degree(u) for u in nodes], dtype=float)[:, None]
+    return deg
+
+def _collect_ohe_features(G: nx.Graph,
+                          *,
+                          original_obj: Optional[Union[FitnessLandscape, nx.Graph]] = None) -> np.ndarray:
+    nodes = list(G.nodes())
+    n = len(nodes)
+    if n == 0:
+        return np.zeros((0, 0), dtype=float)
+    # Prefer per-node sequences
+    seqs = []
+    have_all = True
+    for u in nodes:
+        s = G.nodes[u].get('sequence', None)
+        if s is None:
+            have_all = False
+            break
+        seqs.append(s)
+    if not have_all and isinstance(original_obj, FitnessLandscape):
+        try:
+            seqs = list(original_obj.sequences)
+            have_all = len(seqs) == n
+        except Exception:
+            have_all = False
+    if not have_all:
+        return np.zeros((n, 0), dtype=float)
+
+    feats: list[np.ndarray] = []
+    dim: Optional[int] = None
+    for s in seqs:
+        arr = None
+        if hasattr(s, 'ungapped_arr'):
+            try:
+                arr = np.asarray(s.ungapped_arr, dtype=float)
+            except Exception:
+                arr = None
+        if arr is None:
+            try:
+                arr = np.asarray(s.to_one_hot(), dtype=float)
+            except Exception:
+                arr = None
+        if arr is None or arr.ndim != 2 or arr.shape[0] == 0:
+            v = np.zeros((1,), dtype=float)
+        else:
+            v = arr.mean(axis=0)
+        if dim is None:
+            dim = int(v.shape[0])
+        elif v.shape[0] != dim:
+            if v.shape[0] < dim:
+                v = np.pad(v, (0, dim - v.shape[0]))
+            else:
+                v = v[:dim]
+        feats.append(v.astype(float))
+    return np.vstack(feats)
+
+def evaluate_isorank_alignment(Ga: Union[FitnessLandscape, nx.Graph],
+                               Gb: Union[FitnessLandscape, nx.Graph],
+                               *,
+                               alpha: float = 0.85,
+                               max_iter: int = 100,
+                               tol: float = 1e-6,
+                               prefer_attrs: Tuple[str, ...] = ("emb_arr",),
+                               spectral_k: int = 16,
+                               spectral_corr_k: int = 20,
+                               use_plm_fallback: bool = True,
+                               plm_model_name: str = 'facebook/esm2_t6_8M_UR50D',
+                               plm_device: Optional[str] = None,
+                               plm_batch_size: int = 64,
+                               use_ohe_only: bool = False) -> Dict:
+    """
+    Align two graphs via IsoRank (with node features) and evaluate the
+    induced mapping with edge precision/recall/F1 and spectral
+    correlations over the first non-trivial Laplacian eigenvectors.
+
+    Feature selection per graph:
+      - If use_ohe_only=True: use averaged one-hot/ungapped encodings.
+      - Else, prefer node attributes in prefer_attrs; if missing and
+        use_plm_fallback=True, compute PLM embeddings from sequences;
+        otherwise use spectral features.
+    """
+    A = _ensure_graph(Ga)
+    B = _ensure_graph(Gb)
+    nodes_A = list(A.nodes())
+    nodes_B = list(B.nodes())
+    nA, nB = len(nodes_A), len(nodes_B)
+    if nA == 0 or nB == 0:
+        return {
+            'edge_precision': 0.0,
+            'edge_recall': 0.0,
+            'edge_F1': 0.0,
+            'mapping': {},
+            'spectral_correlation_by_mode': {},
+            'spectral_correlation_mean': 0.0,
+            'n_matched': 0,
+            'n_A': nA,
+            'n_B': nB,
+        }
+
+    # Features
+    if use_ohe_only:
+        FA = _collect_ohe_features(A, original_obj=Ga)
+        FB = _collect_ohe_features(B, original_obj=Gb)
+    else:
+        FA = _collect_features(A,
+                               prefer_attrs=prefer_attrs,
+                               spectral_k=spectral_k,
+                               plm_fallback=use_plm_fallback,
+                               plm_model_name=plm_model_name,
+                               plm_device=plm_device,
+                               plm_batch_size=plm_batch_size,
+                               original_obj=Ga)
+        FB = _collect_features(B,
+                               prefer_attrs=prefer_attrs,
+                               spectral_k=spectral_k,
+                               plm_fallback=use_plm_fallback,
+                               plm_model_name=plm_model_name,
+                               plm_device=plm_device,
+                               plm_batch_size=plm_batch_size,
+                               original_obj=Gb)
+
+    # Equalize feature dims
+    d = min(FA.shape[1] if FA.ndim == 2 else 0, FB.shape[1] if FB.ndim == 2 else 0)
+    if d == 0:
+        # fallback to degree only
+        FA = np.array([A.degree(u) for u in nodes_A], dtype=float)[:, None]
+        FB = np.array([B.degree(v) for v in nodes_B], dtype=float)[:, None]
+        d = 1
+    else:
+        if FA.shape[1] != d:
+            FA = FA[:, :d]
+        if FB.shape[1] != d:
+            FB = FB[:, :d]
+
+    # Run IsoRank and Hungarian
+    S = isorank_with_features(A, B, FA, FB, alpha=alpha, max_iter=max_iter, tol=tol)
+    r_idx, c_idx = linear_sum_assignment(-S)
+    mapping = {nodes_A[i]: nodes_B[j] for i, j in zip(r_idx, c_idx)}
+
+    # Edge precision/recall/F1 on matched nodes (undirected)
+    Au = A.to_undirected()
+    Bu = B.to_undirected()
+    matched_A = set(nodes_A[i] for i in r_idx)
+    matched_B = set(nodes_B[j] for j in c_idx)
+    E_pred = set()
+    for u, v in Au.edges():
+        if u in matched_A and v in matched_A:
+            mu, mv = mapping[u], mapping[v]
+            E_pred.add(tuple(sorted((mu, mv))))
+    E_true = set(tuple(sorted(e)) for e in Bu.subgraph(matched_B).edges())
+    inter = E_pred & E_true
+    P = len(inter) / max(1, len(E_pred))
+    Rr = len(inter) / max(1, len(E_true))
+    F1 = 0.0 if (P + Rr) == 0 else 2 * P * Rr / (P + Rr)
+
+    # Spectral correlation on first k non-trivial modes
+    k_corr = min(spectral_corr_k, max(1, min(nA, nB) - 1))
+    wA, UA = eigenmode_decomposition(A, k=k_corr + 1, matrix='norm_laplacian')
+    wB, UB = eigenmode_decomposition(B, k=k_corr + 1, matrix='norm_laplacian')
+    UA = UA[:, 1:1 + k_corr] if UA.shape[1] > 1 else UA
+    UB = UB[:, 1:1 + k_corr] if UB.shape[1] > 1 else UB
+    idxA = list(r_idx)
+    idxB = list(c_idx)
+    corr_by_mode: Dict[int, float] = {}
+    for j in range(min(UA.shape[1], UB.shape[1])):
+        x = UA[idxA, j]
+        y = UB[idxB, j]
+        rx = x - x.mean()
+        ry = y - y.mean()
+        sx = float(np.linalg.norm(rx))
+        sy = float(np.linalg.norm(ry))
+        if sx == 0.0 or sy == 0.0:
+            corr = 0.0
+        else:
+            corr = abs(float((rx @ ry) / (sx * sy)))
+        corr_by_mode[j] = corr
+    corr_mean = float(np.mean(list(corr_by_mode.values()))) if corr_by_mode else 0.0
+
+    return {
+        'edge_precision': float(P),
+        'edge_recall': float(Rr),
+        'edge_F1': float(F1),
+        'mapping': mapping,
+        'spectral_correlation_by_mode': corr_by_mode,
+        'spectral_correlation_mean': corr_mean,
+        'n_matched': int(len(mapping)),
+        'n_A': int(nA),
+        'n_B': int(nB),
     }
