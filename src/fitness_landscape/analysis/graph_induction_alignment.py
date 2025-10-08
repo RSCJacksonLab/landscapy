@@ -1,12 +1,16 @@
 import numpy as np
 import networkx as nx
+from networkx.algorithms.approximation.steinertree import steiner_tree
 from scipy.spatial.distance import cdist
 from scipy.sparse.csgraph import shortest_path
 from numpy.linalg import svd
-from typing import List, Union, Tuple, Dict
+from typing import List, Union, Tuple, Dict, Optional
 from ..transforms.eigenmode import eigenmode_decomposition
 from ..core.landscape import FitnessLandscape
 import statistics as stats
+from scipy.optimize import linear_sum_assignment
+from ..graph_matching import isorank_with_features
+from ..utils import _compute_embeddings_from_sequences
 
 
 def _edge_set(G: nx.Graph) -> set:
@@ -212,6 +216,419 @@ def edge_length_stats(G: nx.Graph,
     L = [d.get(weight_key, 1.0) for _,_,d in G.edges(data=True)]
     return dict(n=len(L), mean=np.mean(L), median=np.median(L), std=np.std(L))
 
+def _ensure_graph(obj: Union[FitnessLandscape, nx.Graph]) -> nx.Graph:
+    """
+    Resolve input into a NetworkX Graph (undirected)."""
+    if isinstance(obj, FitnessLandscape):
+        obj = obj.graph
+    if isinstance(obj, nx.DiGraph):
+        return obj.to_undirected()
+    if not isinstance(obj, nx.Graph):
+        raise TypeError("Expected FitnessLandscape or networkx Graph/Digraph")
+    return obj
+
+def _collect_features(G: nx.Graph,
+                      *,
+                      prefer_attrs: Tuple[str, ...] = ("emb_arr",),
+                      spectral_k: int = 16,
+                      plm_fallback: bool = True,
+                      plm_model_name: str = 'facebook/esm2_t6_8M_UR50D',
+                      plm_device: Optional[str] = None,
+                      plm_batch_size: int = 64,
+                      original_obj: Optional[Union[FitnessLandscape, nx.Graph]] = None) -> np.ndarray:
+    """
+    Collect a node feature matrix (rows in nodelist order) from a graph.
+    Preference is given to node attributes in ``prefer_attrs`` if present
+    and consistent; otherwise fall back to spectral features (first
+    ``spectral_k`` non-trivial normalized Laplacian eigenvectors).
+    """
+    nodes = list(G.nodes())
+    n = len(nodes)
+    # Try preferred attributes
+    for key in prefer_attrs:
+        vals = []
+        ok = True
+        d0: Optional[int] = None
+        for u in nodes:
+            x = G.nodes[u].get(key)
+            if x is None:
+                ok = False
+                break
+            x = np.asarray(x)
+            if x.ndim > 1:
+                x = x.reshape(-1)
+            if d0 is None:
+                d0 = int(x.shape[0])
+            if x.shape[0] != d0:
+                ok = False
+                break
+            vals.append(x)
+        if ok and d0 is not None:
+            return np.vstack(vals)
+
+    # Fallback 1: PLM embeddings from sequences (if available)
+    if plm_fallback:
+        # Prefer sequences attached to graph nodes; otherwise from FitnessLandscape
+        seqs = []
+        have_all = True
+        for u in nodes:
+            s = G.nodes[u].get('sequence', None)
+            if s is None:
+                have_all = False
+                break
+            seqs.append(s)
+        if not have_all and isinstance(original_obj, FitnessLandscape):
+            try:
+                seqs = list(original_obj.sequences)
+                have_all = len(seqs) == n
+            except Exception:
+                have_all = False
+
+        if have_all and len(seqs) == n:
+            try:
+                E = _compute_embeddings_from_sequences(seqs,
+                                                      model_name=plm_model_name,
+                                                      device=plm_device,
+                                                      batch_size=plm_batch_size)
+                return np.asarray(E)
+            except Exception:
+                # Silent fallback to spectral if PLM embedding fails (e.g., no model available)
+                pass
+
+    # Fallback: spectral features (exclude trivial constant mode)
+    if n == 0:
+        return np.zeros((0, 0), dtype=float)
+    # Compute up to spectral_k+1 to drop the 0-eigenvector
+    k = min(max(2, spectral_k + 1), n)
+    _, U = eigenmode_decomposition(G, k=k, matrix='norm_laplacian')
+    if U.shape[1] >= 2:
+        F = U[:, 1:min(k, U.shape[1])]
+    else:
+        # Degenerate: use degree as single feature
+        deg = np.array([G.degree(u) for u in nodes], dtype=float)[:, None]
+        F = deg
+    return F
+
+def _collect_ohe_features(G: nx.Graph,
+                          *,
+                          original_obj: Optional[Union[FitnessLandscape, nx.Graph]] = None) -> np.ndarray:
+    """
+    Build per-node one-hot features by averaging positional one-hot/ungapped
+    arrays across sequence length to a fixed-size vector. Prefers
+    node['sequence'] when present. If unavailable, tries sequences from
+    a FitnessLandscape ``original_obj``.
+    """
+    nodes = list(G.nodes())
+    n = len(nodes)
+    if n == 0:
+        return np.zeros((0, 0), dtype=float)
+    seqs = []
+    have_all = True
+    for u in nodes:
+        s = G.nodes[u].get('sequence', None)
+        if s is None:
+            have_all = False
+            break
+        seqs.append(s)
+    if not have_all and isinstance(original_obj, FitnessLandscape):
+        try:
+            seqs = list(original_obj.sequences)
+            have_all = len(seqs) == n
+        except Exception:
+            have_all = False
+    if not have_all:
+        # Fallback empty
+        return np.zeros((n, 0), dtype=float)
+
+    feats: list[np.ndarray] = []
+    dim: Optional[int] = None
+    for s in seqs:
+        # Prefer ungapped_arr if available; else to_one_hot
+        arr = None
+        if hasattr(s, 'ungapped_arr'):
+            try:
+                arr = np.asarray(s.ungapped_arr, dtype=float)
+            except Exception:
+                arr = None
+        if arr is None:
+            try:
+                arr = np.asarray(s.to_one_hot(), dtype=float)
+                # Drop gap column if present heuristically: if 21 columns and last resembles gap often
+                # Safer approach is to normalize row-wise and keep all columns; but keep width fixed by vectorizing.
+            except Exception:
+                arr = None
+        if arr is None or arr.ndim != 2 or arr.shape[0] == 0:
+            feats.append(np.zeros((1,), dtype=float))
+            continue
+        v = arr.mean(axis=0)
+        if dim is None:
+            dim = int(v.shape[0])
+        elif v.shape[0] != dim:
+            # Pad/truncate to match first seen dimension
+            if v.shape[0] < dim:
+                v = np.pad(v, (0, dim - v.shape[0]))
+            else:
+                v = v[:dim]
+        feats.append(v.astype(float))
+    return np.vstack(feats)
+
+def leaf_spanning_tree(G: nx.Graph,
+                       leaves: List,
+                       weight: Optional[str] = None) -> nx.Graph:
+    """
+    Compute a Steiner tree spanning the provided leaves in ``G``.
+
+    Parameters
+    ----------
+    G : nx.Graph
+        The input graph (assumed undirected for topology).
+    leaves : List
+        Node identifiers in ``G`` to connect.
+    weight : str or None, optional
+        Edge attribute to use as weight. If ``None``, unit weights.
+
+    Returns
+    -------
+    nx.Graph
+        A connected subgraph spanning all reachable leaves. If the
+        output has multiple components, the largest component is
+        returned.
+    """
+    if not isinstance(G, nx.Graph):
+        G = G.to_undirected()
+    # Filter leaves that exist in G
+    L = [u for u in leaves if u in G]
+    if len(L) == 0:
+        return nx.Graph()
+    T = steiner_tree(G, L, weight=weight)
+    U = T.to_undirected()
+    if U.number_of_nodes() == 0:
+        return nx.Graph()
+    if not nx.is_connected(U):
+        comps = sorted(nx.connected_components(U), key=len, reverse=True)
+        U = U.subgraph(comps[0]).copy()
+    return U
+
+def get_leaves(U: nx.Graph) -> List:
+    """
+    Return leaf nodes (degree == 1) of an undirected graph ``U``.
+    """
+    return [n for n in U.nodes() if U.degree(n) == 1]
+
+def suppress_degree2(T: nx.Graph,
+                     keep_attr_weights: bool = True,
+                     weight: str = 'weight') -> nx.Graph:
+    """
+    Suppress internal degree-2 nodes by shortcutting their neighbors.
+
+    Parameters
+    ----------
+    T : nx.Graph
+        Input tree-ish graph.
+    keep_attr_weights : bool, default=True
+        If True, accumulates the ``weight`` attribute when collapsing
+        edges.
+    weight : str, default='weight'
+        Edge attribute to accumulate.
+
+    Returns
+    -------
+    nx.Graph
+        An undirected graph with degree-2 internal nodes suppressed.
+    """
+    U = T.to_undirected().copy()
+    changed = True
+    while changed:
+        changed = False
+        for v in list(U.nodes()):
+            if v not in U:  # may be removed earlier in loop
+                continue
+            if U.degree(v) == 2 and v not in get_leaves(U):
+                nbs = list(U.neighbors(v))
+                if len(nbs) != 2:
+                    continue
+                n1, n2 = nbs
+                w = None
+                if keep_attr_weights and U.has_edge(n1, v) and U.has_edge(v, n2):
+                    d1 = U[n1][v]
+                    d2 = U[v][n2]
+                    if weight in d1 and weight in d2:
+                        w = d1[weight] + d2[weight]
+                U.remove_node(v)
+                if not U.has_edge(n1, n2):
+                    U.add_edge(n1, n2)
+                if w is not None:
+                    U[n1][n2][weight] = w
+                changed = True
+                break
+    return U
+
+def leaf_splits(U: nx.Graph, leaf_set: List) -> set:
+    """
+    Return the set of bipartitions (splits) induced by deleting each
+    edge. Represent each split by the smaller side as a frozenset of
+    leaf labels.
+
+    Parameters
+    ----------
+    U : nx.Graph
+        A tree (undirected). Must satisfy |E| = |V| - 1.
+    leaf_set : List
+        The leaf labels to consider when forming splits.
+
+    Returns
+    -------
+    set
+        Set of frozenset leaf splits (smaller side).
+    """
+    U = U.copy()
+    if U.number_of_nodes() == 0:
+        return set()
+    assert U.number_of_edges() == U.number_of_nodes() - 1, "Not a tree"
+    leaves = set(leaf_set)
+    splits = set()
+    for u, v in list(U.edges()):
+        if not U.has_edge(u, v):
+            continue
+        U.remove_edge(u, v)
+        comp1 = set(nx.node_connected_component(U, u))
+        comp2 = set(U.nodes()) - comp1
+        L1 = frozenset([x for x in comp1 if x in leaves])
+        L2 = frozenset([x for x in comp2 if x in leaves])
+        side = L1 if len(L1) <= len(L2) else L2
+        if len(side) >= 2 and len(leaves) - len(side) >= 2:
+            splits.add(side)
+        U.add_edge(u, v)
+    return splits
+
+def rf_distance(U1: nx.Graph, U2: nx.Graph, leaves: List) -> Tuple[int, float]:
+    """
+    Compute the Robinson-Foulds (RF) distance and normalized RF between
+    two trees ``U1``, ``U2`` restricted to a common set of leaves.
+
+    Parameters
+    ----------
+    U1 : nx.Graph
+        Tree 1 (undirected).
+    U2 : nx.Graph
+        Tree 2 (undirected).
+    leaves : List
+        Leaf labels to consider for splits.
+
+    Returns
+    -------
+    diff : int
+        The RF distance (number of differing splits).
+    nrf : float
+        Normalized RF in [0, 1].
+    """
+    S1 = leaf_splits(U1, leaves)
+    S2 = leaf_splits(U2, leaves)
+    diff = len(S1 - S2) + len(S2 - S1)
+    max_splits = len(S1) + len(S2)
+    nrf = diff / max_splits if max_splits > 0 else 0.0
+    return diff, float(nrf)
+
+def tree_rf_dissimilarity(G_truth: Union[FitnessLandscape, nx.Graph],
+                          G_recon: Union[FitnessLandscape, nx.Graph],
+                          leaves: Optional[List] = None,
+                          weight_key: str = 'weight') -> Dict:
+    """
+    Compare a reconstructed latent graph to a ground-truth phylogeny
+    via a tree-based Robinson–Foulds (RF) distance on shared leaves.
+
+    This function constructs Steiner trees in each graph connecting the
+    specified leaves, suppresses internal degree-2 nodes to yield a
+    leaf-labeled tree, and computes the RF distance between the two
+    resulting trees.
+
+    Parameters
+    ----------
+    G_truth : FitnessLandscape or nx.Graph
+        Ground-truth phylogenetic tree/graph.
+    G_recon : FitnessLandscape or nx.Graph
+        Reconstructed latent graph from superscape alignment.
+    leaves : List, optional
+        Node labels to treat as leaves (must exist in both graphs).
+        If ``None``, uses the intersection of degree-1 nodes from the
+        undirected version of ``G_truth`` and nodes present in
+        ``G_recon``.
+    weight_key : str, default='weight'
+        Edge attribute to use as distance/weight when building Steiner
+        trees.
+
+    Returns
+    -------
+    dict
+        Results dictionary containing:
+        - 'rf_distance' (int): RF distance between trees.
+        - 'normalized_rf' (float): Normalized RF in [0, 1].
+        - 'n_leaves' (int): Number of leaves used for comparison.
+        - 'n_splits_truth' (int): Number of non-trivial splits in truth tree.
+        - 'n_splits_recon' (int): Number of non-trivial splits in recon tree.
+    """
+    # Resolve nx.Graphs
+    A = G_truth.graph if isinstance(G_truth, FitnessLandscape) else G_truth
+    B = G_recon.graph if isinstance(G_recon, FitnessLandscape) else G_recon
+    if A is None or B is None:
+        raise ValueError("Both inputs must be networkx graphs or FitnessLandscape with .graph")
+
+    Au = A.to_undirected()
+    Bu = B.to_undirected()
+
+    if leaves is None:
+        truth_leaves = set(get_leaves(Au))
+        recon_nodes = set(Bu.nodes())
+        leaves = sorted(list(truth_leaves & recon_nodes))
+
+    # Guard: ensure we have at least 2 leaves (RF needs >= 4 for non-trivial splits)
+    leaves = [u for u in leaves if u in Au and u in Bu]
+    if len(leaves) == 0:
+        return {
+            'rf_distance': 0,
+            'normalized_rf': 0.0,
+            'n_leaves': 0,
+            'n_splits_truth': 0,
+            'n_splits_recon': 0,
+        }
+
+    # Build leaf-spanning Steiner trees
+    T_truth = leaf_spanning_tree(Au, leaves, weight=weight_key)
+    T_recon = leaf_spanning_tree(Bu, leaves, weight=weight_key)
+
+    if T_truth.number_of_nodes() == 0 or T_recon.number_of_nodes() == 0:
+        return {
+            'rf_distance': 0,
+            'normalized_rf': 0.0,
+            'n_leaves': len(leaves),
+            'n_splits_truth': 0,
+            'n_splits_recon': 0,
+        }
+
+    # Suppress internal degree-2 nodes (topology simplification)
+    U_truth = suppress_degree2(T_truth, keep_attr_weights=True, weight=weight_key)
+    U_recon = suppress_degree2(T_recon, keep_attr_weights=True, weight=weight_key)
+
+    # Ensure trees (|E| = |V| - 1) before computing splits
+    if U_truth.number_of_nodes() > 0 and U_truth.number_of_edges() != U_truth.number_of_nodes() - 1:
+        # In case of accidental cycles, pick a spanning tree
+        U_truth = nx.minimum_spanning_tree(U_truth, weight=weight_key)
+    if U_recon.number_of_nodes() > 0 and U_recon.number_of_edges() != U_recon.number_of_nodes() - 1:
+        U_recon = nx.minimum_spanning_tree(U_recon, weight=weight_key)
+
+    # Compute RF
+    S_truth = leaf_splits(U_truth, leaves)
+    S_recon = leaf_splits(U_recon, leaves)
+    rf, nrf = rf_distance(U_truth, U_recon, leaves)
+
+    return {
+        'rf_distance': int(rf),
+        'normalized_rf': float(nrf),
+        'n_leaves': int(len(leaves)),
+        'n_splits_truth': int(len(S_truth)),
+        'n_splits_recon': int(len(S_recon)),
+    }
+
 def evaluate_reconstruction(G_lat_truth: Union[FitnessLandscape, nx.Graph],
                             G_induced: Union[FitnessLandscape, nx.Graph],
                             G_lat_recon: Union[FitnessLandscape, nx.Graph]) -> Dict:
@@ -272,4 +689,191 @@ def evaluate_reconstruction(G_lat_truth: Union[FitnessLandscape, nx.Graph],
         "recon_edge_length_stats": stats_rec,
         "total_weight_true": _total_weight(G_lat_truth),
         "total_weight_recon": _total_weight(G_lat_recon),
+    }
+
+def evaluate_isorank_alignment(Ga: Union[FitnessLandscape, nx.Graph],
+                               Gb: Union[FitnessLandscape, nx.Graph],
+                               *,
+                               alpha: float = 0.85,
+                               max_iter: int = 100,
+                               tol: float = 1e-6,
+                               prefer_attrs: Tuple[str, ...] = ("emb_arr",),
+                               spectral_k: int = 16,
+                               spectral_corr_k: int = 20,
+                               use_plm_fallback: bool = True,
+                               plm_model_name: str = 'facebook/esm2_t6_8M_UR50D',
+                               plm_device: Optional[str] = None,
+                               plm_batch_size: int = 64,
+                               use_ohe_only: bool = False) -> Dict:
+    """
+    Align two graphs via IsoRank (with node features) and report mapping
+    quality metrics: edge precision/recall/F1 under the induced mapping,
+    and spectral correlation across the first ``spectral_corr_k``
+    normalized Laplacian eigenvectors.
+
+    Feature selection order per graph:
+    - If ``use_ohe_only=True``: use one-hot/ungapped sequence encodings,
+      averaged across positions to a fixed vector; no PLM/spectral.
+    - Else:
+      1) Use any of the ``prefer_attrs`` node attributes if present and
+         consistent (e.g., 'emb_arr').
+      2) If missing and ``use_plm_fallback=True``, compute PLM embeddings
+         from per-node 'sequence' using the existing ESM embedding path.
+      3) Otherwise, fall back to spectral features (non-trivial normalized
+         Laplacian eigenvectors).
+
+    Parameters
+    ----------
+    Ga, Gb : FitnessLandscape or nx.Graph
+        Input graphs/landscapes to align.
+    alpha, max_iter, tol : IsoRank parameters
+        Damping, iterations and convergence tolerance.
+    prefer_attrs : tuple[str, ...], default=("emb_arr",)
+        Preferred node attributes to use as features; falls back to
+        spectral features if not present consistently in both graphs.
+    spectral_k : int, default=16
+        Feature dimension for spectral fallback (non-trivial modes).
+    spectral_corr_k : int, default=20
+        Number of non-trivial modes to use for correlation reporting.
+
+    Returns
+    -------
+    dict
+        - 'edge_precision', 'edge_recall', 'edge_F1'
+        - 'mapping': dict[node_in_A -> node_in_B]
+        - 'spectral_correlation_by_mode': dict[mode_index -> corr]
+        - 'spectral_correlation_mean': float
+        - 'n_matched': int, 'n_A': int, 'n_B': int
+    """
+    A = _ensure_graph(Ga)
+    B = _ensure_graph(Gb)
+
+    nodes_A = list(A.nodes())
+    nodes_B = list(B.nodes())
+    nA, nB = len(nodes_A), len(nodes_B)
+    if nA == 0 or nB == 0:
+        return {
+            'edge_precision': 0.0,
+            'edge_recall': 0.0,
+            'edge_F1': 0.0,
+            'mapping': {},
+            'spectral_correlation_by_mode': {},
+            'spectral_correlation_mean': 0.0,
+            'n_matched': 0,
+            'n_A': nA,
+            'n_B': nB,
+        }
+
+    # Collect features from both graphs
+    if use_ohe_only:
+        FA = _collect_ohe_features(A, original_obj=Ga)
+        FB = _collect_ohe_features(B, original_obj=Gb)
+    else:
+        FA = _collect_features(
+            A,
+            prefer_attrs=prefer_attrs,
+            spectral_k=spectral_k,
+            plm_fallback=use_plm_fallback,
+            plm_model_name=plm_model_name,
+            plm_device=plm_device,
+            plm_batch_size=plm_batch_size,
+            original_obj=Ga,
+        )
+        FB = _collect_features(
+            B,
+            prefer_attrs=prefer_attrs,
+            spectral_k=spectral_k,
+            plm_fallback=use_plm_fallback,
+            plm_model_name=plm_model_name,
+            plm_device=plm_device,
+            plm_batch_size=plm_batch_size,
+            original_obj=Gb,
+        )
+
+    # Ensure equal feature dimension by truncation to min(dA, dB)
+    dA, dB = FA.shape[1], FB.shape[1]
+    d = min(dA, dB)
+    if d == 0:
+        # As a last resort, use degree as a single feature
+        FA = np.array([A.degree(u) for u in nodes_A], dtype=float)[:, None]
+        FB = np.array([B.degree(v) for v in nodes_B], dtype=float)[:, None]
+        d = 1
+    else:
+        if dA != d:
+            FA = FA[:, :d]
+        if dB != d:
+            FB = FB[:, :d]
+
+    # IsoRank similarity
+    S = isorank_with_features(A, B, FA, FB, alpha=alpha, max_iter=max_iter, tol=tol)
+
+    # Hungarian assignment (maximize similarity -> minimize -S)
+    cost = -S
+    r_idx, c_idx = linear_sum_assignment(cost)
+
+    # Build mapping A_node -> B_node with up to min(nA, nB) matches
+    mapping = {nodes_A[i]: nodes_B[j] for i, j in zip(r_idx, c_idx)}
+
+    # Edge-based precision/recall on undirected topology within matched nodes
+    Au = A.to_undirected()
+    Bu = B.to_undirected()
+    matched_A = set(nodes_A[i] for i in r_idx)
+    matched_B = set(nodes_B[j] for j in c_idx)
+
+    # Edges among matched nodes in A, mapped into B via 'mapping'
+    E_pred = set()
+    for u, v in Au.edges():
+        if u in matched_A and v in matched_A:
+            mu, mv = mapping[u], mapping[v]
+            e = tuple(sorted((mu, mv)))
+            E_pred.add(e)
+    # True edges among matched nodes in B
+    E_true = set(tuple(sorted(e)) for e in Bu.subgraph(matched_B).edges())
+    inter = E_pred & E_true
+    P = len(inter) / max(1, len(E_pred))
+    Rr = len(inter) / max(1, len(E_true))
+    F1 = 0.0 if (P + Rr) == 0 else 2 * P * Rr / (P + Rr)
+
+    # Spectral correlation across the first k non-trivial modes
+    k_corr = min(spectral_corr_k, max(1, min(nA, nB) - 1))
+    # Ensure we have at least k_corr+1 eigenvectors to drop trivial
+    wA, UA = eigenmode_decomposition(A, k=k_corr + 1, matrix='norm_laplacian')
+    wB, UB = eigenmode_decomposition(B, k=k_corr + 1, matrix='norm_laplacian')
+    UA = UA[:, 1:1 + k_corr] if UA.shape[1] > 1 else UA
+    UB = UB[:, 1:1 + k_corr] if UB.shape[1] > 1 else UB
+
+    # Gather vectors in matched order
+    idxA = [nodes_A.index(nodes_A[i]) for i in r_idx]  # identity map
+    idxB = [nodes_B.index(nodes_B[j]) for j in c_idx]
+    # Since nodes_A[i] is already ordered by i, idxA == r_idx; keep explicit for clarity
+    idxA = list(r_idx)
+    idxB = list(c_idx)
+
+    corr_by_mode: dict[int, float] = {}
+    for j in range(min(UA.shape[1], UB.shape[1])):
+        x = UA[idxA, j]
+        y = UB[idxB, j]
+        # Align sign to maximize correlation
+        rx = x - x.mean()
+        ry = y - y.mean()
+        sx = np.linalg.norm(rx)
+        sy = np.linalg.norm(ry)
+        if sx == 0.0 or sy == 0.0:
+            corr = 0.0
+        else:
+            r = float((rx @ ry) / (sx * sy))
+            corr = abs(r)
+        corr_by_mode[j] = corr
+    corr_mean = float(np.mean(list(corr_by_mode.values()))) if corr_by_mode else 0.0
+
+    return {
+        'edge_precision': float(P),
+        'edge_recall': float(Rr),
+        'edge_F1': float(F1),
+        'mapping': mapping,
+        'spectral_correlation_by_mode': corr_by_mode,
+        'spectral_correlation_mean': corr_mean,
+        'n_matched': int(len(mapping)),
+        'n_A': int(nA),
+        'n_B': int(nB),
     }
