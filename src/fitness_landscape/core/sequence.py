@@ -31,6 +31,9 @@ def _to_numpy(x: _SeqConvertible) -> np.ndarray:
     # Handle cogent3 Sequence objects
     if isinstance(x, _C3Sequence):
         return np.array(list(str(x)))
+    # Ensure plain strings are split into characters rather than treated as scalars
+    if isinstance(x, str):
+        return np.array(list(x))
     return np.asarray(x).ravel()
 
 class BaseNumpySequence:

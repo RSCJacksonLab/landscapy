@@ -1,5 +1,6 @@
 import numpy as np
 import scipy.sparse as sp
+import scipy.sparse.linalg as spla
 import torch
 import networkx as nx
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal

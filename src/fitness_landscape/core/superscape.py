@@ -257,6 +257,10 @@ class FitnessSuperscape:
         if _gbt is not None:
             _hier_kwargs['global_bridge_threshold'] = _gbt
 
+        _bridge_thresh = _pop_any(_sampler_kwargs, ['bridge_threshold', '_bridge_threshold'], None)
+        if _bridge_thresh is not None:
+            _hier_kwargs['bridge_threshold'] = _bridge_thresh
+
         # Progress / checkpoint controls
         _show = _pop_any(_sampler_kwargs, ['_show_progress', 'show_progress'], None)
         _ckpt_dir = _pop_any(_sampler_kwargs, ['_checkpoint_dir', 'checkpoint_dir'], None)

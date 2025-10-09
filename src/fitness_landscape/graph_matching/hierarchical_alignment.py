@@ -192,7 +192,8 @@ class HierarchicalRJMCMCAligner:
                  _resume_checkpoint: str | None = None,
                  # Posterior storage policy: 'compact' averages on the fly to reduce memory,
                  # 'full' retains all per-sample arrays, 'none' drops posterior storage.
-                 _posterior_storage: Literal['compact','full','none'] = 'compact'
+                 _posterior_storage: Literal['compact','full','none'] = 'compact',
+                 bridge_threshold: Optional[float] = 0.05
                  ) -> None:
         
         
@@ -222,6 +223,7 @@ class HierarchicalRJMCMCAligner:
         self._checkpoint_interval = _checkpoint_interval
         self._resume_checkpoint = _resume_checkpoint
         self._posterior_storage = _posterior_storage
+        self.bridge_threshold = None if bridge_threshold is None else float(bridge_threshold)
 
         # Shared logger for progress reporting
         self._logger = logging.getLogger('fitness_landscape')
@@ -945,6 +947,115 @@ class HierarchicalRJMCMCAligner:
 
             relabeled_bp = nx.relabel_nodes(local_bp, node_rename_mapping, copy=True)
             final_graph = nx.compose(final_graph, relabeled_bp)
+
+        # Optional bridging edges even when slots remain distinct.
+        bridge_threshold = self.bridge_threshold if self.bridge_threshold is not None else 0.0
+        bridge_edges_added = 0
+        if bridge_threshold > 0.0:
+            try:
+                from scipy.optimize import linear_sum_assignment as _lsa
+            except Exception:  # pragma: no cover - optional dependency
+                _lsa = None
+
+            def _num_local_slots(res: Dict) -> int:
+                bp = res.get('blueprint')
+                if bp is not None:
+                    return bp.number_of_nodes()
+                mx = 0
+                for pm in res.get('node_mapping', {}).values():
+                    if pm is not None and pm.size > 0:
+                        mx = max(mx, pm.shape[1])
+                return mx
+
+            node_backref_sets = [set(res.get('node_backrefs', [])) for res in local_results]
+            for i in range(len(local_results)):
+                res_i = local_results[i]
+                slots_i = _num_local_slots(res_i)
+                if slots_i <= 0:
+                    continue
+                set_i = node_backref_sets[i]
+                for j in range(i + 1, len(local_results)):
+                    res_j = local_results[j]
+                    slots_j = _num_local_slots(res_j)
+                    if slots_j <= 0:
+                        continue
+                    overlap = list(set_i.intersection(node_backref_sets[j]))
+                    if not overlap:
+                        continue
+                    C = np.zeros((slots_i, slots_j), dtype=np.float64)
+                    total_mass = 0.0
+                    for (gidx, nid) in overlap:
+                        order_i = res_i['node_order'].get(gidx)
+                        order_j = res_j['node_order'].get(gidx)
+                        if order_i is None or order_j is None:
+                            continue
+                        try:
+                            row_i = order_i.index(nid)
+                            row_j = order_j.index(nid)
+                        except ValueError:
+                            continue
+                        Pi = res_i['node_mapping'].get(gidx)
+                        Pj = res_j['node_mapping'].get(gidx)
+                        if Pi is None or Pj is None or Pi.size == 0 or Pj.size == 0:
+                            continue
+                        if row_i >= Pi.shape[0] or row_j >= Pj.shape[0]:
+                            continue
+                        p_i = Pi[row_i]
+                        p_j = Pj[row_j]
+                        if p_i.size != slots_i:
+                            _pi = np.zeros(slots_i)
+                            _pi[:min(slots_i, p_i.size)] = p_i[:min(slots_i, p_i.size)]
+                            p_i = _pi
+                        if p_j.size != slots_j:
+                            _pj = np.zeros(slots_j)
+                            _pj[:min(slots_j, p_j.size)] = p_j[:min(slots_j, p_j.size)]
+                            p_j = _pj
+                        C += np.outer(p_i, p_j)
+                        total_mass += float(p_i.sum() * p_j.sum())
+                    if total_mass <= 0.0:
+                        continue
+                    S = C / max(total_mass, 1e-12)
+                    if _lsa is not None:
+                        m, n = S.shape
+                        sz = max(m, n)
+                        Sp = np.zeros((sz, sz), dtype=np.float64)
+                        Sp[:m, :n] = S
+                        rr, cc = _lsa(1.0 - Sp)
+                        pair_indices = [(ri, ci) for ri, ci in zip(rr, cc) if ri < m and ci < n]
+                    else:
+                        pair_indices = []
+                        used_cols: set[int] = set()
+                        for ri in range(S.shape[0]):
+                            cj = int(np.argmax(S[ri]))
+                            if cj in used_cols:
+                                continue
+                            used_cols.add(cj)
+                            pair_indices.append((ri, cj))
+                    for si, sj in pair_indices:
+                        score = float(S[si, sj])
+                        if score < bridge_threshold:
+                            continue
+                        u = local_to_global_nodemap.get((i, si))
+                        v = local_to_global_nodemap.get((j, sj))
+                        if u is None or v is None or u == v:
+                            continue
+                        added = False
+                        if isinstance(final_graph, nx.DiGraph):
+                            if not final_graph.has_edge(u, v):
+                                final_graph.add_edge(u, v, weight=score, bridge=True)
+                                added = True
+                            if not final_graph.has_edge(v, u):
+                                final_graph.add_edge(v, u, weight=score, bridge=True)
+                                added = True
+                        else:
+                            if not final_graph.has_edge(u, v):
+                                final_graph.add_edge(u, v, weight=score, bridge=True)
+                                added = True
+                        if added:
+                            bridge_edges_added += 1
+
+        if bridge_edges_added and self._show_progress:
+            self._log_progress('Stitching: added %d bridge edges (threshold=%.3f)', bridge_edges_added, bridge_threshold)
 
         # If union was not built, optionally add bridging edges based on meta blueprint
         if not use_union:
