@@ -131,6 +131,7 @@ def cli():
               help="Posterior storage policy: 'compact' averages per cluster, 'full' keeps all samples, 'none' drops posteriors.")
 @click.option('--posterior-threshold', required=False, type=float, default=0.25, help='Posterior probability threshold to binarize the latent graph (used in stitching with sliding windows).')
 @click.option('--global-bridge-threshold', required=False, type=float, default=0.5, show_default=True, help='Posterior overlap threshold for merging local windows during hierarchical alignment.')
+@click.option('--bridge-threshold', required=False, type=float, default=0.05, show_default=True, help='Minimum co-assignment score for adding bridge edges between overlapping windows.')
 @click.option('--sequential-construction', is_flag=True, default=False, help='Construct each landscape sequentially (avoids Ray during construction).')
 @click.option('--seed', required=False, type=int, default=None, help='Seed for the random number generator to make results reproducible.')
 
@@ -231,6 +232,7 @@ def phylo_superscape(sequences,
                      skip_failed_jobs,
                      sequential_construction,
                      global_bridge_threshold,
+                     bridge_threshold,
                      log_file,
                      log_level,
                      log_progress,
@@ -270,7 +272,8 @@ def phylo_superscape(sequences,
         _disable_cogent3_numba_parallel()
     logger.info('RJMCMC: alpha=%.3f burn-in=%d samples=%d thin=%d auto_anchor=%s', rjmcmc_alpha, burn_in_samples, total_samples, sample_thin, str(auto_anchor))
     logger.info('Parallelism: meta_cpu_chains=%s local_cpu_chains=%s sequential_construction=%s', str(meta_cpu_chains), str(local_cpu_chains), str(sequential_construction))
-    logger.info('Hierarchical alignment: global_bridge_threshold=%.3f', global_bridge_threshold)
+    logger.info('Hierarchical alignment: global_bridge_threshold=%.3f bridge_threshold=%.3f',
+                global_bridge_threshold, bridge_threshold)
     if fan_alignment:
         if fan_mode in {'window', 'both'}:
             logger.info('Fanning includes sliding windows: window=%s overlap=%s', str(fan_alignment_window), str(fan_alignment_overlap))
@@ -785,6 +788,8 @@ def phylo_superscape(sequences,
         "auto_anchor": auto_anchor,
         "cosine_anchor_threshold": anchor_cosine_threshold,
         "posterior_storage": posterior_storage,
+        "global_bridge_threshold": global_bridge_threshold,
+        "bridge_threshold": bridge_threshold,
         "seed": seed,
         "local_cpu_chains": local_cpu_chains,
         # Optional sliding-window controls for hierarchical aligner
