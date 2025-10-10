@@ -3,7 +3,6 @@ import numpy as np
 import scipy.stats as stats
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Mapping, Sequence
 from ..core.landscape import FitnessLandscape
-from ..core.superscape import FitnessSuperscape
 from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.metrics import mean_squared_error, r2_score
@@ -553,99 +552,3 @@ def subsample_analysis(landscape: FitnessLandscape,
 
     # Fallback on heterogeneous or non-numeric outputs and return raw list.
     return {"results": results}
-
-def sample_posterior_graph_analysis(landscape: FitnessSuperscape,
-                                    analysis_func: Callable[[FitnessLandscape], Any],
-                                    n_samples: int = 100,
-                                    layer_name: Optional[str] = None,
-                                    seed: int = None,
-                                    use_ray: bool = True,
-                                    num_workers: int = None) -> Dict:
-    """
-    Function to sample latent graphs from a superscape and compute
-    an analysis function on each sampled graph.
-
-    Parameters
-    ----------
-    landscape : FitnessSuperscape
-        The superscape to analyze.
-    
-    analysis_func : Callable
-        The analysis function to call on the sampled fitness
-        landscape graphs. Should be a `lambda L: ...` function that
-        takes a single FitnessLandscape object and returns a scalar or
-        dictionary of numeric values.
-
-    n_samples : int, default=100
-        The number of latent graphs to sample and analyze.
-
-    subsample_edge_prop: float, default=0.9
-        The proportion of edges in `landscape` that are subsampled in
-        each induced subgraph. 
-
-    use_ray : bool, default=True
-        Whether to use Ray for parallel processing. If False, runs
-        serially.
-    
-    num_workers : int, optional
-        Number of parallel workers to use with Ray. If None, uses all
-        available CPUs. Ignored if `use_ray` is False.
-
-    Returns
-    ------- 
-    """
-    if not isinstance(landscape, FitnessSuperscape):
-        raise ValueError("landscape must be a FitnessSuperscape.")
-
-    if not hasattr(landscape, 'latent_landscape'):
-        raise RuntimeError("The latent landscape has not been constructed yet. "
-                            "Run `construct_latent_landscape()` first.")
-
-    results: list[Any] = []
-
-    landscape_samples = landscape.sample_latent_landscapes(n_samples=n_samples, seed=seed)
-    
-    results: list[Any] = _parallel_analyze_landscapes(
-        landscape_samples=landscape_samples,
-        analysis_func=analysis_func,
-        layer_name=layer_name,
-        use_ray=use_ray,
-        num_workers=num_workers,)    
-
-    if _is_scalar_list(results):
-        arr = np.asarray(results, dtype=float)
-        return {
-        "results": results,
-        "summary": _summarize_arr(arr, alpha=0.05),
-    }
-
-    if all(isinstance(r, dict) for r in results):
-        keys = set(results[0].keys())
-        for r in results[1:]:
-            keys &= set(r.keys())
-        per_key_samples: Dict[str, list[float]] = {k: [] for k in keys}
-        
-        for r in results:
-
-            for k in list(per_key_samples.keys()):
-                v = r.get(k, None)
-                try:
-                    per_key_samples[k].append(float(v))
-                except Exception:
-                    per_key_samples.pop(k, None)
-
-        per_key_summary: Dict[str, Dict[str, Any]] = {}
-        for k, vals in per_key_samples.items():
-            arr = np.asarray(vals, dtype=float)
-            per_key_summary[k] = {
-                **_summarize_arr(arr, alpha=0.05),
-                "samples": vals,
-            }
-
-        if not per_key_summary:
-            return {"results": results}
-
-        return {
-            "results": results,
-            "per_key": per_key_summary,
-        }

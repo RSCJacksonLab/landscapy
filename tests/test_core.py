@@ -14,7 +14,6 @@ from fitness_landscape.core.fitness import (
     make_fitness_layer,
     as_fitness_layers,
 )
-from fitness_landscape.core.superscape import FitnessSuperscape
 import torch
 import pandas as pd
 from torch_geometric.data import Data

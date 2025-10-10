@@ -32,10 +32,6 @@ from .digraph import (
     create_phylo_digraph,
 )
 
-from .superscape import (
-    FitnessSuperscape
-)
-
 __all__ = [
     'BaseNumpySequence',
     'BinarySequence',
@@ -56,5 +52,4 @@ __all__ = [
     'create_evol_diffusion_digraph',
     'create_particle_filter_digraph',
     'create_phylo_digraph',
-    'FitnessSuperscape',
 ]
