@@ -2,7 +2,6 @@ from . import core
 from . import transforms
 from . import analysis
 from . import models
-from . import graph_matching
 from . import phylo
 
 from .core import (
@@ -17,7 +16,6 @@ from .core import (
     NumericFitness,
     CategoricalFitness,
     ProbabilisticCategoricalFitness,
-    FitnessSuperscape
 )
 
 __version__ = '0.9.0'
@@ -38,7 +36,6 @@ __all__ = [
     'NumericFitness',
     'CategoricalFitness',
     'ProbabilisticCategoricalFitness'
-    'FitnessSuperscape'
 ]
 
 # Compatibility patch for cogent3 MolType.make_seq positional API changes
