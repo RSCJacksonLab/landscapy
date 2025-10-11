@@ -7,6 +7,23 @@ from fitness_landscape.core.sequence import generate_sequences
 from fitness_landscape.core.fitness import NumericFitness
 from fitness_landscape.core.landscape import FitnessLandscape
 
+try:
+    import pytest_mock  # noqa: F401
+except ImportError:
+    from unittest import mock
+
+    @pytest.fixture
+    def mocker():
+        """Lightweight fallback when pytest-mock is unavailable."""
+        class _SimpleMocker:
+            MagicMock = staticmethod(mock.MagicMock)
+            Mock = staticmethod(mock.Mock)
+            call = mock.call
+            patch = staticmethod(mock.patch)
+            sentinel = mock.sentinel
+
+        yield _SimpleMocker()
+
 
 @pytest.fixture(scope="session")
 def rng():

@@ -281,7 +281,7 @@ def create_hamming_graph_multiallele(sequences: list[BaseNumpySequence], *, _com
 def create_hamming_graph(sequences: List[BaseNumpySequence],
                          _backend: Literal['auto', 'binary_xor', 'masked'] = 'auto',
                          *,
-                         _compute_hamming_edges: bool = False) -> nx.Graph:
+                         _compute_hamming_edges: bool = True) -> nx.Graph:
     """
     Create a Hamming graph from sequences and fitness values. In a
     Hamming graph, nodes represent sequences and edges connect
@@ -770,7 +770,7 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
                      tiebuffer: int = 128,
                      tie_policy: Literal['all', 'min_index', 'random'] = 'all',
                      seed : int = None,
-                     _compute_hamming_edges: bool = False) -> nx.Graph:
+                     _compute_hamming_edges: bool = True) -> nx.Graph:
     """
     Function to create a k-nearest neighbor network graph from
     sequences, using an efficient backend algorithm. 
@@ -999,7 +999,7 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
                                t: int = 5,
                                connectivity_threshold: float = 1e-4,
                                *,
-                               _compute_hamming_edges: bool = False,
+                               _compute_hamming_edges: bool = True,
                                **kwargs) -> nx.Graph:
     """
     Function to construct a graph based on expected diffusion
@@ -1218,6 +1218,37 @@ def _score_pair(i, j, seq_i, seq_j, tau, Q):
     
     return i, j, float(np.exp(score / tau))
 
+
+def _ensure_ray_initialized(num_cpus: int, *, logger: logging.Logger | None = None) -> None:
+    """
+    Ensure a Ray runtime exists with at least ``num_cpus`` CPU slots.
+
+    Parameters
+    ----------
+    num_cpus : int
+        Desired CPU concurrency (>=1). Each alignment task uses a single CPU.
+    logger : logging.Logger, optional
+        Logger for informational or warning messages.
+    """
+    if num_cpus < 1:
+        raise ValueError("`cpus` must be at least 1.")
+
+    if not ray.is_initialized():
+        ray.init(num_cpus=num_cpus, ignore_reinit_error=True)
+        if logger is not None:
+            logger.info("Ray initialised with num_cpus=%d", num_cpus)
+        return
+
+    if logger is not None:
+        total_cpus = ray.cluster_resources().get("CPU", 0.0)
+        if total_cpus and total_cpus + 1e-6 < num_cpus:
+            logger.warning(
+                "Ray runtime already initialised with %.2f CPU resources; "
+                "requested cpus=%d may not be fully available.",
+                total_cpus,
+                num_cpus,
+            )
+
 def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                                              embeddings: np.ndarray,
                                              replacement_matrix: np.ndarray = lg,
@@ -1234,7 +1265,7 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                                              connectivity_threshold: float = 1e-4,
                                              cpus: int = 1,
                                              *,
-                                             _compute_hamming_edges: bool = False,
+                                             _compute_hamming_edges: bool = True,
                                              **kwargs) -> nx.Graph:
     """
     Constructs a diffusion graph by scoring standard alignments with an
@@ -1294,9 +1325,9 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     tau : float, default=1.0
         The temperature parameter used to smooth the distance kernel.
 
-    cpus : int, default=1.0
-        The number of CPUs to paralellise the kernel alignment and
-        distance computation over.
+    cpus : int, default=1
+        Target number of worker CPUs for Ray alignment tasks. Each task
+        consumes a single CPU.
 
     Returns
     -------
@@ -1320,6 +1351,12 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
 
         # Use balltree algorithm (will fail as shape of embeddings >>>)
     _logger = logging.getLogger('fitness_landscape')
+    try:
+        num_cpus = int(cpus)
+    except (TypeError, ValueError):
+        raise ValueError("`cpus` must be an integer >= 1.") from None
+    if num_cpus < 1:
+        raise ValueError("`cpus` must be an integer >= 1.")
     _t_knn0 = time.perf_counter(); _c_knn0 = time.process_time()
     if backend == 'balltree':
         _, neighbor_indices = _find_knn_balltree(embeddings, k, tiebuffer)
@@ -1364,11 +1401,10 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
 
     # Init ray for parallel computing.
     _t_align0 = time.perf_counter(); _c_align0 = time.process_time()
-    if not ray.is_initialized():
-        ray.init()
+    _ensure_ray_initialized(num_cpus, logger=_logger)
     
     # Compute in parallel.
-    refs = [_score_pair.options(num_cpus=cpus).remote(i, j, sequences[i], sequences[j], tau, replacement_matrix)
+    refs = [_score_pair.options(num_cpus=1).remote(i, j, sequences[i], sequences[j], tau, replacement_matrix)
             for (i, j) in pairs_to_align]
     _logger.info('Submitted alignment tasks: %d', len(refs))
     for i, j, kv in ray.get(refs):
