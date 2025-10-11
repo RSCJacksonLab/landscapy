@@ -22,7 +22,6 @@ from pathlib import Path
 from fitness_landscape.phylo._sub_matrices import nq_pfam
 from fitness_landscape.embedding.particle_sampler import SequenceGenerator, TopPSampler
 from unittest.mock import patch
-from fitness_landscape.utils import alignment_to_base_numpy_sequences
 from cogent3 import get_moltype
 
 @pytest.mark.parametrize("n,L,B", [(60, 6, 3), (80, 5, 4)])
@@ -63,10 +62,10 @@ def basic_landscape():
     fitness_layers = {
         'default': NumericFitness(name='default', values=fitness_values)
     }
-    return FitnessLandscape.from_sequences(
+    return FitnessLandscape.build(
         sequences=sequences,
         fitness_layers=fitness_layers,
-        graph_type='hamming' 
+        graph='hamming'
     )
 
 @pytest.fixture
@@ -209,10 +208,10 @@ def test_fitness_free_landscape_initialization():
     Tests that a landscape can be initialized without any fitness layers.
     """
     sequences = generate_sequences(length=3, alphabet=[0, 1])
-    landscape = FitnessLandscape.from_sequences(
+    landscape = FitnessLandscape.build(
         sequences=sequences,
         fitness_layers={},
-        graph_type='hamming'
+        graph='hamming'
     )
     assert len(landscape) == 8
     assert landscape.graph.number_of_nodes() == 8
@@ -489,10 +488,10 @@ def test_soft_sequence_resample():
     resampled_seq = soft_seq.resample()
     assert isinstance(resampled_seq, SoftSequence)
 
-def test_landscape_from_sequences(clustered_data):
+def test_landscape_build_with_embeddings(clustered_data):
     """Tests landscape creation with embeddings."""
     sequences, embeddings = clustered_data
-    landscape = FitnessLandscape.from_sequences(sequences, graph_type='knn', k=3)
+    landscape = FitnessLandscape.build(sequences, graph='knn', k=3)
     assert landscape.graph is not None
 
 def test_landscape_detach_last_layer(basic_landscape):
@@ -1234,7 +1233,7 @@ def test_tda_graph_reweight_simplex_edges_sets_attribute(clustered_data):
         assert all('simplicial_weight' in d for *_, d in G.edges(data=True))
 
 @pytest.mark.parametrize("graph_type", ["hamming", "knn", "tda", "diffusion"])
-def test_landscape_from_sequences_attach_embeddings_toggle(graph_type, clustered_data):
+def test_landscape_build_attach_embeddings_toggle(graph_type, clustered_data):
     if graph_type in {"tda", "diffusion"}:
         seqs, embs = clustered_data
         ctor_kwargs = {}
@@ -1243,10 +1242,10 @@ def test_landscape_from_sequences_attach_embeddings_toggle(graph_type, clustered
         embs = None
         ctor_kwargs = {"k": 3} if graph_type == "knn" else {}
 
-    fl = FitnessLandscape.from_sequences(
+    fl = FitnessLandscape.build(
         sequences=seqs,
         fitness_layers={},
-        graph_type=graph_type,
+        graph=graph_type,
         embeddings=embs,
         attach_embeddings=True,
         **ctor_kwargs
@@ -1256,17 +1255,12 @@ def test_landscape_from_sequences_attach_embeddings_toggle(graph_type, clustered
     else:
         assert fl.embeddings is None
 
-def test_landscape_from_sequences_phylo_mismatched_embeddings_raises(phylo_test_data):
-    # Provide wrong sized embeddings to hit the validation error path
-    sequences = alignment_to_base_numpy_sequences(load_aligned_seqs(phylo_test_data, moltype="protein"))
-    bad_embs = np.random.randn(len(sequences) - 1, 8)
-    with pytest.raises(ValueError, match="expected embeddings shape"):
-        FitnessLandscape.from_sequences(
+def test_landscape_build_phylogenetic_requires_alignment(phylo_test_data):
+    with pytest.raises(ValueError, match="from_alignment"):
+        FitnessLandscape.build(
             sequences=phylo_test_data,
-            graph_type='phylogenetic',
-            embeddings=bad_embs,
-            phylo_backend='iqtree',
-            _compute_phylo_embeddings=False
+            graph='phylogenetic',
+            embeddings=np.zeros((1, 1)),
         )
 
 def test_landscape_view_and_get_layer_errors(basic_landscape):
@@ -1282,7 +1276,7 @@ def test_landscape_attach_duplicate_layer_name_raises(basic_landscape):
 
 def test_to_graph_tensor_without_embeddings_uses_ohe_shape():
     seqs = generate_sequences(length=3, alphabet=[0,1])
-    fl = FitnessLandscape.from_sequences(seqs, fitness_layers={}, graph_type='hamming', attach_embeddings=False)
+    fl = FitnessLandscape.build(seqs, fitness_layers={}, graph='hamming', attach_embeddings=False)
     data = fl.to_graph_tensor()
     n = len(seqs); L = len(seqs[0]); A = len(seqs[0].alphabet)
     assert data.x.shape == (n, L * A)
@@ -1301,10 +1295,10 @@ def _make_dupe_seqs():
 def _make_simple_landscape_with_dupes():
     seqs = _make_dupe_seqs()
     # Build a tiny hamming graph via factory – lets the class annotate nodes, etc.
-    fl = FitnessLandscape.from_sequences(
+    fl = FitnessLandscape.build(
         sequences=seqs,
         fitness_layers={},           # start empty
-        graph_type="hamming"
+        graph="hamming"
     )
     return fl
 
@@ -1313,10 +1307,10 @@ def _make_simple_landscape_no_dupes():
     seqs = [BinarySequence([0, 0, 0]),
             BinarySequence([0, 0, 1]),
             BinarySequence([0, 1, 1])]
-    fl = FitnessLandscape.from_sequences(
+    fl = FitnessLandscape.build(
         sequences=seqs,
         fitness_layers={},
-        graph_type="hamming"
+        graph="hamming"
     )
     return fl
 

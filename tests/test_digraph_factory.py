@@ -3,7 +3,7 @@ import networkx as nx
 import fitness_landscape.core.landscape as L
 
 
-def test_directed_from_sequences_diffusion_nq(monkeypatch):
+def test_directed_build_diffusion_nq(monkeypatch):
     called = {}
 
     def fake_digraph(seqs, **kwargs):
@@ -18,7 +18,7 @@ def test_directed_from_sequences_diffusion_nq(monkeypatch):
     from fitness_landscape.core.sequence import generate_sequences
 
     seqs = generate_sequences(length=2, alphabet=[0, 1])
-    DG = L.DirectedFitnessLandscape.from_sequences(
+    DG = L.DirectedFitnessLandscape.build(
         sequences=seqs,
         digraph='diffusion_nq',
         embedding_domain='ohe',
@@ -26,4 +26,3 @@ def test_directed_from_sequences_diffusion_nq(monkeypatch):
 
     assert isinstance(DG.graph, nx.DiGraph)
     assert called.get('ok', False)
-

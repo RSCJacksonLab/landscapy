@@ -281,7 +281,7 @@ def create_hamming_graph_multiallele(sequences: list[BaseNumpySequence], *, _com
 def create_hamming_graph(sequences: List[BaseNumpySequence],
                          _backend: Literal['auto', 'binary_xor', 'masked'] = 'auto',
                          *,
-                         _compute_hamming_edges: bool = True) -> nx.Graph:
+                         _compute_hamming_edges: bool = False) -> nx.Graph:
     """
     Create a Hamming graph from sequences and fitness values. In a
     Hamming graph, nodes represent sequences and edges connect
@@ -770,7 +770,7 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
                      tiebuffer: int = 128,
                      tie_policy: Literal['all', 'min_index', 'random'] = 'all',
                      seed : int = None,
-                     _compute_hamming_edges: bool = True) -> nx.Graph:
+                     _compute_hamming_edges: bool = False) -> nx.Graph:
     """
     Function to create a k-nearest neighbor network graph from
     sequences, using an efficient backend algorithm. 
@@ -999,7 +999,7 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
                                t: int = 5,
                                connectivity_threshold: float = 1e-4,
                                *,
-                               _compute_hamming_edges: bool = True,
+                               _compute_hamming_edges: bool = False,
                                **kwargs) -> nx.Graph:
     """
     Function to construct a graph based on expected diffusion
@@ -1151,7 +1151,7 @@ def create_phylo_graph(sequences: Union[Path, Alignment],
                        phylo_backend: str = 'cogent_nj',
                        _dist_calc: str = 'pdist',
                        *,
-                       _compute_hamming_edges: bool = True,
+                       _compute_hamming_edges: bool = False,
                        _lightweight_nodes: bool = False,
                        _hard_ancestors: bool = False,
                        **kwargs) -> nx.DiGraph:
@@ -1234,7 +1234,7 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                                              connectivity_threshold: float = 1e-4,
                                              cpus: int = 1,
                                              *,
-                                             _compute_hamming_edges: bool = True,
+                                             _compute_hamming_edges: bool = False,
                                              **kwargs) -> nx.Graph:
     """
     Constructs a diffusion graph by scoring standard alignments with an

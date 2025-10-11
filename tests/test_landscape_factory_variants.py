@@ -3,7 +3,7 @@ import networkx as nx
 import fitness_landscape.core.landscape as L
 
 
-def test_from_sequences_variants_call_correct_ctors(monkeypatch):
+def test_build_variants_call_correct_ctors(monkeypatch):
     called = []
 
     def fake_knn(seqs, **kwargs):
@@ -39,14 +39,13 @@ def test_from_sequences_variants_call_correct_ctors(monkeypatch):
 
     # call each type and ensure attach_embeddings toggle works
     for gtype in ('knn', 'tda', 'diffusion'):
-        FL = L.FitnessLandscape.from_sequences(
+        FL = L.FitnessLandscape.build(
             sequences=seqs,
             fitness_layers=layers,
-            graph_type=gtype,
+            graph=gtype,
             attach_embeddings=False,
         )
         assert isinstance(FL.graph, nx.Graph)
 
     kinds = [k for k, _ in called]
     assert set(kinds) == {'knn', 'tda', 'diffusion'}
-

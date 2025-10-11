@@ -18,7 +18,7 @@ def binary_3bit_landscape(rng):
     seqs = generate_sequences(length=3, alphabet=[0, 1])
     vals = [[float(x)] for x in rng.random(len(seqs))]
     layers = {"default": NumericFitness(name="default", values=vals)}
-    return FitnessLandscape.from_sequences(seqs, fitness_layers=layers, graph_type="hamming")
+    return FitnessLandscape.build(seqs, fitness_layers=layers, graph="hamming")
 
 
 @pytest.fixture
@@ -28,4 +28,3 @@ def tmp_text(tmp_path):
         p.write_text(text)
         return p
     return _write
-
