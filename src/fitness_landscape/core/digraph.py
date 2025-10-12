@@ -266,9 +266,21 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
     # Compute in parallel.
     refs = [_score_pair.options(num_cpus=1).remote(i, j, sequences[i], sequences[j], tau, replacement_matrix)
             for (i, j) in pairs_to_align]
-    
-    for i, j, kv in ray.get(refs):
-        kernel_matrix[i, j] = kv
+    total_tasks = len(refs)
+    logger.info('Submitted alignment tasks: %d', total_tasks)
+    if total_tasks:
+        pending = list(refs)
+        completed = 0
+        log_every = max(1, total_tasks // 20)
+        while pending:
+            num_returns = min(32, len(pending))
+            ready, pending = ray.wait(pending, num_returns=num_returns)
+            results = ray.get(ready)
+            for i, j, kv in results:
+                kernel_matrix[i, j] = kv
+            completed += len(results)
+            if completed == total_tasks or completed % log_every == 0:
+                logger.info('Alignments progress: %d/%d (%.1f%%)', completed, total_tasks, (completed / total_tasks) * 100.0)
 
     # Proceed with diffusion and graph construction (same as before)
     np.fill_diagonal(kernel_matrix, 0)

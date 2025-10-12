@@ -1406,10 +1406,22 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     # Compute in parallel.
     refs = [_score_pair.options(num_cpus=1).remote(i, j, sequences[i], sequences[j], tau, replacement_matrix)
             for (i, j) in pairs_to_align]
-    _logger.info('Submitted alignment tasks: %d', len(refs))
-    for i, j, kv in ray.get(refs):
-        rows_list.append(i); cols_list.append(j); data_list.append(float(kv))
-        rows_list.append(j); cols_list.append(i); data_list.append(float(kv))
+    total_tasks = len(refs)
+    _logger.info('Submitted alignment tasks: %d', total_tasks)
+    if total_tasks:
+        pending = list(refs)
+        completed = 0
+        log_every = max(1, total_tasks // 20)
+        while pending:
+            num_returns = min(32, len(pending))
+            ready, pending = ray.wait(pending, num_returns=num_returns)
+            results = ray.get(ready)
+            for i, j, kv in results:
+                rows_list.append(i); cols_list.append(j); data_list.append(float(kv))
+                rows_list.append(j); cols_list.append(i); data_list.append(float(kv))
+            completed += len(results)
+            if completed == total_tasks or completed % log_every == 0:
+                _logger.info('Alignments progress: %d/%d (%.1f%%)', completed, total_tasks, (completed / total_tasks) * 100.0)
     _logger.info('Alignments complete: wall=%.2fs cpu=%.2fs', time.perf_counter()-_t_align0, time.process_time()-_c_align0)
 
     if rows_list:

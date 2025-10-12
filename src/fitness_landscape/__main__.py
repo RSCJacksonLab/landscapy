@@ -282,6 +282,25 @@ def evol_diffusion_landscape(
         return
 
     # Build graph
+    if cpus < 1:
+        raise click.UsageError("--cpus must be at least 1.")
+    approx_pairs = 0
+    max_pairs = len(seqs) * (len(seqs) - 1) // 2
+    if len(seqs) and k > 0:
+        approx_pairs = min(max_pairs, (len(seqs) * k) // 2)
+    if approx_pairs:
+        logger.info(
+            "Estimated pairwise alignment tasks ≈ %d (upper bound %d). With cpus=%d, Ray can execute up to %d tasks concurrently.",
+            approx_pairs,
+            max_pairs,
+            cpus,
+            cpus,
+        )
+        if backend != "faiss" and len(seqs) >= 5000:
+            logger.warning(
+                "Large dataset detected (n=%d). Consider --backend=faiss for faster neighbour search.",
+                len(seqs),
+            )
     _t_graph0 = time.perf_counter()
     _c_graph0 = time.process_time()
     G = create_evol_diffusion_graph(
