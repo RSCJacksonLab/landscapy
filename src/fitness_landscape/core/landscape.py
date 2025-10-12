@@ -1299,7 +1299,15 @@ class FitnessLandscape:
                     "Sequences are missing for tree tip nodes: " + ', '.join(missing_tips)
                 )
 
-            aln_for_asr = make_aligned_seqs(alignment_map_for_asr, moltype=moltype)
+            asr_alignment_map = {
+                name: seq for name, seq in alignment_map_for_asr.items() if name in tips
+            }
+            if not asr_alignment_map:
+                raise ValueError(
+                    "Ancestral reconstruction requires at least one tip sequence; "
+                    "none were provided after filtering internal nodes."
+                )
+            aln_for_asr = make_aligned_seqs(asr_alignment_map, moltype=moltype)
             constructor = ASRConstructor(
                 aln_for_asr,
                 phylogenetic_tree=tree_obj,

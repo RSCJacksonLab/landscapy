@@ -3,7 +3,9 @@ from typing import (
     Union,
     Dict,
     List,
-    Literal
+    Literal,
+    Optional,
+    Set
 )
 import numpy as np
 import networkx as nx
@@ -86,6 +88,8 @@ class ASRConstructor:
         # Construct alignment header list.
         self.tip_names = self.alignment.names
         self._log_progress = _log_progress
+        self._replacement_models = tuple(replacement_matrix) if replacement_matrix is not None else tuple()
+        self._tree_model_name: Optional[str] = None
 
         # Construct boolean gap alignment.
         self._boolean_gap_alignment = self.alignment.get_gap_array()
@@ -432,37 +436,156 @@ class ASRConstructor:
                     pass
 
         self.phylogenetic_tree = phylogenetic_tree
+        try:
+            self._tree_model_name = str(model)
+        except Exception:
+            self._tree_model_name = None
         if self._log_progress:
             _logger.info('ASR.build_tree: complete')
 
     def reconstruct_ancestral_states(self, model_name: str = "WG01") -> None:
         """
-        Minimal placeholder ASR: assigns a uniform amino-acid posterior (L,20)
-        for each internal node. Avoids plugin manager to prevent duplicate
-        registration issues in interactive contexts.
+        Run maximum-likelihood ancestral state reconstruction using cogent3's
+        composable ``model`` / ``ancestral_states`` applications. Raises an
+        informative exception if model fitting or posterior extraction fails.
         """
         import logging as _logging
+
         _logger = _logging.getLogger('fitness_landscape')
-        if self._log_progress:
-            _logger.info('ASR.reconstruct_ancestral_states: start (placeholder uniform)')
-        # Alignment length (columns): use gapped sequence length of first tip
-        first = self.tip_names[0]
-        L = len(str(self.alignment.get_gapped_seq(first)))
-        # Uniform posterior over 20 AAs
-        uniform_post = np.full((L, len(PROT_20)), 1.0 / len(PROT_20), dtype=float)
-        # Collect internal nodes from the tree
-        child_parent = self.phylogenetic_tree.child_parent_map()
-        nodes = set(child_parent.keys()) | set(child_parent.values())
-        # Build mapping from PhyloNode -> posterior array
-        post_map: Dict = {}
-        for node in nodes:
-            # tips are strings in self.tip_names; internal nodes are PhyloNode
-            if getattr(node, 'name', None) in set(self.tip_names):
+        if not hasattr(self, 'phylogenetic_tree'):
+            raise ValueError("Phylogenetic tree not set; cannot perform ASR.")
+        if not self.tip_names:
+            raise ValueError("Alignment contains no tip sequences; cannot perform ASR.")
+
+        # Alignment length (with gaps) used for shape checking.
+        first_tip = self.tip_names[0]
+        L = len(str(self.alignment.get_gapped_seq(first_tip)))
+
+        # Gather internal nodes (cogent3 auto-names unnamed nodes as edge.*).
+        internal_nodes: List[PhyloNode] = []
+
+        def _collect_internal(node: PhyloNode) -> None:
+            children = getattr(node, 'children', []) or []
+            if children:
+                internal_nodes.append(node)
+                for child in children:
+                    _collect_internal(child)
+
+        _collect_internal(self.phylogenetic_tree)
+
+        post_map: Dict[Union[PhyloNode, str], np.ndarray] = {}
+
+        def _store(node: PhyloNode, arr: np.ndarray) -> None:
+            name = getattr(node, 'name', None)
+            if name:
+                post_map[str(name)] = arr
+            post_map[node] = arr
+
+        # Build a list of model candidates. Some tree-building backends expose
+        # models that cogent3 cannot fit (e.g. NQ.pfam); skip failures.
+        candidates: List[str] = []
+        seen: Set[str] = set()
+
+        def _add_candidate(cand: Optional[str]) -> None:
+            if not cand:
+                return
+            key = str(cand)
+            if key not in seen:
+                candidates.append(key)
+                seen.add(key)
+
+        _add_candidate(model_name)
+        _add_candidate(getattr(self, '_tree_model_name', None))
+        for cand in getattr(self, '_replacement_models', ()):
+            _add_candidate(cand)
+        # Sensible fallbacks recognised by cogent3 for proteins.
+        for fallback in ("WG01", "LG", "WAG"):
+            _add_candidate(fallback)
+
+        chosen_model = None
+        model_result = None
+        last_exc = None
+        for cand in candidates:
+            try:
+                model_app = get_app('model', cand, tree=self.phylogenetic_tree)
+            except Exception as err:
+                last_exc = err
                 continue
-            post_map[node] = uniform_post.copy()
+            try:
+                model_result = model_app(self.alignment)
+            except Exception as err:
+                last_exc = err
+                continue
+            chosen_model = cand
+            break
+
+        if model_result is None:
+            detail = f" (last error: {last_exc!r})" if last_exc else ""
+            raise RuntimeError(
+                "ASR.reconstruct_ancestral_states: failed to fit a substitution model "
+                f"from candidates {candidates}.{detail}"
+            ) from last_exc
+
+        try:
+            asr_app = get_app('ancestral_states')
+            asr_result = asr_app(model_result)
+        except Exception as err:
+            raise RuntimeError(
+                "ASR.reconstruct_ancestral_states: cogent3 ancestral state inference failed."
+            ) from err
+
+        missing_named: List[str] = []
+
+        for node in internal_nodes:
+            node_name = getattr(node, 'name', None)
+            site_dict = None
+            if node_name:
+                site_dict = asr_result.get(str(node_name))
+            if site_dict is None:
+                missing_named.append(str(node_name) if node_name else repr(node))
+                continue
+
+            positions = list(site_dict.keys())
+            positions.sort()
+            try:
+                arr = np.stack(
+                    [np.asarray(site_dict[pos].to_array(), dtype=float) for pos in positions],
+                    axis=0
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"ASR.reconstruct_ancestral_states: failed to coerce posterior for node "
+                    f"{node_name or repr(node)}."
+                ) from exc
+
+            if arr.shape[0] != L:
+                raise ValueError(
+                    f"ASR.reconstruct_ancestral_states: posterior length mismatch for node "
+                    f"{node_name or repr(node)} (expected {L}, observed {arr.shape[0]})."
+                )
+            if arr.shape[1] != len(PROT_20):
+                raise ValueError(
+                    f"ASR.reconstruct_ancestral_states: posterior width mismatch for node "
+                    f"{node_name or repr(node)} (expected {len(PROT_20)}, observed {arr.shape[1]})."
+                )
+
+            _store(node, arr)
+
+        if missing_named:
+            raise KeyError(
+                "ASR.reconstruct_ancestral_states: cogent3 ancestral_states did not emit "
+                f"posteriors for nodes: {', '.join(missing_named)}."
+            )
+
         self.asr_posterior_arr = post_map
+        self._asr_model_name = chosen_model
+
         if self._log_progress:
-            _logger.info('ASR.reconstruct_ancestral_states: complete')
+            _logger.info(
+                "ASR.reconstruct_ancestral_states: complete (model=%s, internal_nodes=%d)",
+                chosen_model,
+                len(internal_nodes),
+            )
 
     def _two_state_transition_probs(self,
                                     branch_length: float,
