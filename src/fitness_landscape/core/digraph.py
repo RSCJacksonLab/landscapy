@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Union, Dict, List, Literal
 import numpy as np
 import networkx as nx
+import logging
 from cogent3 import load_aligned_seqs, load_tree, get_app
 from cogent3.core.alignment import Alignment
 try:
@@ -21,7 +22,8 @@ from .graph import (
     _find_knn_faiss,
     _encode_multiallele,
     attach_expected_hamming_to_edges,
-    compute_edge_mutations_star
+    compute_edge_mutations_star,
+    _ensure_ray_initialized,
 )
 
 from ..embedding.particle_sampler import (
@@ -179,9 +181,9 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
     tau : float, default=1.0
         The temperature parameter used to smooth the distance kernel.
     
-    cpus : int, default=1.0
-        The number of CPUs to paralellise the kernel alignment and
-        distance computation over.
+    cpus : int, default=1
+        Target number of worker CPUs for Ray alignment tasks. Each task
+        consumes a single CPU.
 
     Returns
     -------
@@ -250,16 +252,35 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
     # Make kernel matrix
     kernel_matrix = np.zeros((n_sequences, n_sequences))
     
+    logger = logging.getLogger('fitness_landscape')
+    try:
+        num_cpus = int(cpus)
+    except (TypeError, ValueError):
+        raise ValueError("`cpus` must be an integer >= 1.") from None
+    if num_cpus < 1:
+        raise ValueError("`cpus` must be an integer >= 1.")
+
     # Init ray
-    if not ray.is_initialized():
-        ray.init()
+    _ensure_ray_initialized(num_cpus, logger=logger)
     
     # Compute in parallel.
-    refs = [_score_pair.options(num_cpus=cpus).remote(i, j, sequences[i], sequences[j], tau, replacement_matrix)
+    refs = [_score_pair.options(num_cpus=1).remote(i, j, sequences[i], sequences[j], tau, replacement_matrix)
             for (i, j) in pairs_to_align]
-    
-    for i, j, kv in ray.get(refs):
-        kernel_matrix[i, j] = kv
+    total_tasks = len(refs)
+    logger.info('Submitted alignment tasks: %d', total_tasks)
+    if total_tasks:
+        pending = list(refs)
+        completed = 0
+        log_every = max(1, total_tasks // 20)
+        while pending:
+            num_returns = min(32, len(pending))
+            ready, pending = ray.wait(pending, num_returns=num_returns)
+            results = ray.get(ready)
+            for i, j, kv in results:
+                kernel_matrix[i, j] = kv
+            completed += len(results)
+            if completed == total_tasks or completed % log_every == 0:
+                logger.info('Alignments progress: %d/%d (%.1f%%)', completed, total_tasks, (completed / total_tasks) * 100.0)
 
     # Proceed with diffusion and graph construction (same as before)
     np.fill_diagonal(kernel_matrix, 0)

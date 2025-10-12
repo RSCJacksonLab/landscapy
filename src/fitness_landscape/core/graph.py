@@ -1151,7 +1151,7 @@ def create_phylo_graph(sequences: Union[Path, Alignment],
                        phylo_backend: str = 'cogent_nj',
                        _dist_calc: str = 'pdist',
                        *,
-                       _compute_hamming_edges: bool = True,
+                       _compute_hamming_edges: bool = False,
                        _lightweight_nodes: bool = False,
                        _hard_ancestors: bool = False,
                        **kwargs) -> nx.DiGraph:
@@ -1217,6 +1217,37 @@ def _score_pair(i, j, seq_i, seq_j, tau, Q):
     score = calculate_gapped_soft_score(aligned_seq1=aligned[0], aligned_seq2=aligned[1], q=Q)
     
     return i, j, float(np.exp(score / tau))
+
+
+def _ensure_ray_initialized(num_cpus: int, *, logger: logging.Logger | None = None) -> None:
+    """
+    Ensure a Ray runtime exists with at least ``num_cpus`` CPU slots.
+
+    Parameters
+    ----------
+    num_cpus : int
+        Desired CPU concurrency (>=1). Each alignment task uses a single CPU.
+    logger : logging.Logger, optional
+        Logger for informational or warning messages.
+    """
+    if num_cpus < 1:
+        raise ValueError("`cpus` must be at least 1.")
+
+    if not ray.is_initialized():
+        ray.init(num_cpus=num_cpus, ignore_reinit_error=True)
+        if logger is not None:
+            logger.info("Ray initialised with num_cpus=%d", num_cpus)
+        return
+
+    if logger is not None:
+        total_cpus = ray.cluster_resources().get("CPU", 0.0)
+        if total_cpus and total_cpus + 1e-6 < num_cpus:
+            logger.warning(
+                "Ray runtime already initialised with %.2f CPU resources; "
+                "requested cpus=%d may not be fully available.",
+                total_cpus,
+                num_cpus,
+            )
 
 def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                                              embeddings: np.ndarray,
@@ -1294,9 +1325,9 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     tau : float, default=1.0
         The temperature parameter used to smooth the distance kernel.
 
-    cpus : int, default=1.0
-        The number of CPUs to paralellise the kernel alignment and
-        distance computation over.
+    cpus : int, default=1
+        Target number of worker CPUs for Ray alignment tasks. Each task
+        consumes a single CPU.
 
     Returns
     -------
@@ -1320,6 +1351,12 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
 
         # Use balltree algorithm (will fail as shape of embeddings >>>)
     _logger = logging.getLogger('fitness_landscape')
+    try:
+        num_cpus = int(cpus)
+    except (TypeError, ValueError):
+        raise ValueError("`cpus` must be an integer >= 1.") from None
+    if num_cpus < 1:
+        raise ValueError("`cpus` must be an integer >= 1.")
     _t_knn0 = time.perf_counter(); _c_knn0 = time.process_time()
     if backend == 'balltree':
         _, neighbor_indices = _find_knn_balltree(embeddings, k, tiebuffer)
@@ -1364,16 +1401,27 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
 
     # Init ray for parallel computing.
     _t_align0 = time.perf_counter(); _c_align0 = time.process_time()
-    if not ray.is_initialized():
-        ray.init()
+    _ensure_ray_initialized(num_cpus, logger=_logger)
     
     # Compute in parallel.
-    refs = [_score_pair.options(num_cpus=cpus).remote(i, j, sequences[i], sequences[j], tau, replacement_matrix)
+    refs = [_score_pair.options(num_cpus=1).remote(i, j, sequences[i], sequences[j], tau, replacement_matrix)
             for (i, j) in pairs_to_align]
-    _logger.info('Submitted alignment tasks: %d', len(refs))
-    for i, j, kv in ray.get(refs):
-        rows_list.append(i); cols_list.append(j); data_list.append(float(kv))
-        rows_list.append(j); cols_list.append(i); data_list.append(float(kv))
+    total_tasks = len(refs)
+    _logger.info('Submitted alignment tasks: %d', total_tasks)
+    if total_tasks:
+        pending = list(refs)
+        completed = 0
+        log_every = max(1, total_tasks // 20)
+        while pending:
+            num_returns = min(32, len(pending))
+            ready, pending = ray.wait(pending, num_returns=num_returns)
+            results = ray.get(ready)
+            for i, j, kv in results:
+                rows_list.append(i); cols_list.append(j); data_list.append(float(kv))
+                rows_list.append(j); cols_list.append(i); data_list.append(float(kv))
+            completed += len(results)
+            if completed == total_tasks or completed % log_every == 0:
+                _logger.info('Alignments progress: %d/%d (%.1f%%)', completed, total_tasks, (completed / total_tasks) * 100.0)
     _logger.info('Alignments complete: wall=%.2fs cpu=%.2fs', time.perf_counter()-_t_align0, time.process_time()-_c_align0)
 
     if rows_list:

@@ -3,7 +3,7 @@ import pytest
 import fitness_landscape.core.landscape as L
 
 
-def test_from_sequences_evol_diffusion_calls_constructor(monkeypatch):
+def test_build_evol_diffusion_calls_constructor(monkeypatch):
     called = {}
 
     def fake_ctor(seqs, **kwargs):
@@ -23,10 +23,10 @@ def test_from_sequences_evol_diffusion_calls_constructor(monkeypatch):
     seqs = generate_sequences(length=2, alphabet=[0, 1])
     layers = {"default": NumericFitness(name="default", values=[[1.0] for _ in seqs])}
 
-    FL = L.FitnessLandscape.from_sequences(
+    FL = L.FitnessLandscape.build(
         sequences=seqs,
         fitness_layers=layers,
-        graph_type='evol_diffusion',
+        graph='evol_diffusion',
         embeddings=None,
         embedding_domain='ohe',
         k=10,
@@ -43,4 +43,3 @@ def test_from_sequences_evol_diffusion_calls_constructor(monkeypatch):
     assert called['kwargs']['tau'] == 0.9
     assert called['kwargs']['connectivity_threshold'] == 1e-3
     assert FL.graph.number_of_nodes() == len(seqs)
-
