@@ -11,11 +11,12 @@ from typing import Any
 
 import click
 import numpy as np
+from cogent3 import load_aligned_seqs
 
 from ._const import PROT_20
-from .core.graph import _encode_multiallele, create_evol_diffusion_graph
+from .core.graph import _encode_multiallele, create_evol_diffusion_graph, create_phylo_graph
 from .core.landscape import FitnessLandscape
-from .utils import _compute_embeddings_from_sequences, fasta_to_prot20_sequences
+from .utils import _compute_embeddings_from_sequences, fasta_to_prot20_sequences, sanitize_alignment
 
 
 def _load_phylo_module() -> Any:
@@ -349,10 +350,149 @@ def evol_diffusion_landscape(
 
 
 @cli.command()
-@click.pass_context
-def phylo_landscape(ctx: click.Context, *args: Any, **kwargs: Any) -> None:
-    module = _load_phylo_module()
-    ctx.forward(module.phylo_landscape)
+@click.option("--alignment", required=True, type=click.Path(exists=True), help="Path to an aligned FASTA file (.fa/.fasta/.fas).")
+@click.option("--output", required=True, type=click.Path(), help="Destination for the serialized FitnessLandscape (.pkl).")
+@click.option("--replacement-matrix", "replacement_matrix", multiple=True, default=("LG",), show_default=True,
+              help="Replacement matrix (or matrices) for phylogenetic reconstruction. Repeat to provide multiple.")
+@click.option("--model-fitting/--no-model-fitting", default=True, show_default=True,
+              help="Enable model selection / fitting when building the tree.")
+@click.option("--phylo-backend", type=click.Choice(["cogent_nj", "iqtree"]), default="iqtree", show_default=True,
+              help="Backend used for phylogenetic inference.")
+@click.option("--distance", "dist_calc", type=click.Choice(["pdist", "paralinear", "hamming"]), default="pdist", show_default=True,
+              help="Distance measure supplied to the phylogenetic backend.")
+@click.option("--tree", "tree_path", type=click.Path(exists=True), default=None,
+              help="Optional Newick tree to reuse instead of inferring a new one.")
+@click.option("--sanitize/--no-sanitize", default=True, show_default=True,
+              help="Sanitize the alignment (uppercase, canonical residues, unique IDs).")
+@click.option("--compute-hamming-edges/--no-compute-hamming-edges", default=True, show_default=False,
+              help="Attach expected Hamming edge annotations when possible.")
+@click.option("--lightweight-nodes", is_flag=True, default=False, help="Drop heavy posterior arrays from nodes to save memory.")
+@click.option("--hard-ancestors", is_flag=True, default=False,
+              help="Collapse ancestral posterior sequences to hard consensus strings.")
+@click.option("--nested-parallel", is_flag=True, default=False,
+              help="Allow nested parallelism during edge annotation (use with care).")
+@click.option("--log-file", type=click.Path(), default=None, help="Optional log file path.")
+@click.option("--log-level", type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"]), default="INFO", show_default=True)
+@click.option("--log-progress", is_flag=True, default=False, help="Enable verbose progress logging during ASR.")
+@click.option("--log-prefix", type=str, default=None, help="Derive a log filename using this prefix when --log-file is omitted.")
+def phylo_landscape(
+    alignment: str,
+    output: str,
+    replacement_matrix: tuple[str, ...],
+    model_fitting: bool,
+    phylo_backend: str,
+    dist_calc: str,
+    tree_path: str | None,
+    sanitize: bool,
+    compute_hamming_edges: bool,
+    lightweight_nodes: bool,
+    hard_ancestors: bool,
+    nested_parallel: bool,
+    log_file: str | None,
+    log_level: str,
+    log_progress: bool,
+    log_prefix: str | None,
+) -> None:
+    """Construct a phylogenetic FitnessLandscape from an aligned FASTA."""
+
+    aln_path = Path(alignment)
+    out_path = Path(output)
+    logger, resolved_log = _configure_logger(log_file, log_level, log_prefix, aln_path, out_path)
+
+    if log_progress:
+        logger.info("Progress logging enabled.")
+
+    t0 = time.perf_counter()
+    c0 = time.process_time()
+    logger.info("phylo-landscape: start")
+
+    # Load alignment
+    try:
+        _t_aln0 = time.perf_counter()
+        _c_aln0 = time.process_time()
+        aln = load_aligned_seqs(str(aln_path), moltype="protein")
+        n_tips = len(aln.names)
+        aln_len = getattr(aln, "seq_len", None)
+        if aln_len is None:
+            try:
+                aln_len = aln.shape[1]  # type: ignore[index]
+            except Exception:
+                aln_len = len(str(aln.get_gapped_seq(aln.names[0]))) if n_tips else 0
+        logger.info(
+            "Alignment loaded: tips=%d length=%s wall=%.2fs cpu=%.2fs",
+            n_tips,
+            aln_len,
+            time.perf_counter() - _t_aln0,
+            time.process_time() - _c_aln0,
+        )
+    except Exception as exc:
+        raise click.UsageError(f"Failed to load alignment {alignment!r}: {exc}") from exc
+
+    if sanitize:
+        _t_san0 = time.perf_counter()
+        _c_san0 = time.process_time()
+        aln = sanitize_alignment(aln)
+        logger.info(
+            "Alignment sanitised: tips=%d length=%d wall=%.2fs cpu=%.2fs",
+            len(aln.names),
+            getattr(aln, "seq_len", aln.shape[1] if hasattr(aln, "shape") else 0),
+            time.perf_counter() - _t_san0,
+            time.process_time() - _c_san0,
+        )
+
+    matrices = [str(m) for m in (replacement_matrix or ("LG",))]
+    if not matrices:
+        matrices = ["LG"]
+
+    kwargs: dict[str, Any] = {}
+    if tree_path is not None:
+        kwargs["phylogenetic_tree"] = Path(tree_path)
+
+    _t_graph0 = time.perf_counter()
+    _c_graph0 = time.process_time()
+    try:
+        graph = create_phylo_graph(
+            sequences=aln,
+            replacement_matrix=matrices,
+            model_fitting=model_fitting,
+            _log_progress=log_progress,
+            _nested_parallel=nested_parallel,
+            phylo_backend=phylo_backend,
+            _dist_calc=dist_calc,
+            _compute_hamming_edges=compute_hamming_edges,
+            _lightweight_nodes=lightweight_nodes,
+            _hard_ancestors=hard_ancestors,
+            **kwargs,
+        )
+    except Exception as exc:
+        raise click.UsageError(f"Failed to construct phylogenetic graph: {exc}") from exc
+    logger.info(
+        "Phylogenetic graph constructed: nodes=%d edges=%d wall=%.2fs cpu=%.2fs",
+        graph.number_of_nodes(),
+        graph.number_of_edges(),
+        time.perf_counter() - _t_graph0,
+        time.process_time() - _c_graph0,
+    )
+
+    landscape = FitnessLandscape.from_graph(graph)
+
+    _t_save0 = time.perf_counter()
+    _c_save0 = time.process_time()
+    landscape.save(out_path)
+    logger.info(
+        "Saved landscape: wall=%.2fs cpu=%.2fs",
+        time.perf_counter() - _t_save0,
+        time.process_time() - _c_save0,
+    )
+    logger.info("Landscape saved to %s", output)
+    logger.info(
+        "phylo-landscape: end wall=%.2fs cpu=%.2fs",
+        time.perf_counter() - t0,
+        time.process_time() - c0,
+    )
+
+    if resolved_log:
+        click.echo(f"Log written to {resolved_log}")
 
 
 @cli.command()
