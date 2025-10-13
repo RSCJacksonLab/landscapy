@@ -1,6 +1,7 @@
+import math
 import numpy as np
 import networkx as nx
-from typing import List, Union, Optional, Tuple, Dict
+from typing import List, Union, Optional, Tuple, Dict, Sequence, Callable
 import torch
 from scipy import sparse as sp
 from scipy.spatial import cKDTree, distance_matrix
@@ -128,6 +129,97 @@ def get_landscape_dist_mat(landscape: 'FitnessLandscape',
                                             weight=None)
 
     return dist_mat
+
+def geodesic_distance_matrix(G: Union['FitnessLandscape', nx.Graph],
+                             nodes: Optional[Sequence] = None,
+                             *,
+                             weight_key: Optional[str] = None,
+                             transform: Union[str, Callable[[float], float], None] = "auto",
+                             default_weight: float = 1.0,
+                             eps: float = 1e-12) -> Tuple[np.ndarray, List]:
+    """
+    Compute a dense geodesic distance matrix over ``nodes`` in ``G``.
+
+    Parameters
+    ----------
+    G : FitnessLandscape or nx.Graph
+        Input graph (directed graphs are treated as undirected).
+    nodes : Sequence, optional
+        Node identifiers to include. Defaults to all nodes in ``G``.
+    weight_key : str, optional
+        Edge attribute containing similarities/weights. When ``None``,
+        unit length edges are assumed.
+    transform : {'auto', 'neglog', 'inverse', 'identity'} or callable, optional
+        Transform applied to edge weights before computing geodesics.
+        ``'auto'`` chooses ``'neglog'`` when ``weight_key=='kernel_weight'``
+        and ``'identity'`` otherwise. A callable may also be provided.
+    default_weight : float, default=1.0
+        Value used when an edge lacks ``weight_key``.
+    eps : float, default=1e-12
+        Numerical floor used by logarithmic/inverse transforms.
+
+    Returns
+    -------
+    tuple
+        Pair ``(D, order)`` where ``D`` is an ``(n, n)`` numpy array of
+        geodesic distances and ``order`` records the node labels used.
+    """
+    graph_attr = getattr(G, "graph", None)
+    if isinstance(graph_attr, nx.Graph):
+        graph_obj = graph_attr
+    else:
+        graph_obj = G
+    if isinstance(graph_obj, nx.DiGraph):
+        graph_obj = graph_obj.to_undirected()
+    if not isinstance(graph_obj, nx.Graph):
+        raise TypeError("Expected FitnessLandscape or networkx Graph/Digraph.")
+
+    if nodes is None:
+        node_list = list(graph_obj.nodes())
+    else:
+        node_list = [n for n in nodes if n in graph_obj]
+
+    H = graph_obj.copy()
+    length_attr = "__geodesic_length__"
+
+    def _transform_weight(w: float) -> float:
+        if callable(transform):
+            return float(transform(w))
+        mode = "identity" if transform is None else str(transform).lower()
+        if mode == "auto":
+            mode = "neglog" if weight_key == "kernel_weight" else "identity"
+        if mode == "neglog":
+            return float(-math.log(max(w, eps)))
+        if mode in {"inverse", "reciprocal"}:
+            return float(1.0 / max(w, eps))
+        if mode in {"identity", "none"}:
+            return float(w)
+        raise ValueError(f"Unsupported transform '{transform}'.")
+
+    for u, v, data in H.edges(data=True):
+        if weight_key is None:
+            w = float(default_weight)
+        else:
+            w = float(data.get(weight_key, default_weight))
+        data[length_attr] = _transform_weight(w)
+
+    n = len(node_list)
+    D = np.full((n, n), np.inf, dtype=float)
+    for i in range(n):
+        D[i, i] = 0.0
+
+    index = {node: i for i, node in enumerate(node_list)}
+    for src in node_list:
+        if src not in H:
+            continue
+        dist = nx.single_source_dijkstra_path_length(H, src, weight=length_attr)
+        i = index[src]
+        for tgt, val in dist.items():
+            j = index.get(tgt)
+            if j is not None:
+                D[i, j] = float(val)
+
+    return D, node_list
 
 
 def _compute_embeddings_from_sequences(sequences: List[BaseNumpySequence],

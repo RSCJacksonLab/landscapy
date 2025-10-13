@@ -1,16 +1,22 @@
+import math
 import numpy as np
 import networkx as nx
+from collections import Counter, defaultdict
 from networkx.algorithms.approximation.steinertree import steiner_tree
-from scipy.spatial.distance import cdist
+from networkx.algorithms.community import greedy_modularity_communities
+from scipy.spatial.distance import cdist, squareform
 from scipy.sparse.csgraph import shortest_path
+from scipy.cluster.hierarchy import linkage, fcluster
+from scipy.cluster.vq import kmeans2
 from numpy.linalg import svd
-from typing import List, Union, Tuple, Dict, Optional
+from typing import List, Union, Tuple, Dict, Optional, Sequence, Any
 from ..transforms.eigenmode import eigenmode_decomposition
 from ..core.landscape import FitnessLandscape
 import statistics as stats
 from scipy.optimize import linear_sum_assignment
 from ..graph_matching import isorank_with_features
-from ..utils import _compute_embeddings_from_sequences
+from ..utils import _compute_embeddings_from_sequences, geodesic_distance_matrix
+from ..core.sequence import BaseNumpySequence
 
 
 def _edge_set(G: nx.Graph) -> set:
@@ -543,6 +549,511 @@ def _ensure_graph(obj: Union[FitnessLandscape, nx.Graph]) -> nx.Graph:
     if not isinstance(obj, nx.Graph):
         raise TypeError("Expected FitnessLandscape or networkx Graph/Digraph")
     return obj
+
+def _sequence_key(seq: Union[BaseNumpySequence, np.ndarray, Sequence]) -> Tuple:
+    """
+    Obtain a hashable key representing the content of a sequence-like
+    object. Strings are treated as iterables of characters.
+    """
+    if isinstance(seq, BaseNumpySequence):
+        arr = seq.to_array()
+    elif hasattr(seq, "to_array"):
+        arr = np.asarray(seq.to_array())
+    elif isinstance(seq, np.ndarray):
+        arr = seq
+    elif isinstance(seq, (list, tuple)):
+        arr = np.asarray(seq)
+    else:
+        # Treat scalar/string as 1D sequence
+        arr = np.asarray(list(seq))
+    return tuple(map(str, np.asarray(arr).ravel()))
+
+def _sequence_index(G: nx.Graph) -> Dict[Tuple, Tuple[Any, Any]]:
+    """
+    Build a mapping from sequence content -> (sequence_obj, node_id)
+    using the first occurrence for each unique sequence.
+    """
+    index: Dict[Tuple, Tuple[BaseNumpySequence, any]] = {}
+    for node, data in G.nodes(data=True):
+        seq = data.get("sequence")
+        if seq is None:
+            continue
+        try:
+            key = _sequence_key(seq)
+        except Exception:
+            continue
+        if key not in index:
+            seq_obj = seq if isinstance(seq, BaseNumpySequence) else seq
+            index[key] = (seq_obj, node)
+    return index
+
+def _node_sequence_key(G: nx.Graph, node) -> Tuple[Optional[BaseNumpySequence], Optional[Tuple]]:
+    data = G.nodes.get(node, {})
+    seq = data.get("sequence")
+    if seq is None:
+        return None, None
+    try:
+        key = _sequence_key(seq)
+    except Exception:
+        return None, None
+    seq_obj = seq if isinstance(seq, BaseNumpySequence) else seq
+    return seq_obj, key
+
+def _resolve_sequence_alignment(diff_G: nx.Graph,
+                                phy_G: nx.Graph,
+                                extant_nodes: Optional[Sequence]) -> Tuple[List, List, List[Any]]:
+    """
+    Resolve matching nodes across graphs using sequence equality.
+
+    Returns diffusion node order, phylogeny node order, and matching
+    sequence objects (preferring diffusion sequences when available).
+    """
+    diff_index = _sequence_index(diff_G)
+    phy_index = _sequence_index(phy_G)
+
+    diffusion_nodes: List = []
+    phy_nodes: List = []
+    sequences: List[BaseNumpySequence] = []
+
+    def _append_from_key(key: Tuple) -> bool:
+        if key not in diff_index or key not in phy_index:
+            return False
+        seq_obj, diff_node = diff_index[key]
+        phy_seq_obj, phy_node = phy_index[key]
+        sequences.append(seq_obj if isinstance(seq_obj, BaseNumpySequence) else phy_seq_obj)
+        diffusion_nodes.append(diff_node)
+        phy_nodes.append(phy_node)
+        return True
+
+    if extant_nodes is None:
+        shared_keys = [k for k in diff_index.keys() if k in phy_index]
+        if shared_keys:
+            for key in shared_keys:
+                _append_from_key(key)
+        else:
+            overlap = [n for n in diff_G.nodes() if n in phy_G]
+            for node in overlap:
+                seq_obj, key = _node_sequence_key(diff_G, node)
+                if key is None:
+                    seq_obj, key = _node_sequence_key(phy_G, node)
+                if key is None:
+                    continue
+                if _append_from_key(key):
+                    continue
+    else:
+        for item in extant_nodes:
+            diff_node = item if item in diff_G else None
+            phy_node = item if item in phy_G else None
+            seq_obj, key = (None, None)
+            if diff_node is not None:
+                seq_obj, key = _node_sequence_key(diff_G, diff_node)
+            if key is None and phy_node is not None:
+                seq_obj, key = _node_sequence_key(phy_G, phy_node)
+            if key is None:
+                try:
+                    key = _sequence_key(item)
+                    if isinstance(item, BaseNumpySequence):
+                        seq_obj = item
+                except Exception:
+                    key = None
+            if key is None or key not in diff_index or key not in phy_index:
+                raise ValueError(f"Could not resolve shared sequence for extant node {item!r}.")
+            resolved = diff_index[key]
+            phy_resolved = phy_index[key]
+            if diff_node is None:
+                diff_node = resolved[1]
+            if phy_node is None:
+                phy_node = phy_resolved[1]
+            sequences.append(seq_obj if isinstance(seq_obj, BaseNumpySequence) else resolved[0])
+            diffusion_nodes.append(diff_node)
+            phy_nodes.append(phy_node)
+
+    if not diffusion_nodes or not phy_nodes:
+        raise ValueError("No overlapping sequences between diffusion and phylogeny graphs.")
+
+    return diffusion_nodes, phy_nodes, sequences
+
+def _sequence_identifier(seq: Any) -> str:
+    if isinstance(seq, BaseNumpySequence):
+        return getattr(seq, "id", str(seq))
+    return str(seq)
+
+def _comb2(n: int) -> float:
+    return 0.5 * n * (n - 1)
+
+def _cluster_metrics(true_labels: Sequence[int],
+                     pred_labels: Sequence[int]) -> Dict[str, float]:
+    n = len(true_labels)
+    if n == 0:
+        return {"adjusted_rand_index": 0.0, "mutual_info": 0.0, "normalized_mutual_info": 0.0}
+    table = defaultdict(int)
+    counts_true = Counter()
+    counts_pred = Counter()
+    for t, p in zip(true_labels, pred_labels):
+        table[(t, p)] += 1
+        counts_true[t] += 1
+        counts_pred[p] += 1
+
+    if n < 2:
+        return {"adjusted_rand_index": 0.0, "mutual_info": 0.0, "normalized_mutual_info": 0.0}
+
+    sum_comb = sum(_comb2(v) for v in table.values())
+    sum_true = sum(_comb2(v) for v in counts_true.values())
+    sum_pred = sum(_comb2(v) for v in counts_pred.values())
+    total = _comb2(n)
+    expected = (sum_true * sum_pred) / total if total > 0 else 0.0
+    max_index = 0.5 * (sum_true + sum_pred)
+    denominator = max_index - expected
+    ari = 0.0 if abs(denominator) < 1e-12 else (sum_comb - expected) / denominator
+
+    # Mutual information
+    mi = 0.0
+    for (t, p), nij in table.items():
+        if nij == 0:
+            continue
+        mi += (nij / n) * math.log((nij * n) / (counts_true[t] * counts_pred[p] + 1e-12) + 1e-12)
+    # Entropies
+    def _entropy(counter: Counter) -> float:
+        h = 0.0
+        for cnt in counter.values():
+            if cnt == 0:
+                continue
+            frac = cnt / n
+            h -= frac * math.log(frac + 1e-12)
+        return h
+
+    h_true = _entropy(counts_true)
+    h_pred = _entropy(counts_pred)
+    denom = math.sqrt(h_true * h_pred) if h_true > 0 and h_pred > 0 else 0.0
+    nmi = mi / denom if denom > 0 else 0.0
+
+    return {
+        "adjusted_rand_index": float(ari),
+        "mutual_info": float(mi),
+        "normalized_mutual_info": float(nmi),
+    }
+
+def _spectral_cluster_labels(G: nx.Graph,
+                             nodes: Sequence,
+                             n_clusters: int,
+                             *,
+                             weight_key: Optional[str] = None,
+                             random_state: Optional[int] = None) -> np.ndarray:
+    n = len(nodes)
+    if n == 0:
+        return np.array([], dtype=int)
+    if n_clusters <= 1 or n <= 1:
+        return np.zeros(n, dtype=int)
+    k = min(n_clusters, n)
+    A = nx.to_numpy_array(G, nodelist=list(nodes), weight=weight_key)
+    degrees = A.sum(axis=1)
+    with np.errstate(divide='ignore'):
+        inv_sqrt = 1.0 / np.sqrt(np.maximum(degrees, 1e-12))
+    inv_sqrt[~np.isfinite(inv_sqrt)] = 0.0
+    norm_adj = inv_sqrt[:, None] * A * inv_sqrt[None, :]
+    L = np.eye(n) - norm_adj
+    try:
+        eigvals, eigvecs = np.linalg.eigh(L)
+    except np.linalg.LinAlgError:
+        eigvals, eigvecs = np.linalg.eig(L)
+        eigvals = np.real(eigvals)
+        eigvecs = np.real(eigvecs)
+    idx = np.argsort(eigvals)
+    eigvecs = eigvecs[:, idx]
+    features = eigvecs[:, 1:k] if k > 1 and eigvecs.shape[1] > 1 else eigvecs[:, :1]
+    if features.ndim == 1:
+        features = features[:, None]
+    norms = np.linalg.norm(features, axis=1, keepdims=True)
+    norms[norms == 0.0] = 1.0
+    features = features / norms
+    unique_rows = np.unique(features, axis=0)
+    if unique_rows.shape[0] < k:
+        k = unique_rows.shape[0]
+        if k <= 1:
+            return np.zeros(n, dtype=int)
+    seed = random_state if random_state is not None else None
+    try:
+        centroids, labels = kmeans2(features, k, minit='++', seed=seed)
+    except Exception:
+        # Fallback: assign by nearest centroid from unique rows via simple heuristic
+        base = unique_rows
+        if base.shape[0] < k:
+            k = base.shape[0]
+        centroids = base[:k]
+        dists = ((features[:, None, :] - centroids[None, :, :])**2).sum(axis=2)
+        labels = np.argmin(dists, axis=1)
+    if labels.ndim > 1:
+        labels = labels.reshape(-1)
+    return labels.astype(int)
+
+def _modularity_cluster_labels(G: nx.Graph,
+                               nodes: Sequence,
+                               weight_key: Optional[str] = None) -> np.ndarray:
+    if len(nodes) == 0:
+        return np.array([], dtype=int)
+    subgraph = G.subgraph(nodes)
+    communities = list(greedy_modularity_communities(subgraph, weight=weight_key))
+    label_map: Dict[Any, int] = {}
+    for idx, comm in enumerate(communities):
+        for node in comm:
+            label_map[node] = idx
+    return np.array([label_map.get(node, -1) for node in nodes], dtype=int)
+
+def _phylo_reference_labels(phy_G: nx.Graph,
+                            nodes: Sequence,
+                            n_clusters: int,
+                            *,
+                            weight_key: Optional[str] = None) -> np.ndarray:
+    n = len(nodes)
+    if n == 0:
+        return np.array([], dtype=int)
+    if n <= n_clusters:
+        return np.arange(n, dtype=int)
+    distances = np.zeros((n, n), dtype=float)
+    for i, src in enumerate(nodes):
+        lengths = nx.single_source_dijkstra_path_length(phy_G, src, weight=weight_key)
+        for j, dst in enumerate(nodes):
+            distances[i, j] = lengths.get(dst, np.inf)
+    if np.isinf(distances).any():
+        finite = distances[np.isfinite(distances)]
+        if finite.size == 0:
+            raise ValueError("Phylogenetic graph is disconnected for provided nodes.")
+        max_val = np.max(finite)
+        distances = np.where(np.isinf(distances), max_val * 2.0, distances)
+    condensed = squareform(distances, checks=False)
+    Z = linkage(condensed, method="average")
+    n_clusters = min(max(1, n_clusters), n)
+    labels = fcluster(Z, t=n_clusters, criterion='maxclust') - 1
+    return labels.astype(int)
+
+def geodesic_distance_dict(G: Union[FitnessLandscape, nx.Graph],
+                           nodes: Optional[Sequence] = None,
+                           *,
+                           weight_key: Optional[str] = None,
+                           transform: Union[str, None] = "auto",
+                           default_weight: float = 1.0,
+                           eps: float = 1e-12) -> Dict[Tuple, float]:
+    """
+    Compute geodesic distances for all ordered pairs in ``nodes``.
+
+    Parameters
+    ----------
+    G : FitnessLandscape or nx.Graph
+        Input graph.
+    nodes : Sequence, optional
+        Node labels to include; defaults to all graph nodes.
+    weight_key : str, optional
+        Edge attribute containing weights/similarities.
+    transform : str or None, optional
+        Transform passed through to :func:`geodesic_distance_matrix`.
+    default_weight : float, default=1.0
+        Substitute value when an edge lacks ``weight_key``.
+    eps : float, default=1e-12
+        Numerical floor for log/inverse transforms.
+
+    Returns
+    -------
+    dict
+        Mapping ``(u, v) -> distance`` for each ordered node pair
+        (diagonal included). Entries are symmetric, i.e. both
+        ``(u, v)`` and ``(v, u)`` share the same value.
+    """
+    H = _ensure_graph(G)
+    matrix, order = geodesic_distance_matrix(H,
+                                             nodes,
+                                             weight_key=weight_key,
+                                             transform=transform,
+                                             default_weight=default_weight,
+                                             eps=eps)
+    dist: Dict[Tuple, float] = {}
+    n = len(order)
+    for i in range(n):
+        for j in range(n):
+            u, v = order[i], order[j]
+            val = float(matrix[i, j])
+            dist[(u, v)] = val
+    return dist
+
+def compare_geodesic_distance_arrays(diffusion_graph: Union[FitnessLandscape, nx.Graph],
+                                     phylo_graph: Union[FitnessLandscape, nx.Graph],
+                                     *,
+                                     extant_nodes: Optional[Sequence] = None,
+                                     diffusion_weight_key: Optional[str] = "kernel_weight",
+                                     phylo_weight_key: Optional[str] = "weight",
+                                     diffusion_transform: Union[str, None] = "auto",
+                                     phylo_transform: Union[str, None] = "auto",
+                                     default_weight: float = 1.0,
+                                     eps: float = 1e-12,
+                                     drop_disconnected: bool = True) -> Tuple[np.ndarray, np.ndarray, List[Tuple]]:
+    """
+    Compute paired geodesic distances for matching sequence pairs in a
+    diffusion graph and a phylogenetic graph.
+
+    Parameters
+    ----------
+    diffusion_graph : FitnessLandscape or nx.Graph
+        Graph whose nodes correspond to extant sequences.
+    phylo_graph : FitnessLandscape or nx.Graph
+        Phylogenetic graph containing the same extant labels (plus
+        possible ancestors).
+    extant_nodes : Sequence, optional
+        Explicit list of node identifiers or sequence objects to compare.
+        By default, overlap is determined via sequence equality (falling
+        back to shared node identifiers only when necessary).
+    diffusion_weight_key : str, optional
+        Edge attribute used when computing diffusion geodesics.
+    phylo_weight_key : str, optional
+        Edge attribute used for phylogeny geodesics.
+    diffusion_transform : str or None, optional
+        Transform applied to diffusion edge weights (default 'auto').
+    phylo_transform : str or None, optional
+        Transform applied to phylogeny edge weights.
+    default_weight : float, default=1.0
+        Substitute value when an edge lacks the chosen weight key.
+    eps : float, default=1e-12
+        Numerical floor for log/inverse transforms.
+    drop_disconnected : bool, default=True
+        When True, omit node pairs where either graph has infinite
+        distance.
+
+    Returns
+    -------
+    tuple
+        ``(diffusion_distances, phylo_distances, pairs)`` where the
+        distance arrays are aligned to ``pairs`` (a list of
+        sequence-object tuples ``(seq_i, seq_j)`` corresponding to
+        ``diffusion_distances[k]`` and ``phylo_distances[k]``).
+    """
+    diff_G = _ensure_graph(diffusion_graph)
+    phy_G = _ensure_graph(phylo_graph)
+
+    diff_nodes, phy_nodes, seq_objects = _resolve_sequence_alignment(diff_G, phy_G, extant_nodes)
+
+    diff_matrix, diff_order = geodesic_distance_matrix(diff_G,
+                                                       diff_nodes,
+                                                       weight_key=diffusion_weight_key,
+                                                       transform=diffusion_transform,
+                                                       default_weight=default_weight,
+                                                       eps=eps)
+    phy_matrix, phy_order = geodesic_distance_matrix(phy_G,
+                                                     phy_nodes,
+                                                     weight_key=phylo_weight_key,
+                                                     transform=phylo_transform,
+                                                     default_weight=default_weight,
+                                                     eps=eps)
+
+    if len(diff_order) != len(phy_order):
+        raise ValueError("Diffusion and phylogeny geodesic matrices differ in size after alignment.")
+
+    pairs: List[Tuple] = []
+    diffusion_vals: List[float] = []
+    phylo_vals: List[float] = []
+    n = len(diff_order)
+
+    if len(seq_objects) < n:
+        # Pad missing sequences with node identifiers
+        seq_objects = list(seq_objects) + [diff_order[i] for i in range(len(seq_objects), n)]
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            pair = (seq_objects[i], seq_objects[j])
+            d_diff = float(diff_matrix[i, j])
+            d_phy = float(phy_matrix[i, j])
+            if drop_disconnected and (not np.isfinite(d_diff) or not np.isfinite(d_phy)):
+                continue
+            diffusion_vals.append(d_diff)
+            phylo_vals.append(d_phy)
+            pairs.append(pair)
+
+    return np.asarray(diffusion_vals, dtype=float), np.asarray(phylo_vals, dtype=float), pairs
+
+def compare_diffusion_clusters_to_phylogeny(diffusion_graph: Union[FitnessLandscape, nx.Graph],
+                                            phylo_graph: Union[FitnessLandscape, nx.Graph],
+                                            *,
+                                            extant_nodes: Optional[Sequence] = None,
+                                            n_clusters: int = 8,
+                                            diffusion_weight_key: Optional[str] = None,
+                                            phylo_weight_key: Optional[str] = None,
+                                            random_state: Optional[int] = None,
+                                            drop_unassigned: bool = True) -> Dict[str, Any]:
+    """
+    Compare community structure of a diffusion graph with clades from a
+    ground-truth phylogeny via clustering agreement metrics.
+
+    Parameters
+    ----------
+    diffusion_graph : FitnessLandscape or nx.Graph
+        Graph on extant sequences (potentially dense).
+    phylo_graph : FitnessLandscape or nx.Graph
+        Phylogenetic tree containing extant tips (and ancestors).
+    extant_nodes : Sequence, optional
+        Explicit set of nodes or sequences to align. Defaults to
+        overlap determined via sequence equality.
+    n_clusters : int, default=8
+        Target number of clades/clusters for comparison.
+    diffusion_weight_key : str, optional
+        Edge attribute for weighting spectral/modularity clustering.
+    phylo_weight_key : str, optional
+        Edge attribute holding branch lengths when building clade
+        distances. If ``None``, unit lengths are assumed.
+    random_state : int, optional
+        Random seed forwarded to spectral clustering k-means.
+    drop_unassigned : bool, default=True
+        If True, nodes assigned ``-1`` (unreachable) are removed prior
+        to computing metrics.
+
+    Returns
+    -------
+    dict
+        Dictionary containing partitions and agreement metrics for
+        spectral and modularity-based communities.
+    """
+    diff_G = _ensure_graph(diffusion_graph)
+    phy_G = _ensure_graph(phylo_graph)
+
+    diff_nodes, phy_nodes, seq_objects = _resolve_sequence_alignment(diff_G, phy_G, extant_nodes)
+    if len(diff_nodes) == 0:
+        raise ValueError("No overlapping sequences between diffusion and phylogeny graphs.")
+
+    n_clusters = max(1, min(n_clusters, len(diff_nodes)))
+    spectral_labels = _spectral_cluster_labels(diff_G, diff_nodes, n_clusters,
+                                               weight_key=diffusion_weight_key,
+                                               random_state=random_state)
+    modularity_labels = _modularity_cluster_labels(diff_G, diff_nodes,
+                                                   weight_key=diffusion_weight_key)
+    phylo_labels = _phylo_reference_labels(phy_G, phy_nodes, n_clusters,
+                                           weight_key=phylo_weight_key)
+
+    # Optionally drop nodes with undefined modularity label
+    valid_indices = list(range(len(diff_nodes)))
+    if drop_unassigned:
+        valid_indices = [i for i, lab in enumerate(modularity_labels) if lab >= 0]
+    if not valid_indices:
+        raise ValueError("No nodes remained after filtering unassigned communities.")
+
+    seq_ids = [_sequence_identifier(seq_objects[i]) for i in valid_indices]
+    phy_labels_sel = phylo_labels[valid_indices]
+    spectral_sel = spectral_labels[valid_indices]
+    modularity_sel = modularity_labels[valid_indices]
+
+    spectral_metrics = _cluster_metrics(phy_labels_sel.tolist(), spectral_sel.tolist())
+    modularity_metrics = _cluster_metrics(phy_labels_sel.tolist(), modularity_sel.tolist())
+
+    return {
+        "n_nodes": len(seq_ids),
+        "sequence_ids": seq_ids,
+        "phylo_labels": phy_labels_sel.tolist(),
+        "diffusion_nodes": [diff_nodes[i] for i in valid_indices],
+        "phylo_nodes": [phy_nodes[i] for i in valid_indices],
+        "spectral": {
+            "labels": spectral_sel.tolist(),
+            **spectral_metrics,
+        },
+        "modularity": {
+            "labels": modularity_sel.tolist(),
+            **modularity_metrics,
+        },
+    }
 
 def _collect_features(G: nx.Graph,
                       *,
