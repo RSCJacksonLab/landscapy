@@ -1140,6 +1140,7 @@ class FitnessLandscape:
                        moltype: str = "protein",
                        _compute_hamming_edges: bool = False,
                        replacement_matrix: Sequence[str] = ("LG",),
+                       reconstruct_ancestral_states: bool = True,
                        model_fitting: bool = False,
                        phylo_backend: str = "cogent_nj",
                        _dist_calc: Literal['paralinear', 'pdist', 'hamming'] = 'pdist',
@@ -1170,6 +1171,11 @@ class FitnessLandscape:
         replacement_matrix : Sequence[str], default=("LG",)
             Replacement model(s) passed to the ancestral reconstruction
             workflow when inference is required.
+        reconstruct_ancestral_states : bool, default=True
+            Whether to perform amino-acid ancestral state reconstruction.
+            When False, internal nodes in the resulting graph are populated
+            with placeholder sequences so that the graph topology can still
+            be analysed.
         model_fitting : bool, default=False
             Whether to perform model selection during ancestral
             reconstruction when inference is triggered.
@@ -1315,6 +1321,7 @@ class FitnessLandscape:
                 replacement_matrix=list(replacement_matrix),
                 phylo_backend=phylo_backend,
                 _dist_calc=_dist_calc,
+                reconstruct_ancestral_states=reconstruct_ancestral_states,
                 _log_progress=_log_progress,
             )
 

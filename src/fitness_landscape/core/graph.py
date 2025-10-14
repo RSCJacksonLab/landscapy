@@ -1150,6 +1150,7 @@ def create_phylo_graph(sequences: Union[Path, Alignment],
                        _nested_parallel: bool = False,
                        phylo_backend: str = 'cogent_nj',
                        _dist_calc: str = 'pdist',
+                       reconstruct_ancestral_states: bool = True,
                        *,
                        _compute_hamming_edges: bool = False,
                        _lightweight_nodes: bool = False,
@@ -1173,6 +1174,11 @@ def create_phylo_graph(sequences: Union[Path, Alignment],
     model_fitting : bool, default=`True`
         Whether to fit the ML model, using the model set defined in
         `replacement_matrix`.
+    
+    reconstruct_ancestral_states : bool, default=`True`
+        Whether to reconstruct ancestral amino-acid states. If False,
+        internal nodes are populated with placeholder sequences so that
+        the phylogenetic topology can still be analysed.
 
     Returns
     -------
@@ -1184,6 +1190,7 @@ def create_phylo_graph(sequences: Union[Path, Alignment],
                                   model_fitting = model_fitting,
                                   phylo_backend=phylo_backend,
                                   _dist_calc=_dist_calc,
+                                  reconstruct_ancestral_states=reconstruct_ancestral_states,
                                   _log_progress=_log_progress)
     
     graph = constructor.construct_dag(graph_type='undirected')

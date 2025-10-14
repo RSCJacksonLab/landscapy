@@ -41,6 +41,7 @@ def create_phylo_digraph(sequences: Union[Path, Alignment],
                          model_fitting: bool = True,
                          _log_progress: bool = False,
                          _nested_parallel: bool = False,
+                         reconstruct_ancestral_states: bool = True,
                          *,
                          _compute_hamming_edges: bool = True,
                          _lightweight_nodes: bool = False,
@@ -63,6 +64,11 @@ def create_phylo_digraph(sequences: Union[Path, Alignment],
     model_fitting : bool, default=`True`
         Whether to fit the ML model, using the model set defined in
         `replacement_matrix`.
+    
+    reconstruct_ancestral_states : bool, default=`True`
+        Whether to reconstruct ancestral amino-acid states. If False,
+        internal nodes are populated with lightweight placeholders so the
+        resulting graph remains usable for topology-focused analyses.
 
     Returns
     -------
@@ -75,6 +81,7 @@ def create_phylo_digraph(sequences: Union[Path, Alignment],
     constructor = ASRConstructor(sequences,
                                  replacement_matrix = replacement_matrix,
                                  model_fitting = model_fitting,
+                                 reconstruct_ancestral_states=reconstruct_ancestral_states,
                                  _log_progress=_log_progress)
     # Construct digraph with `graph_type` flag.
     digraph = constructor.construct_dag(graph_type='directed')

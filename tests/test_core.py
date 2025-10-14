@@ -837,11 +837,75 @@ def test_landscape_from_phylogeny_infers_missing_nodes(monkeypatch):
     assert inferred_alignment.names == ['seq1', 'seq2']
     assert str(inferred_alignment.get_gapped_seq('seq1')) == 'ACE'
     assert str(inferred_alignment.get_gapped_seq('seq2')) == 'ACE'
+    assert DummyCtor.calls[0]['kwargs']['reconstruct_ancestral_states'] is True
 
     assert set(landscape.graph.nodes()) == {'seq1', 'seq2', 'anc1', 'root'}
     assert pytest.approx(landscape.graph['anc1']['seq1']['branch_length']) == 0.1
     assert pytest.approx(landscape.graph['anc1']['seq2']['branch_length']) == 0.2
     assert pytest.approx(landscape.graph['root']['anc1']['branch_length']) == 0.3
+
+
+def test_from_phylogeny_respects_reconstruct_flag(monkeypatch):
+    class StubNode:
+        def __init__(self, name: str):
+            self.name = name
+            self.children: list['StubNode'] = []
+            self.parent: 'StubNode | None' = None
+            self.length: float | None = None
+
+        def add_child(self, child: 'StubNode', length: float) -> None:
+            child.parent = self
+            child.length = length
+            self.children.append(child)
+
+    root = StubNode('root')
+    anc = StubNode('anc1')
+    leaf = StubNode('leaf')
+    root.add_child(anc, 0.5)
+    anc.add_child(leaf, 0.3)
+
+    class StubAlignment:
+        def __init__(self, seq_map: dict[str, str]):
+            self._seq_map = seq_map
+            self.names = list(seq_map.keys())
+
+        def get_gapped_seq(self, name: str) -> str:
+            return self._seq_map[name]
+
+    tip_alignment = StubAlignment({'leaf': 'AAA'})
+
+    fake_graph = nx.Graph()
+    fake_graph.add_edge('anc1', 'leaf')
+    fake_graph.add_edge('root', 'anc1')
+    for node in ['leaf', 'anc1', 'root']:
+        fake_graph.nodes[node]['sequence'] = BaseNumpySequence.from_string(
+            'AAA', alphabet=PROT_20, sequence_id=node
+        )
+        fake_graph.nodes[node]['gapped_arr'] = np.zeros((3, 21))
+
+    class DummyCtor:
+        flags: list[bool | None] = []
+
+        def __init__(self, alignment, phylogenetic_tree=None, **kwargs):
+            DummyCtor.flags.append(kwargs.get('reconstruct_ancestral_states'))
+
+        def construct_dag(self, graph_type: str = 'undirected'):
+            return fake_graph.copy()
+
+    def stub_make_aligned_seqs(mapping: dict[str, str], moltype: str | None = None):
+        return StubAlignment(mapping)
+
+    monkeypatch.setattr('fitness_landscape.core.landscape.ASRConstructor', DummyCtor)
+    monkeypatch.setattr('fitness_landscape.core.landscape.make_aligned_seqs', stub_make_aligned_seqs)
+
+    FitnessLandscape.from_phylogeny(
+        tree=root,
+        fasta=tip_alignment,
+        reconstruct_ancestral_states=False,
+        _compute_hamming_edges=False,
+    )
+
+    assert DummyCtor.flags == [False]
 
 
 def test_create_evol_diffusion_graph_is_undirected_and_symmetric(diffusion_test_data):

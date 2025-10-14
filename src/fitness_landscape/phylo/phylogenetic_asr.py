@@ -59,7 +59,7 @@ class ASRConstructor:
         Boolean for whether or not to include ML model fitting and
         parameterisation.
     
-    _reconstruct_ancestral_states : bool, default=`True`
+    reconstruct_ancestral_states : bool, default=`True`
         Boolean for whether ancestral states are inferred. 
 
     """
@@ -70,7 +70,7 @@ class ASRConstructor:
                 replacement_matrix: List = ['NQ.pfam'],
                 phylo_backend: str = 'cogent_nj',
                 _dist_calc: Literal['paralinear', 'pdist', 'hamming'] = 'pdist',
-                _reconstruct_ancestral_states: bool = True,
+                reconstruct_ancestral_states: bool = True,
                 _log_progress: bool = False) -> None:
 
         # Load alignment
@@ -90,6 +90,19 @@ class ASRConstructor:
         self._log_progress = _log_progress
         self._replacement_models = tuple(replacement_matrix) if replacement_matrix is not None else tuple()
         self._tree_model_name: Optional[str] = None
+        self._reconstruct_ancestral_states = bool(reconstruct_ancestral_states)
+        self.asr_posterior_arr: dict = {}
+        self.node_likelihoods: dict = {}
+        self._sequence_length: int = 0
+        if self.tip_names:
+            first_tip = self.tip_names[0]
+            try:
+                self._sequence_length = len(self.alignment.get_gapped_seq(first_tip))
+            except Exception:
+                try:
+                    self._sequence_length = len(str(self.alignment.get_gapped_seq(first_tip)))
+                except Exception:
+                    self._sequence_length = 0
 
         # Construct boolean gap alignment.
         self._boolean_gap_alignment = self.alignment.get_gap_array()
@@ -116,7 +129,7 @@ class ASRConstructor:
                 raise ValueError("Phylogenetic tree must be either Path or PhyloNode.")
             
         # Infer ancestral states if requested
-        if _reconstruct_ancestral_states:
+        if self._reconstruct_ancestral_states:
             self.reconstruct_ancestral_states()
             self.ancestral_reconstruction_bool()
         
@@ -739,6 +752,7 @@ class ASRConstructor:
         for child, parent in self.phylogenetic_tree.child_parent_map().items():
             G.add_edge(parent, child)
 
+        seq_length: int = self._sequence_length
         for tip in self.tip_names:
             
             hard_seq = BaseNumpySequence(self.alignment.get_gapped_seq(tip),
@@ -746,6 +760,7 @@ class ASRConstructor:
 
             gapped_mat   = hard_seq.to_one_hot()            # (L, 21), 0/1
             ungapped_mat = hard_seq.remove_gap_arr()
+            seq_length = gapped_mat.shape[0]
 
             # Collect ungapped sequence for base.
             hard_seq = BaseNumpySequence.from_one_hot(ungapped_mat,
@@ -754,38 +769,61 @@ class ASRConstructor:
             G.nodes[tip].update(
                 sequence=hard_seq,
                 gapped_arr=gapped_mat,
+                asr_placeholder=False,
             )
 
+        if seq_length <= 0:
+            raise ValueError("Unable to determine sequence length from supplied alignment.")
+
+        aa_dim = len(PROT_20)
+        placeholder_aa = np.full((seq_length, aa_dim), 1.0 / aa_dim, dtype=float)
+        placeholder_gap = np.zeros((seq_length, 2), dtype=float)
+        placeholder_gap[:, 1] = 1.0  # favour 'no gap'
+
         for anc in set(G.nodes) - set(self.tip_names):
-            
-            # (L, 20) AA posterior
-            post = np.array(self.asr_posterior_arr[anc])
-            
-            # (L, 2)  gap posterior
-            gap  = self.node_likelihoods[anc]
-            
-            # (L, 21)
-            #Use conditional probability logic to combine.
-            gapped_post = SoftSequence.compute_conditional_gap_dist(aa_post_dist=post,
-                                                                    gap_post_dist=gap)        
-            
-            soft_seq = SoftSequence(
-                aa_posterior=post,
-                gap_posterior=self.node_likelihoods[anc],
-                alphabet=ALPHABET_21,
-                hard_rule="argmax",
-            )
-            
-            # (L,20)
-            # Remove gaps where posterior_probability is less than 0.5.
-            post = soft_seq.remove_gap_arr()
-            soft_seq = SoftSequence(post,
-                                    alphabet=PROT_20,
-                                    hard_rule="argmax")
-            
-            G.nodes[anc].update(
-                sequence=soft_seq,
-                gapped_arr=gapped_post,)
+            if self._reconstruct_ancestral_states and anc in self.asr_posterior_arr:
+                post = np.asarray(self.asr_posterior_arr[anc], dtype=float)
+                gap = self.node_likelihoods.get(anc)
+                gap = np.asarray(gap, dtype=float) if gap is not None else placeholder_gap
+                gapped_post = SoftSequence.compute_conditional_gap_dist(
+                    aa_post_dist=post,
+                    gap_post_dist=gap
+                )
+                soft_seq = SoftSequence(
+                    aa_posterior=post,
+                    gap_posterior=gap,
+                    alphabet=ALPHABET_21,
+                    hard_rule="argmax",
+                )
+                post = soft_seq.remove_gap_arr()
+                soft_seq = SoftSequence(
+                    post,
+                    alphabet=PROT_20,
+                    hard_rule="argmax",
+                )
+                G.nodes[anc].update(
+                    sequence=soft_seq,
+                    gapped_arr=gapped_post,
+                    asr_placeholder=False,
+                )
+            else:
+                placeholder_soft = SoftSequence.from_posteriors(
+                    placeholder_aa,
+                    alphabet=PROT_20,
+                    gap_posterior=placeholder_gap,
+                    hard_rule="argmax",
+                )
+                gapless_post = placeholder_soft.remove_gap_arr()
+                soft_seq = SoftSequence(
+                    gapless_post,
+                    alphabet=PROT_20,
+                    hard_rule="argmax",
+                )
+                G.nodes[anc].update(
+                    sequence=soft_seq,
+                    gapped_arr=np.asarray(placeholder_soft.posterior, dtype=float),
+                    asr_placeholder=True,
+                )
         if self._log_progress:
             _logger.info('ASR.construct_dag: complete (nodes=%d, edges=%d)', G.number_of_nodes(), G.number_of_edges())
         return G
