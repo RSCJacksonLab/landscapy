@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Union, Dict, List, Literal
+from typing import Union, Dict, List, Literal, Optional
 import numpy as np
 import networkx as nx
 import logging
@@ -10,7 +10,6 @@ try:
 except Exception:
     from cogent3 import PhyloNode
 import piqtree
-import math
 from .sequence import SoftSequence, BaseNumpySequence
 from .._const import ALPHABET_21, PROT_20
 from ..phylo._sub_matrices import nq_pfam
@@ -24,6 +23,8 @@ from .graph import (
     attach_expected_hamming_to_edges,
     compute_edge_mutations_star,
     _ensure_ray_initialized,
+    _compute_stationary_distribution,
+    _should_use_stationary_power,
 )
 
 from ..embedding.particle_sampler import (
@@ -128,7 +129,7 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
                                              include_self: bool = False,
                                              use_gpu: bool = False,
                                              hnsw_M: int = 32,
-                                             t: int = 5,
+                                             t: Optional[Union[int, float]] = 5,
                                              tau: float = 1.0,
                                              connectivity_threshold: float = 1e-4,
                                              cpus: int = 1,
@@ -182,8 +183,10 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
     tiebuffer : int, default=128
         The number of hits kept in buffer to eliminate ties.
     
-    t : int, default=5
-        The number of diffusion steps taken.
+    t : int | float | None, default=5
+        Diffusion power for the Markov transition matrix. When ``None``,
+        ``0`` or ``np.inf`` the stationary distribution is used instead of
+        an explicit power.
     
     tau : float, default=1.0
         The temperature parameter used to smooth the distance kernel.
@@ -296,17 +299,34 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
     row_sums[row_sums == 0] = 1.0
     transition_matrix = kernel_matrix / row_sums
     
-    # Compute diffusion steps
-    diffused_matrix = np.linalg.matrix_power(transition_matrix, t)
-    
+    use_stationary = _should_use_stationary_power(t)
+
     digraph = nx.DiGraph()
     digraph.add_nodes_from(range(n_sequences))
-    
-    rows, cols = np.where(diffused_matrix > connectivity_threshold)
-    
-    for i, j in zip(rows, cols):
-        if i != j:
-            digraph.add_edge(i, j, kernel_weight=diffused_matrix[i, j])
+
+    threshold = 1e-4 if connectivity_threshold is None else float(connectivity_threshold)
+
+    if use_stationary:
+        stationary = _compute_stationary_distribution(transition_matrix).astype(np.float64, copy=False)
+        active_targets = np.where(stationary > threshold)[0]
+        for src in range(n_sequences):
+            for dst in active_targets:
+                if src != dst:
+                    digraph.add_edge(src, dst, kernel_weight=float(stationary[dst]))
+    else:
+        if isinstance(t, (np.floating, float)) and not float(t).is_integer():
+            raise ValueError("`t` must be an integer when diffusion power is finite.")
+        t_int = int(t) if t is not None else 0
+        if t_int < 1:
+            raise ValueError("`t` must be >= 1 when diffusion power is finite.")
+
+        diffused_matrix = np.linalg.matrix_power(transition_matrix, t_int)
+
+        rows, cols = np.where(diffused_matrix > threshold)
+
+        for i, j in zip(rows, cols):
+            if i != j:
+                digraph.add_edge(i, j, kernel_weight=float(diffused_matrix[i, j]))
         
     for i, seq in enumerate(sequences):
         digraph.nodes[i]['sequence'] = seq
