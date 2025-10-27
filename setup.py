@@ -57,8 +57,6 @@ setup(
         "console_scripts": [
             # Top-level CLI (Click group defined in __main__.py)
             "landscapy=fitness_landscape.__main__:cli",
-            # Convenience shortcuts to commonly used subcommands
-            "landscapy-superscape=fitness_landscape.__main__:diffusion_evol_superscape",
             "landscapy-evol=fitness_landscape.__main__:evol_diffusion_landscape",
             "landscapy-phylo=fitness_landscape.__main__:phylo_landscape",
         ]
