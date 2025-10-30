@@ -1,3 +1,5 @@
+import math
+import warnings
 import numpy as np
 import networkx as nx
 from typing import List, Union, Literal, Tuple, Optional, Sequence
@@ -14,6 +16,7 @@ from cogent3.core.alignment import Alignment
 from .._const import PROT_20
 from ..utils import calculate_gapped_soft_score
 from softalign.soft_alignment import align_soft_sequences
+from scipy import sparse
 from scipy.sparse import csr_matrix
 from scipy.sparse import coo_matrix
 from scipy.sparse import triu as sp_triu
@@ -23,6 +26,74 @@ import faiss
 import ray
 
 _BaseSequence = [BaseNumpySequence, BinarySequence, SoftSequence]
+
+
+def _should_use_stationary_power(t: Optional[Union[int, float]]) -> bool:
+    """Return ``True`` when ``t`` indicates the stationary regime."""
+
+    if t is None:
+        return True
+
+    if isinstance(t, (np.integer, int)):
+        return int(t) == 0
+
+    if isinstance(t, (np.floating, float)):
+        if float(t) == 0.0:
+            return True
+        return math.isinf(float(t)) and float(t) > 0.0
+
+    return False
+
+
+def _compute_stationary_distribution(
+    transition_matrix: Union[np.ndarray, sparse.spmatrix],
+    *,
+    max_iter: int = 10000,
+    tol: float = 1e-9,
+) -> np.ndarray:
+    """Compute a left stationary distribution for a row-stochastic matrix."""
+
+    if transition_matrix.shape[0] != transition_matrix.shape[1]:
+        raise ValueError("transition_matrix must be square")
+
+    n = transition_matrix.shape[0]
+    if n == 0:
+        return np.zeros(0, dtype=np.float64)
+
+    vec = np.full(n, 1.0 / n, dtype=np.float64)
+
+    if sparse.issparse(transition_matrix):
+        mat_t = transition_matrix.transpose().tocsr()
+        for _ in range(max_iter):
+            new_vec = mat_t @ vec
+            new_vec = np.asarray(new_vec).ravel()
+            total = float(new_vec.sum())
+            if not np.isfinite(total) or total == 0.0:
+                new_vec = np.full(n, 1.0 / n, dtype=np.float64)
+            else:
+                new_vec /= total
+            if np.linalg.norm(new_vec - vec, 1) <= tol:
+                return new_vec
+            vec = new_vec
+    else:
+        mat_t = np.asarray(transition_matrix, dtype=np.float64).T
+        for _ in range(max_iter):
+            new_vec = mat_t @ vec
+            total = float(new_vec.sum())
+            if not np.isfinite(total) or total == 0.0:
+                new_vec = np.full(n, 1.0 / n, dtype=np.float64)
+            else:
+                new_vec /= total
+            if np.linalg.norm(new_vec - vec, 1) <= tol:
+                return new_vec
+            vec = new_vec
+
+    warnings.warn(
+        "Stationary distribution power iteration did not converge within the maximum iterations;"
+        " returning the last iterate.",
+        RuntimeWarning,
+    )
+    return vec
 
 def _pack_binary(seqs: list[BaseNumpySequence]) -> np.ndarray:
     """
@@ -996,7 +1067,7 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
                                include_self: bool = False,
                                use_gpu: bool = False,
                                hnsw_M: int = 32,
-                               t: int = 5,
+                               t: Optional[Union[int, float]] = 5,
                                connectivity_threshold: float = 1e-4,
                                *,
                                _compute_hamming_edges: bool = True,
@@ -1015,8 +1086,10 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
     embeddings : np.ndarray
         The sequence embeddings, indexed according to sequence order.
 
-    t : int, default=`5`
-        The Markov transition matrix exponent.
+    t : int | float | None, default=`5`
+        Diffusion power for the Markov transition matrix. When ``None``,
+        ``0`` or ``np.inf`` the stationary distribution is used instead of
+        an explicit matrix power.
 
     k : int, default=`5`
         Nearest neighbors to scale the rbf gamma parameter.
@@ -1062,9 +1135,11 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         The constructed graph with `BaseNumpySequence` features stored
         under `sequence`.
     """
+    if len(sequences) == 0:
+        return nx.Graph()
     if embeddings is None:
         embeddings, _ = _encode_multiallele(sequences)
-    
+
     k_for_scale = k
     if embeddings.shape[0] <= k_for_scale:
         k_for_scale = embeddings.shape[0] - 1
@@ -1119,8 +1194,17 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
     row_sums[row_sums == 0] = 1.0
     transition_matrix = kernel_matrix / row_sums
 
-    # Power the matrix for diffusion process.
-    diffused_matrix = np.linalg.matrix_power(transition_matrix, t)
+    use_stationary = _should_use_stationary_power(t)
+    if use_stationary:
+        stationary = _compute_stationary_distribution(transition_matrix).astype(np.float64, copy=False)
+        diffused_matrix = np.repeat(stationary[np.newaxis, :], len(sequences), axis=0)
+    else:
+        if isinstance(t, (np.floating, float)) and not float(t).is_integer():
+            raise ValueError("`t` must be an integer when diffusion power is finite.")
+        t_int = int(t) if t is not None else 0
+        if t_int < 1:
+            raise ValueError("`t` must be >= 1 when diffusion power is finite.")
+        diffused_matrix = np.linalg.matrix_power(transition_matrix, t_int)
     
     G = nx.Graph()
     G.add_nodes_from(range(len(sequences)))
@@ -1267,7 +1351,7 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                                              use_gpu: bool = False,
                                              hnsw_M: int = 32,
                                              k: int = 50,
-                                             t: int = 5,
+                                             t: Optional[Union[int, float]] = 5,
                                              tau: float = 1.0,
                                              connectivity_threshold: float = 1e-4,
                                              cpus: int = 1,
@@ -1326,8 +1410,10 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     tiebuffer : int, default=128
         The number of hits kept in buffer to eliminate ties.
     
-    t : int, default=5
-        The number of diffusion steps taken.
+    t : int | float | None, default=5
+        Diffusion power for the Markov transition matrix. When ``None``,
+        ``0`` or ``np.inf`` the stationary distribution is used instead of
+        explicitly computing ``T^t``.
     
     tau : float, default=1.0
         The temperature parameter used to smooth the distance kernel.
@@ -1449,48 +1535,67 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     Tmat = K  # transition matrix (CSR)
     _logger.info('Row-normalized transition matrix: nnz=%d wall=%.2fs cpu=%.2fs', Tmat.nnz, time.perf_counter()-_t_norm0, time.process_time()-_c_norm0)
 
-    # Compute T^t via sparse multiplies; prune tiny entries to keep sparsity
-    _t_pow0 = time.perf_counter(); _c_pow0 = time.process_time()
-    P = Tmat.copy()
-    for step in range(max(1, int(t)) - 1):
-        P = P @ Tmat
-        # prune extremely small values to limit fill-in (safe via eliminate_zeros)
-        if P.nnz:
-            small = np.abs(P.data) <= 1e-12
-            if np.any(small):
-                P.data[small] = 0.0
-                P.eliminate_zeros()
-        _logger.info('Diffusion step %d/%d: nnz=%d', step+1, max(1, int(t)) - 1, P.nnz)
-    _logger.info('Diffusion power done: wall=%.2fs cpu=%.2fs', time.perf_counter()-_t_pow0, time.process_time()-_c_pow0)
+    use_stationary = _should_use_stationary_power(t)
 
-    # Symmetrize and threshold
-    # Symmetrize: (P + P.T)/2
-    _t_sym0 = time.perf_counter(); _c_sym0 = time.process_time()
-    P_sym = (P + P.T).tocsr()
-    if P_sym.nnz:
-        P_sym.data *= 0.5
-
-    # Keep only upper triangle above threshold
     if connectivity_threshold is None:
         thr = 1e-4
     else:
         thr = float(connectivity_threshold)
-    # zero out below threshold
-    if P_sym.nnz and thr > 0.0:
-        small = P_sym.data <= thr
-        if np.any(small):
-            P_sym.data[small] = 0.0
-            P_sym.eliminate_zeros()
-    # upper triangle
-    U = sp_triu(P_sym, k=1, format='coo') if P_sym.nnz else coo_matrix(P_sym)
-    _logger.info('Symmetrize + threshold: nnz=%d wall=%.2fs cpu=%.2fs', U.nnz, time.perf_counter()-_t_sym0, time.process_time()-_c_sym0)
+
+    if use_stationary:
+        _logger.info('Using stationary distribution for diffusion connectivity (t=%s).', t)
+        stationary = _compute_stationary_distribution(Tmat).astype(np.float64, copy=False)
+        if stationary.size:
+            weights = 0.5 * (stationary[:, None] + stationary[None, :])
+            mask = np.triu(weights > thr, k=1)
+            rows, cols = np.where(mask)
+            edge_weights = weights[rows, cols].astype(np.float32, copy=False)
+        else:
+            rows = cols = np.empty(0, dtype=np.int32)
+            edge_weights = np.empty(0, dtype=np.float32)
+        _logger.info('Stationary distribution thresholding produced edges=%d', edge_weights.size)
+    else:
+        if isinstance(t, (np.floating, float)) and not float(t).is_integer():
+            raise ValueError("`t` must be an integer when diffusion power is finite.")
+        t_int = int(t) if t is not None else 0
+        if t_int < 1:
+            raise ValueError("`t` must be >= 1 when diffusion power is finite.")
+
+        _t_pow0 = time.perf_counter(); _c_pow0 = time.process_time()
+        P = Tmat.copy()
+        for step in range(t_int - 1):
+            P = P @ Tmat
+            if P.nnz:
+                small = np.abs(P.data) <= 1e-12
+                if np.any(small):
+                    P.data[small] = 0.0
+                    P.eliminate_zeros()
+            _logger.info('Diffusion step %d/%d: nnz=%d', step + 1, t_int - 1, P.nnz)
+        _logger.info('Diffusion power done: wall=%.2fs cpu=%.2fs', time.perf_counter()-_t_pow0, time.process_time()-_c_pow0)
+
+        _t_sym0 = time.perf_counter(); _c_sym0 = time.process_time()
+        P_sym = (P + P.T).tocsr()
+        if P_sym.nnz:
+            P_sym.data *= 0.5
+
+        if P_sym.nnz and thr > 0.0:
+            small = P_sym.data <= thr
+            if np.any(small):
+                P_sym.data[small] = 0.0
+                P_sym.eliminate_zeros()
+
+        U = sp_triu(P_sym, k=1, format='coo') if P_sym.nnz else coo_matrix(P_sym)
+        rows = U.row
+        cols = U.col
+        edge_weights = U.data.astype(np.float32, copy=False)
+        _logger.info('Symmetrize + threshold: nnz=%d wall=%.2fs cpu=%.2fs', U.nnz, time.perf_counter()-_t_sym0, time.process_time()-_c_sym0)
 
     _t_graph0 = time.perf_counter(); _c_graph0 = time.process_time()
     graph = nx.Graph()
     graph.add_nodes_from(range(n_sequences))
     # add edges with attribute
-    if U.nnz:
-        for i, j, w in zip(U.row, U.col, U.data):
+    if len(edge_weights):
+        for i, j, w in zip(rows, cols, edge_weights):
             graph.add_edge(int(i), int(j), kernel_weight=float(w))
 
     for i, seq in enumerate(sequences):

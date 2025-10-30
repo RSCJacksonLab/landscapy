@@ -8,8 +8,10 @@ from scipy.spatial.distance import cdist, squareform
 from scipy.sparse.csgraph import shortest_path
 from scipy.cluster.hierarchy import linkage, fcluster
 from scipy.cluster.vq import kmeans2
+from scipy.stats import spearmanr
 from numpy.linalg import svd
 from typing import List, Union, Tuple, Dict, Optional, Sequence, Any
+from sklearn.metrics import average_precision_score, roc_auc_score
 from ..transforms.eigenmode import eigenmode_decomposition
 from ..core.landscape import FitnessLandscape
 import statistics as stats
@@ -672,6 +674,480 @@ def _resolve_sequence_alignment(diff_G: nx.Graph,
         raise ValueError("No overlapping sequences between diffusion and phylogeny graphs.")
 
     return diffusion_nodes, phy_nodes, sequences
+
+def _align_graph_triplet(diffusion_obj: Union[FitnessLandscape, nx.Graph],
+                         knn_obj: Union[FitnessLandscape, nx.Graph],
+                         phylo_obj: Union[FitnessLandscape, nx.Graph],
+                         extant_nodes: Optional[Sequence]) -> Tuple[nx.Graph, nx.Graph, nx.Graph, List, List, List, List[Any]]:
+    """
+    Align diffusion, KNN, and phylogenetic graphs onto a shared set of
+    extant nodes (preferring sequence matches when available).
+
+    Returns the undirected graph objects followed by the aligned node
+    orders for diffusion, KNN, phylogeny, and the associated sequence
+    objects.
+    """
+    diff_G = _ensure_graph(diffusion_obj)
+    knn_G = _ensure_graph(knn_obj)
+    phy_G = _ensure_graph(phylo_obj)
+
+    diff_nodes, phy_nodes, sequences = _resolve_sequence_alignment(diff_G, phy_G, extant_nodes)
+    knn_index = _sequence_index(knn_G)
+    knn_nodes: List = []
+
+    for diff_node, phy_node, seq_obj in zip(diff_nodes, phy_nodes, sequences):
+        # Prefer sequence-based resolution, fall back to node identifiers.
+        candidate = None
+        try:
+            key = _sequence_key(seq_obj)
+        except Exception:
+            key = None
+        if key is not None and key in knn_index:
+            candidate = knn_index[key][1]
+        elif diff_node in knn_G:
+            candidate = diff_node
+        elif phy_node in knn_G:
+            candidate = phy_node
+        else:
+            raise ValueError(f"Could not align node '{diff_node}'/'{phy_node}' with the KNN graph.")
+        knn_nodes.append(candidate)
+
+    return diff_G, knn_G, phy_G, diff_nodes, knn_nodes, phy_nodes, sequences
+
+def _patristic_distance_matrix(G: nx.Graph,
+                               node_order: Sequence,
+                               length_attr: str) -> np.ndarray:
+    """
+    Compute pairwise path lengths between ``node_order`` entries using
+    ``length_attr`` as the branch length attribute.
+    """
+    n = len(node_order)
+    D = np.full((n, n), np.inf, dtype=float)
+    for i, src in enumerate(node_order):
+        D[i, i] = 0.0
+        if src not in G:
+            continue
+        lengths = nx.single_source_dijkstra_path_length(G, src, weight=length_attr)
+        for j, dst in enumerate(node_order):
+            if dst in lengths:
+                D[i, j] = float(lengths[dst])
+    return D
+
+def _positive_pairs_from_tree(dist_matrix: np.ndarray, k: int) -> set:
+    """
+    Identify positive index pairs from a distance matrix using a tree
+    k-NN neighbourhood definition.
+    """
+    n = dist_matrix.shape[0]
+    positives: set = set()
+    if n <= 1 or k <= 0:
+        return positives
+    order = np.argsort(dist_matrix, axis=1)
+    for i in range(n):
+        count = 0
+        for idx in order[i]:
+            if idx == i:
+                continue
+            pair = (i, idx) if i < idx else (idx, i)
+            positives.add(pair)
+            count += 1
+            if count >= k:
+                break
+    return positives
+
+def _graph_pair_scores(G: nx.Graph,
+                       node_order: Sequence,
+                       weight_key: Optional[str],
+                       default: float = 0.0) -> Tuple[List[Tuple[int, int]], np.ndarray]:
+    """
+    Extract scores for every unordered node pair according to the
+    weights (similarities) present in ``G``.
+    """
+    index = {node: idx for idx, node in enumerate(node_order)}
+    best: Dict[Tuple[int, int], float] = {}
+    for u, v, data in G.edges(data=True):
+        if u not in index or v not in index:
+            continue
+        i, j = index[u], index[v]
+        if i == j:
+            continue
+        key = (i, j) if i < j else (j, i)
+        score = float(data.get(weight_key, 1.0)) if weight_key else 1.0
+        prev = best.get(key)
+        if prev is None or score > prev:
+            best[key] = score
+
+    pairs: List[Tuple[int, int]] = []
+    scores: List[float] = []
+    n = len(node_order)
+    for i in range(n):
+        for j in range(i + 1, n):
+            key = (i, j)
+            pairs.append(key)
+            scores.append(float(best.get(key, default)))
+    return pairs, np.asarray(scores, dtype=float)
+
+def _labels_for_pairs(pairs: Sequence[Tuple[int, int]],
+                      positives: set) -> np.ndarray:
+    return np.asarray([1 if pair in positives else 0 for pair in pairs], dtype=int)
+
+def _safe_ap_roc(y_true: np.ndarray,
+                 y_score: np.ndarray) -> Tuple[float, float, str]:
+    if y_true.size == 0:
+        return float('nan'), float('nan'), "No pairs"
+    n_pos = int(y_true.sum())
+    n_neg = int(y_true.size - n_pos)
+    if n_pos == 0 or n_neg == 0:
+        return float('nan'), float('nan'), f"Degenerate labels (pos={n_pos}, neg={n_neg})"
+    ap = average_precision_score(y_true, y_score)
+    auc = roc_auc_score(y_true, y_score)
+    return float(ap), float(auc), f"OK (pos={n_pos}, neg={n_neg})"
+
+def _tree_topk_index(dist_matrix: np.ndarray, k: int) -> Dict[int, set]:
+    n = dist_matrix.shape[0]
+    topk: Dict[int, set] = {}
+    if n == 0 or k <= 0:
+        return topk
+    order = np.argsort(dist_matrix, axis=1)
+    for i in range(n):
+        neighbours: List[int] = []
+        for idx in order[i]:
+            if idx == i:
+                continue
+            neighbours.append(idx)
+            if len(neighbours) >= k:
+                break
+        topk[i] = set(neighbours)
+    return topk
+
+def _graph_topk_index(G: nx.Graph,
+                      node_order: Sequence,
+                      k: int,
+                      weight_key: Optional[str]) -> Dict[int, set]:
+    index = {node: idx for idx, node in enumerate(node_order)}
+    topk: Dict[int, set] = {}
+    if k <= 0:
+        return topk
+    for node in node_order:
+        if node not in G:
+            continue
+        neighbours = [nbr for nbr in G.neighbors(node) if nbr in index]
+        if weight_key:
+            neighbours.sort(key=lambda nbr: float(G[node][nbr].get(weight_key, 1.0)), reverse=True)
+        else:
+            neighbours.sort(key=lambda nbr: index[nbr])
+        topk[index[node]] = set(index[nbr] for nbr in neighbours[:k])
+    return topk
+
+def _precision_at_k(tree_topk: Dict[int, set],
+                    graph_topk: Dict[int, set],
+                    k: int) -> float:
+    if k <= 0 or not tree_topk:
+        return float('nan')
+    vals: List[float] = []
+    for idx, true_nbrs in tree_topk.items():
+        pred = graph_topk.get(idx)
+        if not pred:
+            vals.append(0.0)
+            continue
+        vals.append(len(true_nbrs & pred) / float(k))
+    if not vals:
+        return float('nan')
+    return float(np.mean(vals))
+
+def _upper_triangular_values(matrix: np.ndarray) -> np.ndarray:
+    if matrix.size == 0:
+        return np.asarray([], dtype=float)
+    mask = np.triu(np.ones_like(matrix, dtype=bool), 1)
+    return matrix[mask]
+
+def _safe_spearman(x: np.ndarray, y: np.ndarray) -> float:
+    mask = np.isfinite(x) & np.isfinite(y)
+    if mask.sum() < 2:
+        return float('nan')
+    rho, _ = spearmanr(x[mask], y[mask])
+    return float(rho)
+
+def _resistance_distance_matrix(G: nx.Graph,
+                                node_order: Sequence,
+                                weight_key: Optional[str],
+                                jitter: float = 1e-10) -> np.ndarray:
+    if not node_order:
+        return np.zeros((0, 0), dtype=float)
+    sub = G.subgraph(node_order)
+    L = nx.laplacian_matrix(sub, nodelist=list(node_order), weight=weight_key).astype(float).toarray()
+    n = L.shape[0]
+    if n == 0:
+        return np.zeros((0, 0), dtype=float)
+    if np.linalg.matrix_rank(L) < n - 1:
+        L = L + jitter * np.eye(n)
+    try:
+        L_pinv = np.linalg.pinv(L)
+    except np.linalg.LinAlgError:
+        L = L + jitter * np.eye(n)
+        L_pinv = np.linalg.pinv(L)
+    diag = np.diag(L_pinv)
+    R = diag[:, None] + diag[None, :] - 2.0 * L_pinv
+    R[R < 0] = 0.0
+    return R
+
+def _mutual_topk_from_weighted(G: nx.Graph,
+                               node_order: Sequence,
+                               k: int,
+                               weight_key: Optional[str]) -> nx.Graph:
+    sub = G.subgraph(node_order).copy()
+    H = nx.Graph()
+    H.add_nodes_from((n, dict(data)) for n, data in sub.nodes(data=True))
+    if k <= 0:
+        return H
+    node_set = set(sub.nodes())
+    topk: Dict[Any, set] = {}
+    for u in sub.nodes():
+        nbrs = [v for v in sub.neighbors(u) if v in node_set and v != u]
+        if weight_key:
+            nbrs.sort(key=lambda v: float(sub[u][v].get(weight_key, 1.0)), reverse=True)
+        else:
+            nbrs.sort()
+        topk[u] = set(nbrs[:k])
+    for u in sub.nodes():
+        for v in topk.get(u, set()):
+            if u in topk.get(v, set()):
+                data = {}
+                if weight_key and sub.has_edge(u, v):
+                    data[weight_key] = float(sub[u][v].get(weight_key, 1.0))
+                H.add_edge(u, v, **data)
+    return H
+
+def _prune_to_degree_k_unweighted(G: nx.Graph,
+                                  node_order: Sequence,
+                                  k: int,
+                                  weight_key: Optional[str]) -> nx.Graph:
+    sub = G.subgraph(node_order).copy()
+    H = nx.Graph()
+    H.add_nodes_from((n, dict(data)) for n, data in sub.nodes(data=True))
+    if k <= 0:
+        return H
+    selection: Dict[Any, List[Any]] = {}
+    for u in sub.nodes():
+        nbrs = [v for v in sub.neighbors(u) if v in sub and v != u]
+        if weight_key:
+            nbrs.sort(key=lambda v: float(sub[u][v].get(weight_key, 1.0)), reverse=True)
+        else:
+            nbrs.sort()
+        selection[u] = nbrs[:k]
+    for u, nbrs in selection.items():
+        for v in nbrs:
+            if u in selection.get(v, []):
+                data = {}
+                if weight_key and sub.has_edge(u, v):
+                    data[weight_key] = float(sub[u][v].get(weight_key, 1.0))
+                H.add_edge(u, v, **data)
+    return H
+
+def compare_pairwise_rankings_to_phylogeny(diffusion_graph: Union[FitnessLandscape, nx.Graph],
+                                           knn_graph: Union[FitnessLandscape, nx.Graph],
+                                           phylo_graph: Union[FitnessLandscape, nx.Graph],
+                                           *,
+                                           extant_nodes: Optional[Sequence] = None,
+                                           tree_length_key: str = "branch_length",
+                                           diffusion_weight_key: Optional[str] = None,
+                                           knn_weight_key: Optional[str] = None,
+                                           tree_k_for_labels: int = 10,
+                                           default_diffusion_score: float = 0.0,
+                                           default_knn_score: float = 0.0) -> Dict[str, Any]:
+    """
+    Evaluate how well diffusion and KNN graphs rank phylogenetically
+    close sequences above distant ones using density-free AP/ROC
+    metrics derived from tree-based k-NN labels.
+
+    Parameters
+    ----------
+    diffusion_graph : FitnessLandscape or nx.Graph
+        Graph whose weighted edges encode diffusion similarities.
+    knn_graph : FitnessLandscape or nx.Graph
+        Graph capturing neighbourhood relations (typically k-NN).
+    phylo_graph : FitnessLandscape or nx.Graph
+        Ground-truth phylogenetic tree/graph.
+    extant_nodes : Sequence, optional
+        Optional subset of extant nodes or sequences to align across
+        graphs. When omitted, the intersection determined via sequence
+        equality is used.
+    tree_length_key : str, default="branch_length"
+        Edge attribute containing phylogenetic branch lengths.
+    diffusion_weight_key : str, optional
+        Edge attribute used as similarity score within the diffusion
+        graph. If ``None`` the graph is treated as unweighted.
+    knn_weight_key : str, optional
+        Edge attribute used as similarity for the KNN graph.
+    tree_k_for_labels : int, default=10
+        Tree k-NN parameter that defines positive pairs.
+    default_diffusion_score : float, default=0.0
+        Score assigned to non-adjacent diffusion pairs.
+    default_knn_score : float, default=0.0
+        Score assigned to non-adjacent KNN pairs.
+
+    Returns
+    -------
+    dict
+        Results dictionary containing node identifiers, pair labels,
+        raw scores, and AP/ROC metrics for both graphs.
+    """
+    (diff_G,
+     knn_G,
+     phy_G,
+     diff_nodes,
+     knn_nodes,
+     phy_nodes,
+     sequences) = _align_graph_triplet(diffusion_graph, knn_graph, phylo_graph, extant_nodes)
+
+    n = len(sequences)
+    if n < 2:
+        raise ValueError("At least two aligned sequences are required for ranking comparison.")
+
+    tree_matrix = _patristic_distance_matrix(phy_G, phy_nodes, tree_length_key)
+    k_truth = min(max(1, tree_k_for_labels), n - 1)
+    positives = _positive_pairs_from_tree(tree_matrix, k_truth)
+
+    pairs, knn_scores = _graph_pair_scores(knn_G, knn_nodes, knn_weight_key, default_knn_score)
+    _, diffusion_scores = _graph_pair_scores(diff_G, diff_nodes, diffusion_weight_key, default_diffusion_score)
+    labels = _labels_for_pairs(pairs, positives)
+
+    ap_knn, auc_knn, note_knn = _safe_ap_roc(labels, knn_scores)
+    ap_diff, auc_diff, note_diff = _safe_ap_roc(labels, diffusion_scores)
+
+    seq_ids = [_sequence_identifier(seq) for seq in sequences]
+    pair_labels = [(seq_ids[i], seq_ids[j]) for i, j in pairs]
+
+    return {
+        "n_nodes": n,
+        "sequence_ids": seq_ids,
+        "tree_k_for_labels": k_truth,
+        "pairs": pair_labels,
+        "pair_indices": pairs,
+        "labels": labels.tolist(),
+        "knn": {
+            "average_precision": ap_knn,
+            "roc_auc": auc_knn,
+            "status": note_knn,
+            "scores": knn_scores.tolist(),
+            "weight_key": knn_weight_key,
+            "default_score": default_knn_score,
+        },
+        "diffusion": {
+            "average_precision": ap_diff,
+            "roc_auc": auc_diff,
+            "status": note_diff,
+            "scores": diffusion_scores.tolist(),
+            "weight_key": diffusion_weight_key,
+            "default_score": default_diffusion_score,
+        },
+    }
+
+def compare_density_matched_geometry_to_phylogeny(diffusion_graph: Union[FitnessLandscape, nx.Graph],
+                                                  knn_graph: Union[FitnessLandscape, nx.Graph],
+                                                  phylo_graph: Union[FitnessLandscape, nx.Graph],
+                                                  *,
+                                                  extant_nodes: Optional[Sequence] = None,
+                                                  tree_length_key: str = "branch_length",
+                                                  diffusion_weight_key: Optional[str] = None,
+                                                  knn_weight_key: Optional[str] = None,
+                                                  resistance_weight_key: Optional[str] = None,
+                                                  k_values: Sequence[int] = (2, 3, 4, 5, 6)) -> Dict[str, Any]:
+    """
+    Compare diffusion and KNN graphs to a phylogeny under matched graph
+    densities by sweeping shared degree thresholds and evaluating both
+    geometric fidelity (resistance vs. patristic distances) and local
+    neighbourhood precision.
+
+    Parameters
+    ----------
+    diffusion_graph : FitnessLandscape or nx.Graph
+        Graph with diffusion weights.
+    knn_graph : FitnessLandscape or nx.Graph
+        Nearest neighbour graph to evaluate.
+    phylo_graph : FitnessLandscape or nx.Graph
+        Reference phylogeny.
+    extant_nodes : Sequence, optional
+        Optional subset of extant nodes/sequences to align across
+        graphs.
+    tree_length_key : str, default="branch_length"
+        Edge attribute representing branch lengths in the phylogeny.
+    diffusion_weight_key : str, optional
+        Edge attribute for sorting/pruning diffusion edges.
+    knn_weight_key : str, optional
+        Edge attribute for sorting/pruning KNN edges.
+    resistance_weight_key : str, optional
+        Edge attribute to use when forming Laplacian resistance
+        distances. Defaults to ``None`` (unweighted).
+    k_values : Sequence[int], default=(4, 6, 8, 10, 12, 16, 20)
+        Degree targets evaluated during the sweep.
+
+    Returns
+    -------
+    dict
+        Results dictionary with per-k summaries of resistance distance
+        correlations, Precision@k, and edge counts.
+    """
+    (diff_G,
+     knn_G,
+     phy_G,
+     diff_nodes,
+     knn_nodes,
+     phy_nodes,
+     sequences) = _align_graph_triplet(diffusion_graph, knn_graph, phylo_graph, extant_nodes)
+
+    n = len(sequences)
+    if n < 2:
+        raise ValueError("At least two aligned sequences are required for density-matched comparison.")
+
+    tree_matrix = _patristic_distance_matrix(phy_G, phy_nodes, tree_length_key)
+    tree_upper = _upper_triangular_values(tree_matrix)
+
+    seq_ids = [_sequence_identifier(seq) for seq in sequences]
+    rows: List[Dict[str, Any]] = []
+
+    for k in k_values:
+        k_int = int(k)
+        if k_int < 1:
+            continue
+        k_eval = min(max(1, k_int), n - 1)
+
+        diff_equal = _mutual_topk_from_weighted(diff_G, diff_nodes, k_eval, diffusion_weight_key)
+        knn_equal = _prune_to_degree_k_unweighted(knn_G, knn_nodes, k_eval, knn_weight_key)
+
+        R_diff = _resistance_distance_matrix(diff_equal, diff_nodes, resistance_weight_key)
+        R_knn = _resistance_distance_matrix(knn_equal, knn_nodes, resistance_weight_key)
+
+        rho_diff = _safe_spearman(tree_upper, _upper_triangular_values(R_diff))
+        rho_knn = _safe_spearman(tree_upper, _upper_triangular_values(R_knn))
+
+        tree_topk = _tree_topk_index(tree_matrix, k_eval)
+        diff_topk = _graph_topk_index(diff_equal, diff_nodes, k_eval, diffusion_weight_key)
+        knn_topk = _graph_topk_index(knn_equal, knn_nodes, k_eval, knn_weight_key)
+
+        prec_diff = _precision_at_k(tree_topk, diff_topk, k_eval)
+        prec_knn = _precision_at_k(tree_topk, knn_topk, k_eval)
+
+        rows.append({
+            "k": k_eval,
+            "rho_resistance_vs_patristic_diffusion": rho_diff,
+            "rho_resistance_vs_patristic_knn": rho_knn,
+            "precision_at_k_diffusion": prec_diff,
+            "precision_at_k_knn": prec_knn,
+            "edges_diffusion": diff_equal.number_of_edges(),
+            "edges_knn": knn_equal.number_of_edges(),
+        })
+
+    return {
+        "n_nodes": n,
+        "sequence_ids": seq_ids,
+        "tree_length_key": tree_length_key,
+        "diffusion_weight_key": diffusion_weight_key,
+        "knn_weight_key": knn_weight_key,
+        "resistance_weight_key": resistance_weight_key,
+        "k_values": [int(k) for k in k_values if int(k) >= 1],
+        "rows": rows,
+    }
 
 def _sequence_identifier(seq: Any) -> str:
     if isinstance(seq, BaseNumpySequence):

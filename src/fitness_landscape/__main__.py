@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional, Union
 
 import click
 import numpy as np
@@ -63,13 +64,41 @@ def _configure_logger(
     return logger, resolved_log_file
 
 
+def _parse_diffusion_power(
+    ctx: click.Context, param: click.Parameter, value: Any
+) -> Optional[Union[int, float]]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return value
+
+    text = str(value).strip().lower()
+    if text in {"", "none", "null"}:
+        return None
+    if text in {"inf", "+inf", "infinity"}:
+        return math.inf
+    if text == "-inf":
+        raise click.BadParameter("`t` must be non-negative when finite.", param=param)
+    try:
+        numeric = float(text)
+    except ValueError as exc:
+        raise click.BadParameter(f"Unable to parse diffusion power '{value}'.") from exc
+
+    if numeric < 0:
+        raise click.BadParameter("`t` must be >= 0 or one of {None, inf}.", param=param)
+
+    if numeric.is_integer():
+        return int(numeric)
+    return numeric
+
+
 @cli.command()
 # Reading / writing
 @click.option("--sequences", required=True, type=click.Path(exists=True), help="Path to the input FASTA file or directory.")
 @click.option("--output", required=True, type=click.Path(), help="Destination for the serialized FitnessLandscape (.pkl).")
 # Diffusion graph parameters
 @click.option("--k", type=int, default=50, show_default=True, help="kNN neighbours for pre-filtering.")
-@click.option("--t", type=int, default=5, show_default=True, help="Diffusion power (steps).")
+@click.option("--t", callback=_parse_diffusion_power, type=str, default="5", show_default=True, help="Diffusion power; accepts integers, 'inf', or 'none'.")
 @click.option("--tau", type=float, default=1.0, show_default=True, help="Score temperature for kernel conversion.")
 @click.option("--connectivity-threshold", type=float, default=1e-4, show_default=True, help="Connectivity threshold for the diffused matrix.")
 @click.option("--backend", type=click.Choice(["auto", "faiss", "balltree"]), default="auto", show_default=True, help="kNN backend.")
@@ -99,7 +128,7 @@ def evol_diffusion_landscape(
     sequences: str,
     output: str,
     k: int,
-    t: int,
+    t: Optional[Union[int, float]],
     tau: float,
     connectivity_threshold: float,
     backend: str,
