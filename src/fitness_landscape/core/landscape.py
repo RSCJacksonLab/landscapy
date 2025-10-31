@@ -20,6 +20,7 @@ from .graph import (
 )
 from .digraph import create_phylo_digraph, create_evol_diffusion_digraph, create_particle_filter_digraph
 from .fitness import NumericFitness, CategoricalFitness, BaseFitnessLayer, ProbabilisticCategoricalFitness
+from .annotation import AnnotationLayer
 from abc import ABC, abstractmethod
 from ..utils import _compute_embeddings_from_sequences, alignment_to_base_numpy_sequences
 import inspect
@@ -57,6 +58,22 @@ _GRAPH_REGISTRY: dict[str, _GraphRegistryItem] = {
     "diffusion_evol":  _GraphRegistryItem("create_evol_diffusion_graph", needs_embeddings=True),
     # phylogenetic handled separately (alignment/ASR path)
 }
+
+
+@dataclass(frozen=True)
+class AnnotationQueryResult:
+    layer: str
+    criteria: dict[str, Any]
+    dataframe: pd.DataFrame
+    sequence_indices: list[int]
+    node_ids: list[Hashable]
+    edges: list[tuple[Hashable, Hashable]]
+    sequences: list[BaseNumpySequence]
+
+    def to_subgraph(self, graph: nx.Graph, *, copy: bool = True) -> nx.Graph:
+        sub = graph.subgraph(self.node_ids)
+        return sub.copy() if copy else sub
+
 def _resolve_embeddings_for_graph(sequences: list[BaseNumpySequence],
                                   graph_type: str,
                                   embeddings: Optional[np.ndarray],
@@ -142,11 +159,15 @@ class FitnessLandscape:
     
     emb_arr_key.: str, default=`emb_arr`
         The keyword embeddings are stored under.
+
+    annotation_layers : Dict[str, AnnotationLayer], optional
+        User-supplied metadata layers aligned with the landscape sequences.
     """
     def __init__(self,
                  sequences: List[BaseNumpySequence],
                  graph: nx.Graph,
-                 fitness_layers: Dict[str, BaseFitnessLayer] = None,
+                 fitness_layers: Dict[str, BaseFitnessLayer] | None = None,
+                 annotation_layers: Dict[str, AnnotationLayer] | None = None,
                  embeddings: np.ndarray = None,
                  emb_arr_key: str = 'emb_arr'):
         
@@ -154,6 +175,9 @@ class FitnessLandscape:
         self.sequences = sequences
         self.graph = graph
         self.fitness_layers = fitness_layers if fitness_layers is not None else {}
+        self.annotation_layers = (
+            annotation_layers if annotation_layers is not None else {}
+        )
         self.embeddings = embeddings
         self._emb_arr_key = emb_arr_key
 
@@ -163,6 +187,7 @@ class FitnessLandscape:
         self._seq_to_nodes = self._build_seq_multimap()  # duplicate-safe
         self._nodes_by_index = {i: n for i, n in enumerate(self._node_order)}  # 0..N-1 -> node key
         self._annotate_graph_nodes_with_fitness()
+        self._annotate_graph_nodes_with_annotations()
         if self.embeddings is not None:
             self._annotate_graph_nodes_with_embeddings()
         self._records = self._build_sequence_index() 
@@ -249,6 +274,34 @@ class FitnessLandscape:
             for node in nodes:
                 for name, layer in self.fitness_layers.items():
                     self.graph.nodes[node][f"fitness_{name}"] = layer.get_value(i)
+
+    def _annotate_graph_nodes_with_annotations(self) -> None:
+        """
+        Helper function to add annotation layer data to graph nodes.
+        """
+        if not self.graph or not self.annotation_layers:
+            return
+
+        for name, layer in self.annotation_layers.items():
+            layer.validate_length(len(self.sequences), context=f"during annotation ({name})")
+            self._apply_annotation_layer(layer)
+
+    def _apply_annotation_layer(self, layer: AnnotationLayer) -> None:
+        """
+        Attach a single annotation layer to graph nodes.
+        """
+        if not self.graph:
+            return
+
+        for idx, seq in enumerate(self.sequences):
+            key = tuple(seq.to_array())
+            nodes = self._seq_to_nodes.get(key, [])
+            if not nodes:
+                continue
+            record = layer.get_record(idx)
+            for node in nodes:
+                annotations = self.graph.nodes[node].setdefault("annotations", {})
+                annotations[layer.name] = dict(record)
 
     def _enforce_unique_sequences(self):
         """
@@ -646,6 +699,108 @@ class FitnessLandscape:
                 # No layers lefts
                 self._active_view_name = None
 
+    # Annotation layer management
+
+    def attach_annotation(
+        self,
+        layer: AnnotationLayer | None = None,
+        *,
+        name: str | None = None,
+        data: pd.DataFrame | Mapping[str, Sequence[Any]] | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> AnnotationLayer:
+        """
+        Attach an annotation layer to the landscape.
+
+        Parameters
+        ----------
+        layer :
+            Ready-made annotation layer. If provided, other keyword arguments
+            must be omitted.
+        name :
+            Name for the new annotation layer when constructing from raw data.
+        data :
+            Columnar annotation data aligned to the sequence order.
+        metadata :
+            Optional metadata to store on the layer when constructing inline.
+        """
+        if layer is not None:
+            if any(x is not None for x in (name, data, metadata)):
+                raise ValueError("Provide either `layer` or (name, data, metadata), not both.")
+        else:
+            if name is None or data is None:
+                raise ValueError("When not providing `layer`, both `name` and `data` are required.")
+            layer = AnnotationLayer(name=name, data=data, metadata=metadata)
+
+        if layer.name in self.annotation_layers:
+            raise ValueError(f"An annotation layer named '{layer.name}' already exists.")
+
+        layer.validate_length(len(self.sequences))
+        self.annotation_layers[layer.name] = layer
+        self._apply_annotation_layer(layer)
+        return layer
+
+    def get_annotation_layer(self, name: str) -> AnnotationLayer:
+        if name not in self.annotation_layers:
+            raise KeyError(f"Annotation layer '{name}' not found.")
+        return self.annotation_layers[name]
+
+    def detach_annotation(self, name: str) -> None:
+        if name not in self.annotation_layers:
+            raise KeyError(f"Annotation layer '{name}' not found.")
+
+        del self.annotation_layers[name]
+
+        if not self.graph:
+            return
+
+        for node in self.graph.nodes:
+            annotations = self.graph.nodes[node].get("annotations")
+            if not annotations:
+                continue
+            annotations.pop(name, None)
+            if not annotations:
+                self.graph.nodes[node].pop("annotations", None)
+
+    def query_annotations(
+        self,
+        layer_name: str,
+        criteria: Mapping[str, Any] | None = None,
+        *,
+        include_edges: bool = True,
+    ) -> AnnotationQueryResult:
+        layer = self.get_annotation_layer(layer_name)
+
+        seq_indices = layer.matching_indices(criteria)
+        frame = layer.query(criteria)
+        frame.index.name = "sequence_index"
+
+        sequences = [self.sequences[i] for i in seq_indices]
+
+        seen_nodes: set[Hashable] = set()
+        node_ids: list[Hashable] = []
+        for idx in seq_indices:
+            key = tuple(self.sequences[idx].to_array())
+            for node in self._seq_to_nodes.get(key, []):
+                if node not in seen_nodes:
+                    seen_nodes.add(node)
+                    node_ids.append(node)
+
+        edges: list[tuple[Hashable, Hashable]] = []
+        if include_edges and self.graph is not None and node_ids:
+            subgraph = self.graph.subgraph(node_ids)
+            edges = list(subgraph.edges())
+
+        return AnnotationQueryResult(
+            layer=layer_name,
+            criteria=dict(criteria) if criteria else {},
+            dataframe=frame,
+            sequence_indices=seq_indices,
+            node_ids=node_ids,
+            edges=edges,
+            sequences=sequences,
+        )
+
     @property
     def active_layer_name(self) -> str | None:
         return getattr(self, "_active_view_name", None)
@@ -964,6 +1119,7 @@ class FitnessLandscape:
               *,
               graph: str | nx.Graph = "hamming",
               fitness_layers: dict[str, BaseFitnessLayer] | None = None,
+              annotation_layers: dict[str, AnnotationLayer] | None = None,
               embeddings: np.ndarray | None = None,
               embedding_domain: Literal["plm", "ohe"] = "ohe",
               attach_embeddings: bool = True,
@@ -989,6 +1145,9 @@ class FitnessLandscape:
         
         fitness_layers : dict[str, BaseFitnessLayer], optional
             Dictionary of fitness layers to attach to the landscape.
+
+        annotation_layers : dict[str, AnnotationLayer], optional
+            Dictionary of annotation layers aligned to the sequence order.
         
         embeddings : np.ndarray, optional
             Pre-computed embeddings for the sequences. If `None`, they
@@ -1047,6 +1206,7 @@ class FitnessLandscape:
         return cls(sequences=sequences,
                    graph=G,
                    fitness_layers=fitness_layers,
+                   annotation_layers=annotation_layers,
                    embeddings=final_embeddings,
                    emb_arr_key=emb_arr_key)
 
@@ -1055,6 +1215,7 @@ class FitnessLandscape:
                        alignment: Alignment | Path,
                        *,
                        fitness_layers: dict[str, BaseFitnessLayer] | None = None,
+                       annotation_layers: dict[str, AnnotationLayer] | None = None,
                        attach_embeddings: bool = True,
                        emb_arr_key: str = "emb_arr",
                        # PLM knobs for auto-embeddings on extant+ancestral
@@ -1076,6 +1237,9 @@ class FitnessLandscape:
         
         fitness_layers : dict[str, BaseFitnessLayer], optional
             Dictionary of fitness layers to attach to the landscape.
+
+        annotation_layers : dict[str, AnnotationLayer], optional
+            Dictionary of annotation layers aligned to the sequence order.
         
         attach_embeddings : bool, default=`True`
             Whether to attach embeddings as node attributes in the graph.
@@ -1126,6 +1290,7 @@ class FitnessLandscape:
         return cls(sequences=seqs,
                    graph=G,
                    fitness_layers=fitness_layers,
+                   annotation_layers=annotation_layers,
                    embeddings=(E if attach_embeddings else None),
                    emb_arr_key=emb_arr_key)
 
@@ -1135,6 +1300,7 @@ class FitnessLandscape:
                        fasta: Union[str, Path, Alignment],
                        *,
                        fitness_layers: dict[str, BaseFitnessLayer] | None = None,
+                       annotation_layers: dict[str, AnnotationLayer] | None = None,
                        strip_gap_columns: bool = True,
                        emb_arr_key: str = "emb_arr",
                        moltype: str = "protein",
@@ -1356,6 +1522,7 @@ class FitnessLandscape:
             return cls(sequences=sequences,
                        graph=graph,
                        fitness_layers=fitness_layers,
+                       annotation_layers=annotation_layers,
                        embeddings=None,
                        emb_arr_key=emb_arr_key)
 
@@ -1417,6 +1584,7 @@ class FitnessLandscape:
         return cls(sequences=sequences,
                    graph=G,
                    fitness_layers=fitness_layers,
+                   annotation_layers=annotation_layers,
                    embeddings=None,
                    emb_arr_key=emb_arr_key)
 
@@ -1484,6 +1652,7 @@ class DirectedFitnessLandscape(FitnessLandscape):
               *,
               digraph: str | nx.DiGraph = "phylogenetic",
               fitness_layers: dict[str, BaseFitnessLayer] | None = None,
+              annotation_layers: dict[str, AnnotationLayer] | None = None,
               embeddings: np.ndarray | None = None,
               embedding_domain: Literal["plm", "ohe"] = "ohe",
               attach_embeddings: bool = True,
@@ -1505,9 +1674,12 @@ class DirectedFitnessLandscape(FitnessLandscape):
         digraph : str or nx.DiGraph, default=`"phylogenetic"`
             The directed graph type or an existing networkx directed graph.
             If a string, it should be one of the registered digraph types.
-
+        
         fitness_layers : dict[str, BaseFitnessLayer], optional
             Dictionary of fitness layers to attach to the landscape.
+
+        annotation_layers : dict[str, AnnotationLayer], optional
+            Dictionary of annotation layers aligned to the sequence order.
 
         embeddings : np.ndarray, optional
             Pre-computed embeddings for the sequences. If `None`, they
@@ -1552,6 +1724,7 @@ class DirectedFitnessLandscape(FitnessLandscape):
             # attach optional embeddings
             final_E = E if attach_embeddings else None
             return cls(sequences=seqs, graph=DG, fitness_layers=fitness_layers,
+                       annotation_layers=annotation_layers,
                        embeddings=final_E, emb_arr_key=emb_arr_key)
 
         dtype = str(digraph)
@@ -1570,6 +1743,7 @@ class DirectedFitnessLandscape(FitnessLandscape):
                     raise ValueError(f"embedding_domain must be 'plm' or 'ohe', got {embedding_domain!r}")
 
             return cls(sequences=seqs, graph=DG, fitness_layers=fitness_layers,
+                       annotation_layers=annotation_layers,
                        embeddings=(E if attach_embeddings else None), emb_arr_key=emb_arr_key)
 
         # embedding-based directed constructors 
@@ -1588,6 +1762,7 @@ class DirectedFitnessLandscape(FitnessLandscape):
         )
         DG = ctor_map[dtype](seqs, **kwargs, **extra)
         return cls(sequences=seqs, graph=DG, fitness_layers=fitness_layers,
+                   annotation_layers=annotation_layers,
                    embeddings=(E if attach_embeddings else None), emb_arr_key=emb_arr_key)
     
 def read_csv_landscape(path: str | Path,
