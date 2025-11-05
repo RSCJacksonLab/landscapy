@@ -48,15 +48,40 @@ def graph_to_length_matrix(G: nx.Graph,
     W = sp.csr_matrix((data, (rows, cols)), shape=(n, n))
 
     if transform == "neglog":
+        data = np.asarray(W.data, dtype=float)
+        if np.any(data < 0):
+            raise ValueError(
+                "neglog transform requires non-negative edge weights. "
+                "Check that the graph uses the correct weight_key and does not contain negative similarities."
+            )
+        max_w = float(data.max()) if data.size else 0.0
+        if max_w > 1.0 + 1e-9:
+            raise ValueError(
+                "neglog transform expects similarities in (0, 1]; "
+                f"observed max weight {max_w:.6g}. If these are distances, use length_transform='reciprocal' "
+                "or normalise your weights before calling graph_to_length_matrix."
+            )
         L = W.copy().astype(float)
-        L.data = -np.log(L.data + eps)
+        L.data = -np.log(np.clip(data, eps, None))
     elif transform == "reciprocal":
+        data = np.asarray(W.data, dtype=float)
+        if np.any(data < 0):
+            raise ValueError(
+                "reciprocal transform requires non-negative edge weights. "
+                "Check that the graph uses the correct weight_key."
+            )
         L = W.copy().astype(float)
-        L.data = 1.0 / np.maximum(L.data, eps)
+        L.data = 1.0 / np.maximum(data, eps)
     else:
         raise ValueError("transform must be 'neglog' or 'reciprocal'")
 
     D = shortest_path(L, directed=False, unweighted=False)
+    if not np.all(np.isfinite(D)):
+        raise ValueError(
+            "Input graph appears to be disconnected under the provided weight_key/transform; "
+            "shortest path distances contain inf. Reconnect the graph (e.g. lower the diffusion "
+            "threshold) or run the analysis on each connected component separately."
+        )
     return D
 
 
@@ -511,8 +536,24 @@ def reconstruct_latent_graph_with_steiner(G_obs: nx.Graph,
         Indices (in X_opt) of Steiner nodes (range(n_obs,
         n_obs+n_steiner)).
     """
+    params = {
+        "gap_threshold": gap_threshold,
+        "p_landmarks": p_landmarks,
+        "base_pairs": base_pairs,
+        "k_local": k_local,
+        "seg_per_pair": seg_per_pair,
+        "k0_scale": k0_scale,
+        "tau_cknn": tau_cknn,
+        "weight_key": weight_key,
+        "length_transform": length_transform,
+        "_keep_steiner_in_graph": _keep_steiner_in_graph,
+        "max_iter_smacof": max_iter_smacof,
+    }
+
     if G_obs.number_of_nodes() == 0:
-        return nx.Graph(), np.zeros((0, 2)), []
+        G_empty = nx.Graph()
+        G_empty.graph["latent_reconstruction_params"] = params
+        return G_empty, np.zeros((0, 2)), []
 
     nodes_obs = list(G_obs.nodes())
     idx_obs = {u: i for i, u in enumerate(nodes_obs)}
@@ -598,6 +639,7 @@ def reconstruct_latent_graph_with_steiner(G_obs: nx.Graph,
                 G_lat[u][v]['weight'] = max(G_lat[u][v]['weight'], float(d.get('weight', 1.0)))
 
     steiner_nodes = list(range(n_obs, n_obs + n_steiner))
+    G_lat.graph["latent_reconstruction_params"] = params
     return G_lat, X_opt, steiner_nodes
 
 # Theoretically weaker - more accurate???
