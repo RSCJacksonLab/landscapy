@@ -1,7 +1,7 @@
 from .dataset import VisualizationDataset
 from .registry import AnnotationRegistry, PaletteStore, AnnotationDescriptor
 from .builder import VisualizationDatasetBuilder, LayoutSpec
-from .renderers import plot_landscape_matplotlib
+from .renderers import plot_landscape_matplotlib, plot_landscape_plotly
 
 __all__ = [
     "VisualizationDataset",
@@ -11,4 +11,5 @@ __all__ = [
     "VisualizationDatasetBuilder",
     "LayoutSpec",
     "plot_landscape_matplotlib",
+    "plot_landscape_plotly",
 ]

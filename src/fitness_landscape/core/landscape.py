@@ -5,7 +5,7 @@ import networkx as nx
 import torch
 from torch_geometric.data import Data
 from torch_geometric.utils import from_networkx
-from typing import List, Union, Dict, Any, Iterable, Literal,  Protocol, runtime_checkable, Hashable, Union, Tuple, Mapping, Callable, Optional, Sequence
+from typing import List, Union, Dict, Any, Iterable, Literal,  Protocol, runtime_checkable, Hashable, Union, Tuple, Mapping, Callable, Optional, Sequence, TYPE_CHECKING
 from dataclasses import dataclass
 from .sequence import BaseNumpySequence, make_sequence
 from .graph import (
@@ -35,6 +35,12 @@ from pathlib import Path
 import warnings
 from .._const import PROT_20, ALPHABET_21
 from ..phylo.phylogenetic_asr import ASRConstructor
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ..visualization import LayoutSpec
+
+# Visualization imports are handled lazily within methods to avoid heavy
+# dependencies during module import.
 
 GraphCtor = Callable[..., nx.Graph]
 
@@ -1056,6 +1062,162 @@ class FitnessLandscape:
 
         raise KeyError(f"Layer '{name}' not found. Available keys: {list(d.keys())}; "
                        f"active={self.active_layer_name!r}")
+
+
+    def plot(
+        self,
+        *,
+        layout: str | "LayoutSpec" = "graph",
+        fitness_layer: str | None = None,
+        annotation: str | None = None,
+        annotation_field: str | None = None,
+        query: Mapping[str, Any] | None = None,
+        interactive: bool = True,
+        show: bool = True,
+        palette_key: str | None = None,
+        annotation_registry=None,
+        palette_store=None,
+        pct_clusters: "pd.DataFrame" | None = None,
+        pct_palette: Mapping[str, Any] | None = None,
+        pct_sequence_column: str = "Entry",
+        external_positions: Mapping[Hashable, Sequence[float]] | None = None,
+        matplotlib_kwargs: Mapping[str, Any] | None = None,
+        plotly_kwargs: Mapping[str, Any] | None = None,
+    ):
+        """Render the landscape using the built-in visualization pipeline.
+
+        Parameters
+        ----------
+        layout : str or LayoutSpec, default="graph"
+            Layout strategy passed to :class:`VisualizationDatasetBuilder`.
+        fitness_layer : str, optional
+            Fitness layer to use for continuous colouring. Defaults to the
+            active layer.
+        annotation : str, optional
+            Annotation layer to use for categorical colouring.
+        annotation_field : str, optional
+            Specific annotation column to colour by when the layer contains
+            multiple fields.
+        query : Mapping, optional
+            Annotation query forwarded to ``query_annotations`` to filter the
+            plotted subset.
+        interactive : bool, default=True
+            When ``True`` the landscape is rendered with Plotly (requires the
+            ``plotly`` package). Falls back to matplotlib when Plotly is not
+            available. Set to ``False`` to force matplotlib rendering.
+        show : bool, default=True
+            Whether to immediately display the generated figure.
+        palette_key : str, optional
+            Palette identifier for categorical colouring. When omitted and the
+            annotation descriptor defines one, it is used automatically.
+        annotation_registry, palette_store : optional
+            Registry and palette store instances to reuse between calls. New
+            instances are created if not provided.
+        pct_clusters : pandas.DataFrame, optional
+            ProteinClusterTools cluster table to import as annotations before
+            plotting. ``pct_palette`` can be supplied to reuse the original
+            colour mapping.
+        pct_palette : Mapping, optional
+            Palette dictionary (e.g., output of ``ColorAnnot``) associated with
+            ``pct_clusters``.
+        pct_sequence_column : str, default="Entry"
+            Column in ``pct_clusters`` that stores sequence identifiers.
+        external_positions : Mapping, optional
+            Pre-computed coordinates keyed by node id; use with
+            ``layout="external"``.
+        matplotlib_kwargs, plotly_kwargs : Mapping, optional
+            Additional keyword arguments forwarded to the respective renderer.
+
+        Returns
+        -------
+        object
+            Plotly ``Figure`` when ``interactive=True``; otherwise a
+            ``(Figure, Axes)`` tuple from matplotlib.
+        """
+
+        from ..visualization import (
+            AnnotationRegistry,
+            PaletteStore,
+            VisualizationDatasetBuilder,
+        )
+        from ..visualization.renderers import (
+            plot_landscape_matplotlib,
+            plot_landscape_plotly,
+        )
+
+        registry = annotation_registry or AnnotationRegistry()
+        palettes = palette_store or PaletteStore()
+
+        if pct_clusters is not None:
+            try:
+                import pandas as pd  # noqa: F401
+            except ImportError as exc:  # pragma: no cover - defensive
+                raise RuntimeError("pandas is required to import PCT annotations.") from exc
+            from ..visualization.adapters import import_pct_annotations
+
+            layer = import_pct_annotations(
+                self,
+                pct_clusters,
+                annotation_name="pct_clusters",
+                sequence_column=pct_sequence_column,
+                registry=registry,
+                palette_store=palettes,
+                palette=pct_palette,
+                allow_missing=True,
+            )
+            descriptor = registry.get(layer.name)
+            if palette_key is None and descriptor.palette_key:
+                palette_key = descriptor.palette_key
+            if annotation is None:
+                annotation = layer.name
+
+        builder = VisualizationDatasetBuilder(self, annotation_registry=registry)
+        dataset = builder.build(
+            layout=layout,
+            fitness_layer=fitness_layer,
+            annotation=annotation,
+            query=query,
+            palette_store=palettes,
+            include_edges=True,
+            external_positions=external_positions,
+        )
+
+        dataset.metadata.setdefault("title", getattr(self, "name", "Fitness Landscape"))
+
+        if annotation and palette_key is None:
+            try:
+                descriptor = registry.get(annotation)
+                palette_key = descriptor.palette_key
+            except KeyError:
+                pass
+
+        matplotlib_kwargs = dict(matplotlib_kwargs or {})
+        plotly_kwargs = dict(plotly_kwargs or {})
+
+        if interactive:
+            try:
+                figure = plot_landscape_plotly(
+                    dataset,
+                    annotation_field=annotation_field,
+                    palette_key=palette_key,
+                    show=show,
+                    **plotly_kwargs,
+                )
+                return figure
+            except RuntimeError as exc:
+                warnings.warn(
+                    f"Plotly unavailable ({exc}); falling back to matplotlib rendering.",
+                    RuntimeWarning,
+                )
+
+        figure = plot_landscape_matplotlib(
+            dataset,
+            annotation_field=annotation_field,
+            palette_key=palette_key,
+            show=show,
+            **matplotlib_kwargs,
+        )
+        return figure
 
 
     def to_graph_tensor(self, *, tokenizer: Any | str | None = "facebook/esm2_t6_8M_UR50D") -> 'Data':

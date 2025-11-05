@@ -6,6 +6,7 @@ import pandas as pd
 import networkx as nx
 import numpy as np
 import matplotlib.pyplot as plt
+import pytest
 
 from fitness_landscape.core.sequence import BaseNumpySequence
 from fitness_landscape.core.fitness import NumericFitness
@@ -157,3 +158,17 @@ def test_plot_matplotlib_with_numeric_fitness_only():
     scatter = ax.collections[0]
     assert scatter.get_offsets().shape[0] == len(dataset.nodes)
     plt.close(fig)
+
+
+def test_landscape_plot_method_matplotlib():
+    landscape = _build_simple_landscape()
+    fig, ax = landscape.plot(interactive=False, show=False)
+    assert len(ax.collections) >= 1
+    plt.close(fig)
+
+
+def test_landscape_plot_method_plotly():
+    plotly = pytest.importorskip("plotly")  # noqa: F841
+    landscape = _build_simple_landscape()
+    fig = landscape.plot(interactive=True, show=False)
+    assert fig.data
