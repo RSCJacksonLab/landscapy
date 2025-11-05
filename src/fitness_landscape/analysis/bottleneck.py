@@ -1,5 +1,6 @@
 from __future__ import annotations
 import math
+import warnings
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple, Literal
 import networkx as nx
@@ -524,11 +525,27 @@ def calculate_local_bottleneck(fitness_landscape: Union[nx.Graph, FitnessLandsca
         G_obs = fitness_landscape
     if not isinstance(G_obs, nx.Graph):
         raise ValueError(f"Expected `nx.Graph` or `FitnessLandscape`, found {type(fitness_landscape)}")
-    
+
+    # Truncate to the largest connected component when the observed graph is disconnected.
+    if G_obs.number_of_nodes() == 0:
+        raise ValueError("Observed graph has no nodes; cannot compute bottleneck statistics.")
+    if not nx.is_connected(G_obs):
+        components = list(nx.connected_components(G_obs))
+        if len(components) > 1:
+            largest = max(components, key=len)
+            warnings.warn(
+                "Observed graph has "
+                f"{len(components)} connected components; restricting bottleneck analysis to "
+                f"the largest component containing {len(largest)} nodes.",
+                RuntimeWarning
+            )
+            G_obs = G_obs.subgraph(largest).copy()
+    latent_kwargs = dict(kwargs)
+
     # Typing for latent graph
     # Constrcut the latent spanning graph.
     if latent_graph is None:
-        latent_graph = reconstruct_latent_graph_with_steiner(G_obs, **kwargs)[0]
+        latent_graph = reconstruct_latent_graph_with_steiner(G_obs, **latent_kwargs)[0]
     elif isinstance(latent_graph, FitnessLandscape):
         latent_graph = latent_graph.graph
     
@@ -576,6 +593,15 @@ def calculate_local_bottleneck(fitness_landscape: Union[nx.Graph, FitnessLandsca
         "local_cheeger_constant": h_est,
         "local_cheeger_cutset": T_star
     }
+
+    # Attach latent reconstruction parameters if available.
+    recon_params = None
+    if hasattr(latent_graph, "graph"):
+        recon_params = latent_graph.graph.get("latent_reconstruction_params")
+    if recon_params is None and latent_kwargs:
+        recon_params = dict(latent_kwargs)
+    if recon_params is not None:
+        results["latent_reconstruction_params"] = recon_params
 
     if return_latent_graph:
         results['latent_graph'] = latent_graph
