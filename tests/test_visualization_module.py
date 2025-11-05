@@ -1,6 +1,11 @@
+import matplotlib
+
+matplotlib.use("Agg")
+
 import pandas as pd
 import networkx as nx
 import numpy as np
+import matplotlib.pyplot as plt
 
 from fitness_landscape.core.sequence import BaseNumpySequence
 from fitness_landscape.core.fitness import NumericFitness
@@ -15,6 +20,7 @@ from fitness_landscape.visualization.adapters import (
     import_pct_annotations,
     register_pct_palette,
 )
+from fitness_landscape.visualization.renderers import plot_landscape_matplotlib
 
 
 def _build_simple_landscape():
@@ -122,6 +128,16 @@ def test_import_pct_annotations_and_palette_registration():
     assert "pct:pct" in dataset.palettes
     assert dataset.annotation_values["L1"] == ["c1", "c1", "c2"]
 
+    fig, ax = plot_landscape_matplotlib(
+        dataset,
+        annotation_field="L1",
+        palette_key="pct:pct",
+    )
+    assert ax.legend_ is not None
+    labels = [text.get_text() for text in ax.legend_.get_texts()]
+    assert "c1" in labels
+    plt.close(fig)
+
 
 def test_register_pct_palette_returns_key():
     palette_store = PaletteStore()
@@ -129,3 +145,15 @@ def test_register_pct_palette_returns_key():
     key = register_pct_palette(palette_store, "example_annot", palette)
     assert key == "example_annot:pct"
     assert palette_store.get_palette(key) == palette
+
+
+def test_plot_matplotlib_with_numeric_fitness_only():
+    landscape = _build_simple_landscape()
+    builder = VisualizationDatasetBuilder(landscape)
+    dataset = builder.build(layout="graph", fitness_layer="score")
+    fig, ax = plot_landscape_matplotlib(dataset)
+    # Expect a single scatter collection
+    assert len(ax.collections) == 1
+    scatter = ax.collections[0]
+    assert scatter.get_offsets().shape[0] == len(dataset.nodes)
+    plt.close(fig)
