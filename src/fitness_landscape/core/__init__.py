@@ -8,6 +8,8 @@ from .sequence import (
 
 from .landscape import (
     FitnessLandscape,
+    AnnotationQueryResult,
+    DirectedFitnessLandscape,
 )
 
 from .fitness import (
@@ -15,6 +17,8 @@ from .fitness import (
     CategoricalFitness,
     ProbabilisticCategoricalFitness
 )
+
+from .annotation import AnnotationLayer
 
 
 from .graph import (
@@ -39,10 +43,12 @@ __all__ = [
     'generate_sequences',
     'sequence_distance',
     'FitnessLandscape',
+    'AnnotationQueryResult',
     'DirectedFitnessLandscape',
     'NumericFitness',
     'CategoricalFitness',
     'ProbabilisticCategoricalFitness',
+    'AnnotationLayer',
     'create_hamming_graph',
     'create_knn_graph',
     'create_tda_graph',
