@@ -1,4 +1,5 @@
 import networkx as nx
+import pandas as pd
 import pytest
 
 from fitness_landscape.core.annotation import AnnotationLayer
@@ -84,3 +85,85 @@ def test_fitness_landscape_annotation_query_and_detach():
 
     with pytest.raises(KeyError):
         landscape.get_annotation_layer("taxonomy")
+
+
+def test_attach_annotation_map_by_sequence():
+    sequences = [
+        BaseNumpySequence([0, 1, 0], sequence_id="s0"),
+        BaseNumpySequence([0, 1, 1], sequence_id="s1"),
+        BaseNumpySequence([1, 1, 0], sequence_id="s2"),
+    ]
+
+    graph = nx.Graph()
+    for idx, seq in enumerate(sequences):
+        graph.add_node(f"n{idx}", sequence=seq)
+
+    landscape = FitnessLandscape(sequences=sequences, graph=graph)
+
+    data = {
+        "010": {"group": "X"},
+        "011": {"group": "Y"},
+        (1, 1, 0): {"group": "Z"},
+    }
+
+    layer = landscape.attach_annotation(name="grouping", data=data, map_by="sequence")
+    assert layer.to_dataframe()["group"].tolist() == ["X", "Y", "Z"]
+
+    for node, expected in zip(graph.nodes, ["X", "Y", "Z"]):
+        assert graph.nodes[node]["annotations"]["grouping"]["group"] == expected
+
+
+def test_attach_annotation_map_by_name_with_allow_missing():
+    sequences = [
+        BaseNumpySequence([0, 1, 0], sequence_id="Alpha"),
+        BaseNumpySequence([0, 1, 1], sequence_id="Beta"),
+        BaseNumpySequence([1, 1, 0], sequence_id="Gamma"),
+    ]
+
+    graph = nx.Graph()
+    for idx, seq in enumerate(sequences):
+        graph.add_node(f"n{idx}", sequence=seq)
+
+    landscape = FitnessLandscape(sequences=sequences, graph=graph)
+
+    data = {
+        "Alpha": {"lineage": "L1"},
+        "Gamma": {"lineage": "L2"},
+    }
+
+    layer = landscape.attach_annotation(
+        name="lineage", data=data, map_by="name", allow_missing=True
+    )
+
+    df = layer.to_dataframe()
+    assert df.loc[0, "lineage"] == "L1"
+    assert pd.isna(df.loc[1, "lineage"])
+    assert df.loc[2, "lineage"] == "L2"
+
+
+def test_attach_annotation_map_by_index_records_allow_missing():
+    sequences = [
+        BaseNumpySequence([0, 1, 0], sequence_id="s0"),
+        BaseNumpySequence([0, 1, 1], sequence_id="s1"),
+        BaseNumpySequence([1, 1, 0], sequence_id="s2"),
+    ]
+
+    graph = nx.Graph()
+    for idx, seq in enumerate(sequences):
+        graph.add_node(f"n{idx}", sequence=seq)
+
+    landscape = FitnessLandscape(sequences=sequences, graph=graph)
+
+    data = {
+        0: {"region": "north"},
+        2: {"region": "south"},
+    }
+
+    layer = landscape.attach_annotation(
+        name="region", data=data, map_by="index", allow_missing=True
+    )
+
+    df = layer.to_dataframe()
+    assert df.loc[0, "region"] == "north"
+    assert pd.isna(df.loc[1, "region"])
+    assert df.loc[2, "region"] == "south"

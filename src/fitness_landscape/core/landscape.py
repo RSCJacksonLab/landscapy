@@ -238,6 +238,20 @@ class FitnessLandscape:
             key = tuple(s.to_array())
             m.setdefault(key, []).append(i)
         return m
+
+    def _index_map_by_name(self) -> tuple[dict[str, list[int]], list[int]]:
+        """
+        Map sequence identifier -> [indices] and collect indices without ids.
+        """
+        mapping: dict[str, list[int]] = {}
+        missing: list[int] = []
+        for i, seq in enumerate(self.sequences):
+            seq_id = getattr(seq, "id", None)
+            if seq_id is None:
+                missing.append(i)
+                continue
+            mapping.setdefault(str(seq_id), []).append(i)
+        return mapping, missing
     
     def _normalize_seq_key(self, k: SeqKey) -> Tuple:
         """
@@ -302,6 +316,193 @@ class FitnessLandscape:
             for node in nodes:
                 annotations = self.graph.nodes[node].setdefault("annotations", {})
                 annotations[layer.name] = dict(record)
+
+    def _prepare_annotation_frame(
+        self,
+        data: pd.DataFrame | Mapping[Any, Any] | Sequence[Any],
+        *,
+        map_by: Literal["index", "sequence", "name"],
+        allow_missing: bool,
+    ) -> pd.DataFrame:
+        if data is None:
+            raise ValueError("`data` must be provided when constructing an annotation layer.")
+
+        if map_by not in {"index", "sequence", "name"}:
+            raise ValueError(f"Unsupported `map_by` option: {map_by!r}")
+
+        frame = None
+        if map_by == "index":
+            frame = self._prepare_annotation_frame_index(data)
+
+        if frame is not None:
+            return frame.reset_index(drop=True)
+
+        return self._prepare_annotation_frame_keyed(
+            data,
+            map_by=map_by,
+            allow_missing=allow_missing,
+        )
+
+    def _prepare_annotation_frame_index(
+        self,
+        data: pd.DataFrame | Mapping[Any, Any] | Sequence[Any],
+    ) -> pd.DataFrame | None:
+        n = len(self.sequences)
+
+        if isinstance(data, pd.DataFrame):
+            if len(data) != n:
+                raise ValueError(
+                    f"`data` length {len(data)} does not match number of sequences {n} when map_by='index'."
+                )
+            return data.copy(deep=True)
+
+        if isinstance(data, Mapping):
+            if not data:
+                raise ValueError("Annotation `data` mapping is empty.")
+            sample = next(iter(data.values()))
+            if isinstance(sample, Mapping):
+                return None
+            frame = pd.DataFrame(data)
+            if len(frame) != n:
+                raise ValueError(
+                    f"`data` length {len(frame)} does not match number of sequences {n} when map_by='index'."
+                )
+            return frame
+
+        if isinstance(data, (list, tuple)):
+            if len(data) != n:
+                raise ValueError(
+                    f"`data` length {len(data)} does not match number of sequences {n} when map_by='index'."
+                )
+            if not all(isinstance(row, Mapping) for row in data):
+                raise TypeError("Sequence-based annotation data must contain mapping rows.")
+            return pd.DataFrame(list(data))
+
+        return None
+
+    def _prepare_annotation_frame_keyed(
+        self,
+        data: pd.DataFrame | Mapping[Any, Any] | Sequence[Any],
+        *,
+        map_by: Literal["index", "sequence", "name"],
+        allow_missing: bool,
+    ) -> pd.DataFrame:
+        pairs = list(self._iter_annotation_pairs(data))
+        if not pairs:
+            raise ValueError("Annotation data is empty; no records were provided.")
+
+        n = len(self.sequences)
+        rows: list[dict[str, Any] | None] = [None] * n
+        column_order: list[str] = []
+        seen_columns: set[str] = set()
+
+        if map_by == "index":
+            def resolve(key: Any) -> list[int]:
+                try:
+                    idx = int(key)
+                except (TypeError, ValueError) as exc:
+                    raise KeyError(f"Invalid sequence index key {key!r}") from exc
+                if idx < 0 or idx >= n:
+                    raise KeyError(f"Sequence index {idx} is outside valid range [0, {n}).")
+                return [idx]
+
+        elif map_by == "sequence":
+            seq_map = self._index_map()
+
+            def resolve(key: Any) -> list[int]:
+                normalized = self._normalize_seq_key(key)
+                return seq_map.get(normalized, [])
+
+        else:  # map_by == "name"
+            name_map, missing = self._index_map_by_name()
+            if missing and not allow_missing:
+                raise ValueError(
+                    "Cannot attach annotations by sequence name: some sequences lack identifiers."
+                )
+
+            def resolve(key: Any) -> list[int]:
+                if isinstance(key, BaseNumpySequence):
+                    key = getattr(key, "id", None)
+                if key is None:
+                    raise KeyError("Annotation key does not provide a sequence identifier.")
+                return name_map.get(str(key), [])
+
+        assigned: set[int] = set()
+
+        for raw_key, record_obj in pairs:
+            record = self._coerce_annotation_record(record_obj)
+            for column in record.keys():
+                if column not in seen_columns:
+                    seen_columns.add(column)
+                    column_order.append(column)
+
+            indices = resolve(raw_key)
+            if not indices:
+                if allow_missing:
+                    continue
+                raise KeyError(
+                    f"Annotation key {raw_key!r} could not be matched using map_by='{map_by}'."
+                )
+
+            for idx in indices:
+                if idx in assigned:
+                    raise ValueError(f"Annotation values already assigned for sequence index {idx}.")
+                rows[idx] = dict(record)
+                assigned.add(idx)
+
+        if not column_order:
+            raise ValueError("Annotation records must contain at least one column.")
+
+        filled_rows: list[dict[str, Any]] = []
+        for idx, row in enumerate(rows):
+            if row is None:
+                if not allow_missing:
+                    raise ValueError(
+                        f"No annotation provided for sequence index {idx}; "
+                        "set allow_missing=True to permit missing records."
+                    )
+                filled_rows.append({col: None for col in column_order})
+            else:
+                filled_rows.append({col: row.get(col) for col in column_order})
+
+        return pd.DataFrame(filled_rows, columns=column_order)
+
+    @staticmethod
+    def _coerce_annotation_record(record: Any) -> dict[str, Any]:
+        if isinstance(record, pd.Series):
+            return record.to_dict()
+        if isinstance(record, Mapping):
+            return dict(record)
+        raise TypeError(
+            f"Annotation record must be a mapping or pandas Series; received {type(record).__name__}."
+        )
+
+    def _iter_annotation_pairs(
+        self,
+        data: pd.DataFrame | Mapping[Any, Any] | Sequence[Any],
+    ) -> Iterable[tuple[Any, Any]]:
+        if isinstance(data, pd.DataFrame):
+            for key, row in data.iterrows():
+                yield key, row
+            return
+
+        if isinstance(data, Mapping):
+            for key, value in data.items():
+                yield key, value
+            return
+
+        if isinstance(data, (list, tuple)):
+            for item in data:
+                if not isinstance(item, (list, tuple)) or len(item) != 2:
+                    raise TypeError(
+                        "Sequence annotation data must contain (key, record) pairs when provided as a list."
+                    )
+                yield item[0], item[1]
+            return
+
+        raise TypeError(
+            "Unsupported annotation data container. Expected DataFrame, mapping, or sequence of key-record pairs."
+        )
 
     def _enforce_unique_sequences(self):
         """
@@ -706,8 +907,10 @@ class FitnessLandscape:
         layer: AnnotationLayer | None = None,
         *,
         name: str | None = None,
-        data: pd.DataFrame | Mapping[str, Sequence[Any]] | None = None,
+        data: pd.DataFrame | Mapping[Any, Any] | Sequence[Any] | None = None,
         metadata: Mapping[str, Any] | None = None,
+        map_by: Literal["index", "sequence", "name"] = "index",
+        allow_missing: bool = False,
     ) -> AnnotationLayer:
         """
         Attach an annotation layer to the landscape.
@@ -723,6 +926,15 @@ class FitnessLandscape:
             Columnar annotation data aligned to the sequence order.
         metadata :
             Optional metadata to store on the layer when constructing inline.
+        map_by :
+            Strategy for aligning the provided data to existing sequences.
+            - `"index"`: data is ordered by sequence index or keyed by index.
+            - `"sequence"`: keys refer to sequence objects, tuples, lists, or
+              strings that can be normalized to the landscape sequences.
+            - `"name"`: keys refer to sequence identifiers (``sequence.id``).
+        allow_missing :
+            Allow sequences to be missing annotations when constructing from a
+            mapping. Missing records are filled with ``None``.
         """
         if layer is not None:
             if any(x is not None for x in (name, data, metadata)):
@@ -730,7 +942,12 @@ class FitnessLandscape:
         else:
             if name is None or data is None:
                 raise ValueError("When not providing `layer`, both `name` and `data` are required.")
-            layer = AnnotationLayer(name=name, data=data, metadata=metadata)
+            frame = self._prepare_annotation_frame(
+                data,
+                map_by=map_by,
+                allow_missing=allow_missing,
+            )
+            layer = AnnotationLayer(name=name, data=frame, metadata=metadata)
 
         if layer.name in self.annotation_layers:
             raise ValueError(f"An annotation layer named '{layer.name}' already exists.")

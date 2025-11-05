@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -150,4 +149,3 @@ def _is_iterable(value: Any) -> bool:
     if isinstance(value, (str, bytes)):
         return False
     return isinstance(value, (Sequence, set, pd.Series, np.ndarray))
-
