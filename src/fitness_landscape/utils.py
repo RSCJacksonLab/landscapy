@@ -713,8 +713,9 @@ def fasta_to_prot20_sequences(filepath: str | Path, *, strict: bool = True) -> L
         aln = sanitize_alignment(aln)
         return alignment_to_base_numpy_sequences(aln, alphabet=PROT_20)
     except Exception:
-        # Fallback to unaligned: manually parse FASTA and delete illegal symbols
+        # Fallback path: manually parse FASTA
         legal = set(PROT_20)
+        gap_aliases = {'-', '.'}
         names: list[str] = []
         seqs_raw: list[str] = []
         current_name = None
@@ -736,6 +737,54 @@ def fasta_to_prot20_sequences(filepath: str | Path, *, strict: bool = True) -> L
             if current_name is not None:
                 names.append(current_name)
                 seqs_raw.append(''.join(current_seq))
+
+        # Attempt to recover an alignment by replacing illegal residues with gaps
+        if seqs_raw:
+            lengths = {len(s) for s in seqs_raw}
+            if len(lengths) == 1 and next(iter(lengths)) > 0:
+                illegal: set[str] = set()
+
+                used_names: set[str] = set()
+
+                def _unique_name(name: str) -> str:
+                    base = name.strip() or 'seq'
+                    base = base.replace(' ', '_')
+                    if base not in used_names:
+                        used_names.add(base)
+                        return base
+                    i = 1
+                    while f"{base}_{i}" in used_names:
+                        i += 1
+                    unique = f"{base}_{i}"
+                    used_names.add(unique)
+                    return unique
+
+                seq_dict: Dict[str, str] = {}
+                for name, s in zip(names, seqs_raw):
+                    cleaned_chars = []
+                    for ch in s:
+                        up = ch.upper()
+                        if up in legal:
+                            cleaned_chars.append(up)
+                        elif up in gap_aliases:
+                            cleaned_chars.append('-')
+                        else:
+                            illegal.add(up)
+                            cleaned_chars.append('-')
+                    seq_dict[_unique_name(name)] = ''.join(cleaned_chars)
+
+                if strict and illegal:
+                    raise ValueError(
+                        f"Non-canonical residues {sorted(illegal)} present in FASTA; expected only PROT_20: {PROT_20}"
+                    )
+
+                if seq_dict and illegal:
+                    aln = make_aligned_seqs(seq_dict, moltype='protein')
+                    aln = sanitize_alignment(aln)
+                    return alignment_to_base_numpy_sequences(aln, alphabet=PROT_20)
+
+        # Treat as unaligned: delete illegal symbols if strict=False
+        legal = set(PROT_20)
 
         out: list[BaseNumpySequence] = []
         for name, s in zip(names, seqs_raw):
