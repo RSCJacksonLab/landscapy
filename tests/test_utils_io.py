@@ -60,6 +60,24 @@ def test_fasta_to_prot20_sequences_alignment_with_ambiguous(tmp_text):
     recovered = {''.join(seq.to_array()) for seq in seqs}
     assert recovered == {"AC"}
 
+def test_fasta_to_prot20_sequences_alignment_all_ambiguous(tmp_text):
+    p = tmp_text(
+        "ambig_full.fasta",
+        ">a\nXXX\n>b\nXXX\n",
+    )
+    seqs = fasta_to_prot20_sequences(p, strict=False)
+    # All characters were ambiguous; fallback path should not raise.
+    assert seqs == []
+
+def test_fasta_to_prot20_sequences_alignment_mixed_ambiguous(tmp_text):
+    p = tmp_text(
+        "ambig_mixed.fasta",
+        ">a\nACD\n>b\nXXX\n",
+    )
+    seqs = fasta_to_prot20_sequences(p, strict=False)
+    assert len(seqs) == 1
+    assert ''.join(seqs[0].to_array()) == "ACD"
+
 def test_fasta_to_prot20_sequences_raises_on_noncanonical(tmp_text):
     p = tmp_text(
         "bad.fasta",

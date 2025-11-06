@@ -762,16 +762,19 @@ def fasta_to_prot20_sequences(filepath: str | Path, *, strict: bool = True) -> L
                 seq_dict: Dict[str, str] = {}
                 for name, s in zip(names, seqs_raw):
                     cleaned_chars = []
+                    has_residue = False
                     for ch in s:
                         up = ch.upper()
                         if up in legal:
                             cleaned_chars.append(up)
+                            has_residue = True
                         elif up in gap_aliases:
                             cleaned_chars.append('-')
                         else:
                             illegal.add(up)
                             cleaned_chars.append('-')
-                    seq_dict[_unique_name(name)] = ''.join(cleaned_chars)
+                    if has_residue:
+                        seq_dict[_unique_name(name)] = ''.join(cleaned_chars)
 
                 if strict and illegal:
                     raise ValueError(
@@ -779,9 +782,15 @@ def fasta_to_prot20_sequences(filepath: str | Path, *, strict: bool = True) -> L
                     )
 
                 if seq_dict and illegal:
-                    aln = make_aligned_seqs(seq_dict, moltype='protein')
-                    aln = sanitize_alignment(aln)
-                    return alignment_to_base_numpy_sequences(aln, alphabet=PROT_20)
+                    try:
+                        aln = make_aligned_seqs(seq_dict, moltype='protein')
+                        aln = sanitize_alignment(aln)
+                        return alignment_to_base_numpy_sequences(aln, alphabet=PROT_20)
+                    except ValueError as err:
+                        # If sanitisation wipes out all informative columns, fall back to
+                        # the unaligned handling below rather than aborting.
+                        if "All alignment columns contain gaps" not in str(err):
+                            raise
 
         # Treat as unaligned: delete illegal symbols if strict=False
         legal = set(PROT_20)
