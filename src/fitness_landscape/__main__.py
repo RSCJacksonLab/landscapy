@@ -165,6 +165,9 @@ def evol_diffusion_landscape(
     c0 = time.process_time()
     logger.info("evol-diffusion-landscape: start")
 
+    need_gapped_embeddings = embedding_domain == "ohe"
+    seqs_gapped_alignment: list | None = None
+
     # Read sequences
     try:
         _t_read0 = time.perf_counter()
@@ -176,16 +179,27 @@ def evol_diffusion_landscape(
             if not fasta_files:
                 raise click.UsageError(f"The directory '{sequences}' contains no FASTA files.")
             seqs = []
+            use_gapped = need_gapped_embeddings and len(fasta_files) == 1
             for fp in fasta_files:
                 logger.info("Reading FASTA: %s", fp)
-                seqs.extend(fasta_to_prot20_sequences(fp, strict=False))
+                if use_gapped:
+                    seq_list, gapped = fasta_to_prot20_sequences(fp, strict=False, return_gapped=True)
+                    seqs.extend(seq_list)
+                    seqs_gapped_alignment = gapped
+                else:
+                    seqs.extend(fasta_to_prot20_sequences(fp, strict=False))
             logger.info(
                 "Combined sequences from %d FASTA files (total=%d)",
                 len(fasta_files),
                 len(seqs),
             )
         else:
-            seqs = fasta_to_prot20_sequences(seq_path, strict=False)
+            if need_gapped_embeddings:
+                seqs, seqs_gapped_alignment = fasta_to_prot20_sequences(
+                    seq_path, strict=False, return_gapped=True
+                )
+            else:
+                seqs = fasta_to_prot20_sequences(seq_path, strict=False)
         logger.info(
             "Read sequences: n=%d wall=%.2fs cpu=%.2fs",
             len(seqs),
@@ -225,9 +239,12 @@ def evol_diffusion_landscape(
     elif embedding_domain == "ohe":
         _t_emb0 = time.perf_counter()
         _c_emb0 = time.process_time()
-        lengths = {len(s) for s in seqs}
+        source_for_embeddings = seqs_gapped_alignment if seqs_gapped_alignment is not None else seqs
+        lengths = {len(s) for s in source_for_embeddings}
         if len(lengths) == 1:
-            E, _ = _encode_multiallele(seqs)
+            E, _ = _encode_multiallele(source_for_embeddings)
+            if seqs_gapped_alignment is not None:
+                logger.info("Using gapped alignment (length=%d) for OHE embeddings.", len(source_for_embeddings[0]))
         else:
             logger.warning(
                 "Sequences have non-uniform lengths (%s). Falling back to composition embeddings for kNN prefilter.",
@@ -431,6 +448,9 @@ def knn_landscape(
     c0 = time.process_time()
     logger.info("knn-landscape: start")
 
+    need_gapped_embeddings = embedding_domain == "ohe"
+    seqs_gapped_alignment: list | None = None
+
     # Read sequences
     try:
         _t_read0 = time.perf_counter()
@@ -442,16 +462,27 @@ def knn_landscape(
             if not fasta_files:
                 raise click.UsageError(f"The directory '{sequences}' contains no FASTA files.")
             seqs = []
+            use_gapped = need_gapped_embeddings and len(fasta_files) == 1
             for fp in fasta_files:
                 logger.info("Reading FASTA: %s", fp)
-                seqs.extend(fasta_to_prot20_sequences(fp, strict=False))
+                if use_gapped:
+                    seq_list, gapped = fasta_to_prot20_sequences(fp, strict=False, return_gapped=True)
+                    seqs.extend(seq_list)
+                    seqs_gapped_alignment = gapped
+                else:
+                    seqs.extend(fasta_to_prot20_sequences(fp, strict=False))
             logger.info(
                 "Combined sequences from %d FASTA files (total=%d)",
                 len(fasta_files),
                 len(seqs),
             )
         else:
-            seqs = fasta_to_prot20_sequences(seq_path, strict=False)
+            if need_gapped_embeddings:
+                seqs, seqs_gapped_alignment = fasta_to_prot20_sequences(
+                    seq_path, strict=False, return_gapped=True
+                )
+            else:
+                seqs = fasta_to_prot20_sequences(seq_path, strict=False)
         logger.info(
             "Read sequences: n=%d wall=%.2fs cpu=%.2fs",
             len(seqs),
@@ -489,9 +520,12 @@ def knn_landscape(
     elif embedding_domain == "ohe":
         _t_emb0 = time.perf_counter()
         _c_emb0 = time.process_time()
-        lengths = {len(s) for s in seqs}
+        source_for_embeddings = seqs_gapped_alignment if seqs_gapped_alignment is not None else seqs
+        lengths = {len(s) for s in source_for_embeddings}
         if len(lengths) == 1:
-            E, _ = _encode_multiallele(seqs)
+            E, _ = _encode_multiallele(source_for_embeddings)
+            if seqs_gapped_alignment is not None:
+                logger.info("Using gapped alignment (length=%d) for OHE embeddings.", len(source_for_embeddings[0]))
         else:
             logger.warning(
                 "Sequences have non-uniform lengths (%s). Falling back to composition embeddings.",

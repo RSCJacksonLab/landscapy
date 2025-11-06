@@ -666,7 +666,11 @@ def alignment_to_base_numpy_sequences(alignment: Alignment,
         sequences.append(base_numpy_seq)
     return sequences
 
-def fasta_to_prot20_sequences(filepath: str | Path, *, strict: bool = True) -> List[BaseNumpySequence]:
+def fasta_to_prot20_sequences(filepath: str | Path,
+                              *,
+                              strict: bool = True,
+                              return_gapped: bool = False
+                              ) -> Union[List[BaseNumpySequence], Tuple[List[BaseNumpySequence], Optional[List[BaseNumpySequence]]]]:
     """
     Load a FASTA file that may be aligned or unaligned and return a
     sanitised list of BaseNumpySequence with the canonical PROT_20
@@ -683,10 +687,18 @@ def fasta_to_prot20_sequences(filepath: str | Path, *, strict: bool = True) -> L
     filepath : str | Path
         Path to the FASTA file.
 
+    return_gapped : bool, default=`False`
+        When True, also return the sanitised gapped alignment as
+        `BaseNumpySequence` objects using the PROT_20 + '-' alphabet.
+
     Returns
     -------
-    List[BaseNumpySequence]
+    sequences : List[BaseNumpySequence]
         List of ungapped, PROT_20 sequences.
+    aligned_sequences : Optional[List[BaseNumpySequence]]
+        Only returned when ``return_gapped`` is True and the input
+        parsed as an alignment. Contains the sanitised gapped
+        sequences (all of equal length). Otherwise ``None``.
     """
     p = Path(filepath)
     try:
@@ -711,7 +723,21 @@ def fasta_to_prot20_sequences(filepath: str | Path, *, strict: bool = True) -> L
                 raise ValueError(f"Non-canonical residues {sorted(illegal)} present in FASTA; expected only PROT_20: {PROT_20}")
 
         aln = sanitize_alignment(aln)
-        return alignment_to_base_numpy_sequences(aln, alphabet=PROT_20)
+        aligned_sequences: Optional[List[BaseNumpySequence]] = None
+        if return_gapped:
+            gap_alphabet = PROT_20 + ["-"]
+            aligned_sequences = [
+                BaseNumpySequence(
+                    list(str(aln.get_gapped_seq(name))),
+                    alphabet=gap_alphabet,
+                    sequence_id=name,
+                )
+                for name in aln.names
+            ]
+        sequences = alignment_to_base_numpy_sequences(aln, alphabet=PROT_20)
+        if return_gapped:
+            return sequences, aligned_sequences
+        return sequences
     except Exception:
         # Fallback path: manually parse FASTA
         legal = set(PROT_20)
@@ -811,6 +837,8 @@ def fasta_to_prot20_sequences(filepath: str | Path, *, strict: bool = True) -> L
             if not s_filtered:
                 continue
             out.append(BaseNumpySequence.from_string(s_filtered, alphabet=PROT_20, moltype='protein', sequence_id=name))
+        if return_gapped:
+            return out, None
         return out
 
 def moving_window_alignment(alignment: Alignment,

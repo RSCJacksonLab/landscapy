@@ -55,10 +55,21 @@ def test_fasta_to_prot20_sequences_alignment_with_ambiguous(tmp_text):
     )
     seqs = fasta_to_prot20_sequences(p, strict=False)
     assert len(seqs) == 2
-    lengths = {len(s) for s in seqs}
-    assert lengths == {2}
+    assert {len(s) for s in seqs} == {2}
     recovered = {''.join(seq.to_array()) for seq in seqs}
     assert recovered == {"AC"}
+
+def test_fasta_to_prot20_sequences_return_gapped_alignment(tmp_text):
+    p = tmp_text(
+        "aligned_gapped.fasta",
+        ">a\nAC-D\n>b\nACGD\n",
+    )
+    seqs, aligned = fasta_to_prot20_sequences(p, strict=False, return_gapped=True)
+    assert len(seqs) == 2
+    assert aligned is not None
+    assert len(aligned) == 2
+    assert {len(s) for s in aligned} == {4}
+    assert ''.join(aligned[0].to_array()) == "AC-D"
 
 def test_fasta_to_prot20_sequences_alignment_all_ambiguous(tmp_text):
     p = tmp_text(
@@ -77,6 +88,15 @@ def test_fasta_to_prot20_sequences_alignment_mixed_ambiguous(tmp_text):
     seqs = fasta_to_prot20_sequences(p, strict=False)
     assert len(seqs) == 1
     assert ''.join(seqs[0].to_array()) == "ACD"
+
+def test_fasta_to_prot20_sequences_return_gapped_unaligned(tmp_text):
+    p = tmp_text(
+        "unaligned.fasta",
+        ">s1\nABC\n>s2\nABCD\n",
+    )
+    seqs, aligned = fasta_to_prot20_sequences(p, strict=False, return_gapped=True)
+    assert len(seqs) == 2
+    assert aligned is None
 
 def test_fasta_to_prot20_sequences_raises_on_noncanonical(tmp_text):
     p = tmp_text(
