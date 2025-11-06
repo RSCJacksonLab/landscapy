@@ -48,6 +48,18 @@ def test_fasta_to_prot20_sequences_alignment(tmp_text):
     lengths = {len(s) for s in seqs}
     assert lengths == {3}
 
+def test_fasta_to_prot20_sequences_alignment_with_ambiguous(tmp_text):
+    p = tmp_text(
+        "ambig.fasta",
+        ">a\nACX\n>b\nACY\n",
+    )
+    seqs = fasta_to_prot20_sequences(p, strict=False)
+    assert len(seqs) == 2
+    lengths = {len(s) for s in seqs}
+    assert lengths == {2}
+    recovered = {''.join(seq.to_array()) for seq in seqs}
+    assert recovered == {"AC"}
+
 def test_fasta_to_prot20_sequences_raises_on_noncanonical(tmp_text):
     p = tmp_text(
         "bad.fasta",
@@ -55,4 +67,3 @@ def test_fasta_to_prot20_sequences_raises_on_noncanonical(tmp_text):
     )
     with pytest.raises(ValueError):
         fasta_to_prot20_sequences(p)
-
