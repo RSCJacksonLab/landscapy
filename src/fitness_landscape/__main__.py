@@ -7,7 +7,7 @@ import math
 import os
 import time
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Optional, Sequence, Union
 
 import click
 import numpy as np
@@ -92,6 +92,26 @@ def _parse_diffusion_power(
     return numeric
 
 
+def _composition_embeddings(seqs: Sequence[Any]) -> np.ndarray:
+    amap = {aa: i for i, aa in enumerate(PROT_20)}
+    emb = np.zeros((len(seqs), len(PROT_20)), dtype=np.float32)
+    for idx, seq in enumerate(seqs):
+        arr = getattr(seq, "to_array")()
+        counts = np.zeros(len(PROT_20), dtype=np.float32)
+        total = 0.0
+        for sym in arr:
+            j = amap.get(str(sym).upper())
+            if j is not None:
+                counts[j] += 1.0
+                total += 1.0
+        if total > 0:
+            counts /= total
+        else:
+            counts[:] = 1.0 / len(PROT_20)
+        emb[idx] = counts
+    return emb
+
+
 @cli.command()
 # Reading / writing
 @click.option("--sequences", required=True, type=click.Path(exists=True), help="Path to the input FASTA file or directory.")
@@ -110,8 +130,8 @@ def _parse_diffusion_power(
 @click.option("--cpus", type=int, default=1, show_default=True, help="Total Ray CPU slots to allocate for alignment tasks.")
 @click.option("--compute-hamming-edges/--no-compute-hamming-edges", default=True, show_default=True, help="Attach expected Hamming edge weights when possible.")
 # Embeddings
-@click.option("--compute-embeddings/--no-compute-embeddings", default=True, show_default=True, help="Compute node embeddings (OHE or PLM).")
-@click.option("--embedding-domain", type=click.Choice(["ohe", "plm"]), default="ohe", show_default=True, help="Embedding domain for node attributes.")
+@click.option("--compute-embeddings/--no-compute-embeddings", default=True, show_default=True, help="Compute node embeddings (OHE, composition, or PLM).")
+@click.option("--embedding-domain", type=click.Choice(["ohe", "composition", "plm"]), default="ohe", show_default=True, help="Embedding domain for node attributes.")
 @click.option("--plm-model-name", type=str, default="facebook/esm2_t6_8M_UR50D", show_default=True, help="Protein language model to use when embedding-domain=plm.")
 @click.option("--plm-batch-size", type=int, default=64, show_default=True, help="Batch size for PLM embeddings.")
 @click.option("--plm-device", type=str, default=None, help="Device for PLM embeddings (e.g. 'cpu' or 'cuda').")
@@ -165,6 +185,9 @@ def evol_diffusion_landscape(
     c0 = time.process_time()
     logger.info("evol-diffusion-landscape: start")
 
+    need_gapped_embeddings = embedding_domain == "ohe"
+    seqs_gapped_alignment: list | None = None
+
     # Read sequences
     try:
         _t_read0 = time.perf_counter()
@@ -176,16 +199,27 @@ def evol_diffusion_landscape(
             if not fasta_files:
                 raise click.UsageError(f"The directory '{sequences}' contains no FASTA files.")
             seqs = []
+            use_gapped = need_gapped_embeddings and len(fasta_files) == 1
             for fp in fasta_files:
                 logger.info("Reading FASTA: %s", fp)
-                seqs.extend(fasta_to_prot20_sequences(fp, strict=False))
+                if use_gapped:
+                    seq_list, gapped = fasta_to_prot20_sequences(fp, strict=False, return_gapped=True)
+                    seqs.extend(seq_list)
+                    seqs_gapped_alignment = gapped
+                else:
+                    seqs.extend(fasta_to_prot20_sequences(fp, strict=False))
             logger.info(
                 "Combined sequences from %d FASTA files (total=%d)",
                 len(fasta_files),
                 len(seqs),
             )
         else:
-            seqs = fasta_to_prot20_sequences(seq_path, strict=False)
+            if need_gapped_embeddings:
+                seqs, seqs_gapped_alignment = fasta_to_prot20_sequences(
+                    seq_path, strict=False, return_gapped=True
+                )
+            else:
+                seqs = fasta_to_prot20_sequences(seq_path, strict=False)
         logger.info(
             "Read sequences: n=%d wall=%.2fs cpu=%.2fs",
             len(seqs),
@@ -225,32 +259,28 @@ def evol_diffusion_landscape(
     elif embedding_domain == "ohe":
         _t_emb0 = time.perf_counter()
         _c_emb0 = time.process_time()
-        lengths = {len(s) for s in seqs}
-        if len(lengths) == 1:
-            E, _ = _encode_multiallele(seqs)
-        else:
-            logger.warning(
-                "Sequences have non-uniform lengths (%s). Falling back to composition embeddings for kNN prefilter.",
-                sorted(lengths),
+        source_for_embeddings = seqs_gapped_alignment if seqs_gapped_alignment is not None else seqs
+        lengths = {len(s) for s in source_for_embeddings}
+        if len(lengths) != 1:
+            raise click.UsageError(
+                "Sequences have non-uniform lengths under the provided alignment. "
+                "Provide a single aligned FASTA or rerun with --embedding-domain composition."
             )
-            amap = {aa: i for i, aa in enumerate(PROT_20)}
-            E = np.zeros((len(seqs), len(PROT_20)), dtype=np.float32)
-            for idx, seq in enumerate(seqs):
-                arr = getattr(seq, "to_array")()
-                counts = np.zeros(len(PROT_20), dtype=np.float32)
-                total = 0.0
-                for sym in arr:
-                    j = amap.get(str(sym).upper())
-                    if j is not None:
-                        counts[j] += 1.0
-                        total += 1.0
-                if total > 0:
-                    counts /= total
-                else:
-                    counts[:] = 1.0 / len(PROT_20)
-                E[idx] = counts
+        E, _ = _encode_multiallele(source_for_embeddings)
+        if seqs_gapped_alignment is not None:
+            logger.info("Using gapped alignment (length=%d) for OHE embeddings.", len(source_for_embeddings[0]))
         logger.info(
-            "Embeddings (ohe/composition) built: shape=%s wall=%.2fs cpu=%.2fs",
+            "Embeddings (ohe) built: shape=%s wall=%.2fs cpu=%.2fs",
+            getattr(E, "shape", None),
+            time.perf_counter() - _t_emb0,
+            time.process_time() - _c_emb0,
+        )
+    elif embedding_domain == "composition":
+        _t_emb0 = time.perf_counter()
+        _c_emb0 = time.process_time()
+        E = _composition_embeddings(seqs)
+        logger.info(
+            "Embeddings (composition) built: shape=%s wall=%.2fs cpu=%.2fs",
             getattr(E, "shape", None),
             time.perf_counter() - _t_emb0,
             time.process_time() - _c_emb0,
@@ -376,8 +406,8 @@ def evol_diffusion_landscape(
 @click.option("--seed", type=int, default=None, help="Random seed used when tie-policy=random.")
 @click.option("--compute-hamming-edges/--no-compute-hamming-edges", default=True, show_default=True, help="Attach expected Hamming edge weights when possible.")
 # Embeddings
-@click.option("--compute-embeddings/--no-compute-embeddings", default=True, show_default=True, help="Compute node embeddings (OHE or PLM).")
-@click.option("--embedding-domain", type=click.Choice(["ohe", "plm"]), default="ohe", show_default=True, help="Embedding domain for node attributes.")
+@click.option("--compute-embeddings/--no-compute-embeddings", default=True, show_default=True, help="Compute node embeddings (OHE, composition, or PLM).")
+@click.option("--embedding-domain", type=click.Choice(["ohe", "composition", "plm"]), default="ohe", show_default=True, help="Embedding domain for node attributes.")
 @click.option("--plm-model-name", type=str, default="facebook/esm2_t6_8M_UR50D", show_default=True, help="Protein language model to use when embedding-domain=plm.")
 @click.option("--plm-batch-size", type=int, default=64, show_default=True, help="Batch size for PLM embeddings.")
 @click.option("--plm-device", type=str, default=None, help="Device for PLM embeddings (e.g. 'cpu' or 'cuda').")
@@ -431,6 +461,9 @@ def knn_landscape(
     c0 = time.process_time()
     logger.info("knn-landscape: start")
 
+    need_gapped_embeddings = embedding_domain == "ohe"
+    seqs_gapped_alignment: list | None = None
+
     # Read sequences
     try:
         _t_read0 = time.perf_counter()
@@ -442,16 +475,27 @@ def knn_landscape(
             if not fasta_files:
                 raise click.UsageError(f"The directory '{sequences}' contains no FASTA files.")
             seqs = []
+            use_gapped = need_gapped_embeddings and len(fasta_files) == 1
             for fp in fasta_files:
                 logger.info("Reading FASTA: %s", fp)
-                seqs.extend(fasta_to_prot20_sequences(fp, strict=False))
+                if use_gapped:
+                    seq_list, gapped = fasta_to_prot20_sequences(fp, strict=False, return_gapped=True)
+                    seqs.extend(seq_list)
+                    seqs_gapped_alignment = gapped
+                else:
+                    seqs.extend(fasta_to_prot20_sequences(fp, strict=False))
             logger.info(
                 "Combined sequences from %d FASTA files (total=%d)",
                 len(fasta_files),
                 len(seqs),
             )
         else:
-            seqs = fasta_to_prot20_sequences(seq_path, strict=False)
+            if need_gapped_embeddings:
+                seqs, seqs_gapped_alignment = fasta_to_prot20_sequences(
+                    seq_path, strict=False, return_gapped=True
+                )
+            else:
+                seqs = fasta_to_prot20_sequences(seq_path, strict=False)
         logger.info(
             "Read sequences: n=%d wall=%.2fs cpu=%.2fs",
             len(seqs),
@@ -489,32 +533,28 @@ def knn_landscape(
     elif embedding_domain == "ohe":
         _t_emb0 = time.perf_counter()
         _c_emb0 = time.process_time()
-        lengths = {len(s) for s in seqs}
-        if len(lengths) == 1:
-            E, _ = _encode_multiallele(seqs)
-        else:
-            logger.warning(
-                "Sequences have non-uniform lengths (%s). Falling back to composition embeddings.",
-                sorted(lengths),
+        source_for_embeddings = seqs_gapped_alignment if seqs_gapped_alignment is not None else seqs
+        lengths = {len(s) for s in source_for_embeddings}
+        if len(lengths) != 1:
+            raise click.UsageError(
+                "Sequences have non-uniform lengths under the provided alignment. "
+                "Provide a single aligned FASTA or rerun with --embedding-domain composition."
             )
-            amap = {aa: i for i, aa in enumerate(PROT_20)}
-            E = np.zeros((len(seqs), len(PROT_20)), dtype=np.float32)
-            for idx, seq in enumerate(seqs):
-                arr = getattr(seq, "to_array")()
-                counts = np.zeros(len(PROT_20), dtype=np.float32)
-                total = 0.0
-                for sym in arr:
-                    j = amap.get(str(sym).upper())
-                    if j is not None:
-                        counts[j] += 1.0
-                        total += 1.0
-                if total > 0:
-                    counts /= total
-                else:
-                    counts[:] = 1.0 / len(PROT_20)
-                E[idx] = counts
+        E, _ = _encode_multiallele(source_for_embeddings)
+        if seqs_gapped_alignment is not None:
+            logger.info("Using gapped alignment (length=%d) for OHE embeddings.", len(source_for_embeddings[0]))
         logger.info(
-            "Embeddings (ohe/composition) built: shape=%s wall=%.2fs cpu=%.2fs",
+            "Embeddings (ohe) built: shape=%s wall=%.2fs cpu=%.2fs",
+            getattr(E, "shape", None),
+            time.perf_counter() - _t_emb0,
+            time.process_time() - _c_emb0,
+        )
+    elif embedding_domain == "composition":
+        _t_emb0 = time.perf_counter()
+        _c_emb0 = time.process_time()
+        E = _composition_embeddings(seqs)
+        logger.info(
+            "Embeddings (composition) built: shape=%s wall=%.2fs cpu=%.2fs",
             getattr(E, "shape", None),
             time.perf_counter() - _t_emb0,
             time.process_time() - _c_emb0,

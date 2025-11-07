@@ -666,7 +666,11 @@ def alignment_to_base_numpy_sequences(alignment: Alignment,
         sequences.append(base_numpy_seq)
     return sequences
 
-def fasta_to_prot20_sequences(filepath: str | Path, *, strict: bool = True) -> List[BaseNumpySequence]:
+def fasta_to_prot20_sequences(filepath: str | Path,
+                              *,
+                              strict: bool = True,
+                              return_gapped: bool = False
+                              ) -> Union[List[BaseNumpySequence], Tuple[List[BaseNumpySequence], Optional[List[BaseNumpySequence]]]]:
     """
     Load a FASTA file that may be aligned or unaligned and return a
     sanitised list of BaseNumpySequence with the canonical PROT_20
@@ -683,12 +687,40 @@ def fasta_to_prot20_sequences(filepath: str | Path, *, strict: bool = True) -> L
     filepath : str | Path
         Path to the FASTA file.
 
+    return_gapped : bool, default=`False`
+        When True, also return the sanitised gapped alignment as
+        `BaseNumpySequence` objects using the PROT_20 + '-' alphabet.
+
     Returns
     -------
-    List[BaseNumpySequence]
+    sequences : List[BaseNumpySequence]
         List of ungapped, PROT_20 sequences.
+    aligned_sequences : Optional[List[BaseNumpySequence]]
+        Only returned when ``return_gapped`` is True and the input
+        parsed as an alignment. Contains the sanitised gapped
+        sequences (all of equal length). Otherwise ``None``.
     """
     p = Path(filepath)
+    gap_alphabet = PROT_20 + ["-"]
+
+    def _aligned_sequences_from(aln: Alignment) -> List[BaseNumpySequence]:
+        return [
+            BaseNumpySequence(
+                list(str(aln.get_gapped_seq(name))),
+                alphabet=gap_alphabet,
+                sequence_id=name,
+            )
+            for name in aln.names
+        ]
+
+    def _ungapped_sequences_from(aln: Alignment) -> List[BaseNumpySequence]:
+        seqs: list[BaseNumpySequence] = []
+        for name in aln.names:
+            ungapped = [ch for ch in str(aln.get_gapped_seq(name)) if ch != '-']
+            if not ungapped:
+                continue
+            seqs.append(BaseNumpySequence(ungapped, alphabet=PROT_20, sequence_id=name))
+        return seqs
     try:
         with open(p, 'r'):
             pass
@@ -696,8 +728,10 @@ def fasta_to_prot20_sequences(filepath: str | Path, *, strict: bool = True) -> L
         raise
     # Try alignment path first
     try:
-        aln = load_aligned_seqs(str(p), moltype='protein')
-        # If strict, check for illegal symbols before sanitizing
+        aln_loaded = load_aligned_seqs(str(p), moltype='protein')
+    except Exception:
+        aln_loaded = None
+    if aln_loaded is not None:
         if strict:
             raw_chars: set[str] = set()
             with open(p, 'r') as fh2:
@@ -710,99 +744,128 @@ def fasta_to_prot20_sequences(filepath: str | Path, *, strict: bool = True) -> L
             if illegal:
                 raise ValueError(f"Non-canonical residues {sorted(illegal)} present in FASTA; expected only PROT_20: {PROT_20}")
 
-        aln = sanitize_alignment(aln)
-        return alignment_to_base_numpy_sequences(aln, alphabet=PROT_20)
-    except Exception:
-        # Fallback path: manually parse FASTA
-        legal = set(PROT_20)
-        gap_aliases = {'-', '.'}
-        names: list[str] = []
-        seqs_raw: list[str] = []
-        current_name = None
-        current_seq = []
-        with open(p, 'r') as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                if line.startswith('>'):
-                    if current_name is not None:
-                        names.append(current_name)
-                        seqs_raw.append(''.join(current_seq))
-                    current_name = line[1:].strip() or 'seq'
-                    current_seq = []
-                else:
-                    current_seq.append(line)
-            # finalize last
-            if current_name is not None:
-                names.append(current_name)
-                seqs_raw.append(''.join(current_seq))
+        aln = sanitize_alignment(aln_loaded)
+        aligned_sequences: Optional[List[BaseNumpySequence]] = _aligned_sequences_from(aln) if return_gapped else None
+        try:
+            sequences = alignment_to_base_numpy_sequences(aln, alphabet=PROT_20)
+        except ValueError as err:
+            if "All alignment columns contain gaps" not in str(err):
+                raise
+            sequences = _ungapped_sequences_from(aln)
 
-        # Attempt to recover an alignment by replacing illegal residues with gaps
-        if seqs_raw:
-            lengths = {len(s) for s in seqs_raw}
-            if len(lengths) == 1 and next(iter(lengths)) > 0:
-                illegal: set[str] = set()
+        if return_gapped:
+            return sequences, aligned_sequences
+        return sequences
 
-                used_names: set[str] = set()
+    # Fallback path: manually parse FASTA
+    legal = set(PROT_20)
+    gap_aliases = {'-', '.'}
+    names: list[str] = []
+    seqs_raw: list[str] = []
+    current_name = None
+    current_seq = []
+    with open(p, 'r') as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith('>'):
+                if current_name is not None:
+                    names.append(current_name)
+                    seqs_raw.append(''.join(current_seq))
+                current_name = line[1:].strip() or 'seq'
+                current_seq = []
+            else:
+                current_seq.append(line)
+        # finalize last
+        if current_name is not None:
+            names.append(current_name)
+            seqs_raw.append(''.join(current_seq))
 
-                def _unique_name(name: str) -> str:
-                    base = name.strip() or 'seq'
-                    base = base.replace(' ', '_')
-                    if base not in used_names:
-                        used_names.add(base)
-                        return base
-                    i = 1
-                    while f"{base}_{i}" in used_names:
-                        i += 1
-                    unique = f"{base}_{i}"
-                    used_names.add(unique)
-                    return unique
+    # Attempt to recover an alignment by replacing illegal residues with gaps
+    if return_gapped and seqs_raw:
+        lengths = {len(s) for s in seqs_raw}
+        if len(lengths) == 1 and next(iter(lengths)) > 0:
+            illegal: set[str] = set()
 
-                seq_dict: Dict[str, str] = {}
-                for name, s in zip(names, seqs_raw):
-                    cleaned_chars = []
-                    for ch in s:
-                        up = ch.upper()
-                        if up in legal:
-                            cleaned_chars.append(up)
-                        elif up in gap_aliases:
-                            cleaned_chars.append('-')
-                        else:
-                            illegal.add(up)
-                            cleaned_chars.append('-')
+            used_names: set[str] = set()
+
+            def _unique_name(name: str) -> str:
+                base = name.strip() or 'seq'
+                base = base.replace(' ', '_')
+                if base not in used_names:
+                    used_names.add(base)
+                    return base
+                i = 1
+                while f"{base}_{i}" in used_names:
+                    i += 1
+                unique = f"{base}_{i}"
+                used_names.add(unique)
+                return unique
+
+            seq_dict: Dict[str, str] = {}
+            for name, s in zip(names, seqs_raw):
+                cleaned_chars = []
+                has_residue = False
+                for ch in s:
+                    up = ch.upper()
+                    if up in legal:
+                        cleaned_chars.append(up)
+                        has_residue = True
+                    elif up in gap_aliases:
+                        cleaned_chars.append('-')
+                    else:
+                        illegal.add(up)
+                        cleaned_chars.append('-')
+                if has_residue:
                     seq_dict[_unique_name(name)] = ''.join(cleaned_chars)
 
-                if strict and illegal:
-                    raise ValueError(
-                        f"Non-canonical residues {sorted(illegal)} present in FASTA; expected only PROT_20: {PROT_20}"
-                    )
+            if strict and illegal:
+                raise ValueError(
+                    f"Non-canonical residues {sorted(illegal)} present in FASTA; expected only PROT_20: {PROT_20}"
+                )
 
-                if seq_dict and illegal:
+            if seq_dict:
+                try:
                     aln = make_aligned_seqs(seq_dict, moltype='protein')
                     aln = sanitize_alignment(aln)
-                    return alignment_to_base_numpy_sequences(aln, alphabet=PROT_20)
+                    aligned_sequences = _aligned_sequences_from(aln) if return_gapped else None
+                    try:
+                        sequences = alignment_to_base_numpy_sequences(aln, alphabet=PROT_20)
+                    except ValueError as err:
+                        if "All alignment columns contain gaps" not in str(err):
+                            raise
+                        sequences = _ungapped_sequences_from(aln)
+                    if return_gapped:
+                        return sequences, aligned_sequences
+                    return sequences
+                except ValueError as err:
+                    if "All alignment columns contain gaps" not in str(err):
+                        raise
+                    # otherwise fall through to unaligned handling
 
-        # Treat as unaligned: delete illegal symbols if strict=False
-        legal = set(PROT_20)
+    # Treat as unaligned: delete illegal symbols if strict=False
+    legal = set(PROT_20)
 
-        out: list[BaseNumpySequence] = []
-        for name, s in zip(names, seqs_raw):
-            # strip gaps/dots and uppercase
-            s_str = s.replace('-', '').replace('.', '').upper()
-            if strict:
-                bad = {ch for ch in set(s_str) if ch not in legal}
-                if bad:
-                    raise ValueError(f"Non-canonical residues {sorted(bad)} found in sequence {name!r}; expected only PROT_20: {PROT_20}")
-                s_filtered = s_str
-            else:
-                # delete any illegal residues (e.g. X, B, Z, etc.)
-                s_filtered = ''.join(ch for ch in s_str if ch in legal)
-            # if sequence becomes empty after filtering, skip it
-            if not s_filtered:
-                continue
-            out.append(BaseNumpySequence.from_string(s_filtered, alphabet=PROT_20, moltype='protein', sequence_id=name))
-        return out
+    out: list[BaseNumpySequence] = []
+    for name, s in zip(names, seqs_raw):
+        # strip gaps/dots and uppercase
+        s_str = s.replace('-', '').replace('.', '').upper()
+        if strict:
+            bad = {ch for ch in set(s_str) if ch not in legal}
+            if bad:
+                raise ValueError(f"Non-canonical residues {sorted(bad)} found in sequence {name!r}; expected only PROT_20: {PROT_20}")
+            s_filtered = s_str
+        else:
+            # delete any illegal residues (e.g. X, B, Z, etc.)
+            s_filtered = ''.join(ch for ch in s_str if ch in legal)
+        # if sequence becomes empty after filtering, skip it
+        if not s_filtered:
+            continue
+        out.append(BaseNumpySequence.from_string(s_filtered, alphabet=PROT_20, moltype='protein', sequence_id=name))
+    if return_gapped:
+        return out, None
+    return out
 
 def moving_window_alignment(alignment: Alignment,
                             window_size: int,
