@@ -89,6 +89,17 @@ def test_fasta_to_prot20_sequences_alignment_mixed_ambiguous(tmp_text):
     assert len(seqs) == 1
     assert ''.join(seqs[0].to_array()) == "ACD"
 
+def test_fasta_to_prot20_sequences_gapped_alignment_all_gap_columns(tmp_text):
+    p = tmp_text(
+        "all_gap_cols.fasta",
+        ">a\nA-\n>b\n-A\n",
+    )
+    seqs, aligned = fasta_to_prot20_sequences(p, strict=False, return_gapped=True)
+    assert len(seqs) == 2
+    assert {''.join(seq.to_array()) for seq in seqs} == {"A"}
+    assert aligned is not None
+    assert {len(s) for s in aligned} == {2}
+
 def test_fasta_to_prot20_sequences_return_gapped_unaligned(tmp_text):
     p = tmp_text(
         "unaligned.fasta",
