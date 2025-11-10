@@ -62,7 +62,10 @@ def _categorical_colours(
         return colours, legend
 
     uniques = [val for val in dict.fromkeys(values)]
-    cmap_obj = plt.get_cmap(cmap, len(uniques) if uniques else 1)
+    try:
+        cmap_obj = plt.get_cmap(cmap, len(uniques) if uniques else 1)
+    except ValueError:
+        cmap_obj = plt.get_cmap(str(cmap).lower(), len(uniques) if uniques else 1)
     colour_map = {val: _to_rgba_tuple(cmap_obj(idx)) for idx, val in enumerate(uniques)}
     colours = [colour_map[val] for val in values]
     legend = [(str(label), colour_map[label]) for label in uniques]

@@ -9,6 +9,7 @@ import numpy as np
 from ..core.landscape import FitnessLandscape
 from ..core.annotation import AnnotationLayer
 from ..core.fitness import BaseFitnessLayer
+from ..transforms.eigenmode import eigenmode_decomposition
 from .dataset import VisualizationDataset
 from .registry import AnnotationRegistry, PaletteStore, AnnotationDescriptor
 
@@ -182,12 +183,14 @@ class VisualizationDatasetBuilder:
             return self._graph_layout(nodes, params)
         if name == "embedding":
             return self._embedding_layout(nodes)
+        if name == "diffusion":
+            return self._diffusion_layout(nodes, params)
         if name == "external":
             if not external_positions:
                 raise ValueError("external_positions must be provided for external layout.")
             return self._external_layout(nodes, external_positions)
 
-        raise ValueError(f"Unknown layout '{name}'. Supported: graph, embedding, external.")
+        raise ValueError(f"Unknown layout '{name}'. Supported: graph, embedding, diffusion, external.")
 
     def _graph_layout(self, nodes: List[Hashable], params: Mapping[str, Any]) -> np.ndarray:
         subgraph = self.landscape.graph.subgraph(nodes) if self.landscape.graph else nx.Graph()
@@ -211,6 +214,40 @@ class VisualizationDatasetBuilder:
         if coords_array.shape[1] < 2:
             raise ValueError("Embeddings must have at least two dimensions for plotting.")
         return coords_array[:, :2]
+
+    def _diffusion_layout(self, nodes: List[Hashable], params: Mapping[str, Any]) -> np.ndarray:
+        graph = self.landscape.graph
+        if graph is None:
+            raise ValueError("Landscape does not contain a graph; cannot use 'diffusion' layout.")
+        total_nodes = graph.number_of_nodes()
+        if total_nodes == 0:
+            return np.zeros((len(nodes), 2), dtype=float)
+
+        dims = int(params.get("dimensions", params.get("components", params.get("k", 2))))
+        dims = max(dims, 1)
+
+        matrix_type = "transition"
+        if total_nodes <= dims + 1:
+            eigvals, eigvecs = eigenmode_decomposition(graph, k=None, matrix=matrix_type)
+        else:
+            eigvals, eigvecs = eigenmode_decomposition(graph, k=dims + 1, matrix=matrix_type)
+        if eigvecs.shape[1] <= 1:
+            coords_full = np.zeros((total_nodes, dims), dtype=float)
+        else:
+            components = eigvecs[:, 1 : min(eigvecs.shape[1], dims + 1)]
+            if components.shape[1] < dims:
+                padding = np.zeros((components.shape[0], dims - components.shape[1]), dtype=float)
+                components = np.hstack([components, padding])
+            coords_full = components[:, :dims]
+
+        node_to_index = {node: i for i, node in enumerate(self.landscape._node_order)}  # type: ignore[attr-defined]
+        coords: list[np.ndarray] = []
+        for node in nodes:
+            idx = node_to_index.get(node)
+            if idx is None:
+                raise KeyError(f"Node '{node}' not found when building diffusion layout.")
+            coords.append(coords_full[idx])
+        return np.asarray(coords, dtype=float)
 
     def _external_layout(
         self,

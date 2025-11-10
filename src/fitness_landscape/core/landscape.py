@@ -37,6 +37,7 @@ from pathlib import Path
 import warnings
 from .._const import PROT_20, ALPHABET_21
 from ..phylo.phylogenetic_asr import ASRConstructor
+from xml.etree.ElementTree import Element, SubElement, ElementTree
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..visualization import LayoutSpec
@@ -1220,6 +1221,114 @@ class FitnessLandscape:
             **matplotlib_kwargs,
         )
         return figure
+
+    def export_xgmml(
+        self,
+        filepath: str | Path,
+        *,
+        annotation_layers: list[str] | None = None,
+        include_fitness: bool = True,
+        include_annotations: bool = True,
+    ) -> Path:
+        """
+        Export the current landscape to an XGMML file for Cytoscape.
+
+        Parameters
+        ----------
+        filepath : str | Path
+            Path to write the XGMML document.
+        annotation_layers : list[str], optional
+            Annotation layers to include; defaults to all layers.
+        include_fitness : bool, default=True
+            Whether to attach scalar values for each fitness layer.
+        include_annotations : bool, default=True
+            Whether to attach annotation columns.
+        """
+        if self.graph is None:
+            raise ValueError("Landscape has no graph; cannot export XGMML.")
+
+        filepath = Path(filepath)
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+
+        directed = isinstance(self.graph, nx.DiGraph)
+        root = Element(
+            "graph",
+            attrib={
+                "label": getattr(self, "name", "FitnessLandscape"),
+                "directed": "1" if directed else "0",
+                "xmlns": "http://www.cs.rpi.edu/XGMML",
+            },
+        )
+
+        selected_layers = (
+            annotation_layers if annotation_layers is not None else list(self.annotation_layers.keys())
+        )
+
+        seq_index = {
+            tuple(seq.to_array()): idx
+            for idx, seq in enumerate(self.sequences)
+        }
+
+        def _write_attribute(parent, name, value):
+            if value is None:
+                return
+            if isinstance(value, bool):
+                attr_type = "boolean"
+            elif isinstance(value, (int, np.integer)):
+                attr_type = "integer"
+            elif isinstance(value, (float, np.floating)):
+                attr_type = "real"
+            else:
+                attr_type = "string"
+                value = str(value)
+            SubElement(parent, "att", attrib={"name": name, "value": str(value), "type": attr_type})
+
+        fitness_cache: dict[str, np.ndarray] = {}
+        if include_fitness:
+            for name, layer in self.fitness_layers.items():
+                fitness_cache[name] = layer.to_scalar()
+
+        for node in self.graph.nodes():
+            node_el = SubElement(root, "node", attrib={"id": str(node), "label": str(node)})
+            seq = self.graph.nodes[node].get("sequence")
+            seq_idx = None
+            if seq is not None:
+                arr = seq.to_array()
+                _write_attribute(node_el, "sequence", "".join(map(str, arr)))
+                _write_attribute(node_el, "sequence_id", getattr(seq, "id", None))
+                seq_idx = seq_index.get(tuple(arr))
+
+            if include_fitness and seq_idx is not None:
+                for name, values in fitness_cache.items():
+                    if seq_idx < len(values):
+                        _write_attribute(node_el, f"fitness::{name}", float(values[seq_idx]))
+
+            if include_annotations and seq_idx is not None:
+                for layer_name in selected_layers:
+                    layer = self.annotation_layers.get(layer_name)
+                    if layer is None:
+                        continue
+                    record = layer.get_record(seq_idx)
+                    for field, value in record.items():
+                        if value is None:
+                            continue
+                        if isinstance(value, float) and np.isnan(value):
+                            continue
+                        _write_attribute(node_el, f"{layer_name}::{field}", value)
+
+        for edge_id, (source, target, data) in enumerate(self.graph.edges(data=True)):
+            edge_el = SubElement(
+                root,
+                "edge",
+                attrib={"id": str(edge_id), "source": str(source), "target": str(target)},
+            )
+            for key, value in data.items():
+                if key == "sequence":
+                    continue
+                _write_attribute(edge_el, key, value)
+
+        ElementTree(root).write(filepath, encoding="UTF-8", xml_declaration=True)
+        return filepath
 
 
     def to_graph_tensor(self, *, tokenizer: Any | str | None = "facebook/esm2_t6_8M_UR50D") -> 'Data':

@@ -7,6 +7,7 @@ import networkx as nx
 import numpy as np
 import matplotlib.pyplot as plt
 import pytest
+import xml.etree.ElementTree as ET
 
 from fitness_landscape.core.sequence import BaseNumpySequence
 from fitness_landscape.core.fitness import NumericFitness
@@ -160,6 +161,13 @@ def test_plot_matplotlib_with_numeric_fitness_only():
     plt.close(fig)
 
 
+def test_diffusion_layout_positions():
+    landscape = _build_simple_landscape()
+    builder = VisualizationDatasetBuilder(landscape)
+    dataset = builder.build(layout=LayoutSpec("diffusion", {"dimensions": 2}))
+    assert dataset.positions.shape == (3, 2)
+
+
 def test_landscape_plot_method_matplotlib():
     landscape = _build_simple_landscape()
     fig, ax = landscape.plot(interactive=False, show=False)
@@ -172,3 +180,21 @@ def test_landscape_plot_method_plotly():
     landscape = _build_simple_landscape()
     fig = landscape.plot(interactive=True, show=False)
     assert fig.data
+
+
+def test_export_xgmml_includes_annotations(tmp_path):
+    landscape = _build_simple_landscape()
+    path = tmp_path / "graph.xgmml"
+    landscape.export_xgmml(path, annotation_layers=["taxonomy"])
+    assert path.exists()
+    ns = {"x": "http://www.cs.rpi.edu/XGMML"}
+    tree = ET.parse(path)
+    root = tree.getroot()
+    nodes = root.findall("x:node", ns)
+    assert len(nodes) == 3
+    attr_map = {
+        att.get("name"): att.get("value")
+        for att in nodes[0].findall("x:att", ns)
+    }
+    assert attr_map["taxonomy::superkingdom"] in {"A", "B"}
+    assert "fitness::score" in attr_map
