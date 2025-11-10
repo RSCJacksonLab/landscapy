@@ -1,0 +1,265 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Dict, Hashable, Iterable, List, Mapping, Optional, Sequence
+
+import networkx as nx
+import numpy as np
+
+from ..core.landscape import FitnessLandscape
+from ..core.annotation import AnnotationLayer
+from ..core.fitness import BaseFitnessLayer
+from ..transforms.eigenmode import eigenmode_decomposition
+from .dataset import VisualizationDataset
+from .registry import AnnotationRegistry, PaletteStore, AnnotationDescriptor
+
+
+@dataclass(slots=True)
+class LayoutSpec:
+    """
+    Specification for building node coordinates.
+    """
+
+    name: str
+    parameters: Dict[str, Any] = field(default_factory=dict)
+
+
+class VisualizationDatasetBuilder:
+    """
+    Build :class:`VisualizationDataset` instances from a :class:`FitnessLandscape`.
+    """
+
+    def __init__(
+        self,
+        landscape: FitnessLandscape,
+        *,
+        annotation_registry: AnnotationRegistry | None = None,
+    ) -> None:
+        self.landscape = landscape
+        self.annotation_registry = annotation_registry or AnnotationRegistry()
+
+    def build(
+        self,
+        *,
+        layout: LayoutSpec | str = "graph",
+        fitness_layer: str | None = None,
+        annotation: str | None = None,
+        query: Mapping[str, Any] | None = None,
+        include_edges: bool = True,
+        palette_store: PaletteStore | None = None,
+        external_positions: Mapping[Hashable, Sequence[float]] | None = None,
+    ) -> VisualizationDataset:
+        layout_spec = self._normalise_layout(layout)
+
+        indices = self._resolve_indices(annotation=annotation, query=query)
+        nodes = [self._node_for_index(i) for i in indices]
+        node_set = set(nodes)
+
+        fitness_layer_obj = self._resolve_fitness_layer(fitness_layer)
+        fitness_values = (
+            fitness_layer_obj.to_scalar()[indices] if fitness_layer_obj is not None else None
+        )
+        fitness_name = fitness_layer_obj.name if fitness_layer_obj is not None else None
+
+        annotation_layer, descriptor = self._resolve_annotation_layer(annotation)
+        annotation_values = (
+            self._collect_annotations(annotation_layer, indices) if annotation_layer else {}
+        )
+
+        positions = self._build_positions(
+            nodes,
+            layout_spec,
+            indices=indices,
+            external_positions=external_positions,
+        )
+
+        edges: Iterable[tuple[Hashable, Hashable]]
+        if include_edges and self.landscape.graph is not None:
+            edges = [
+                (u, v)
+                for (u, v) in self.landscape.graph.edges()
+                if u in node_set and v in node_set
+            ]
+        else:
+            edges = []
+
+        palettes: Dict[str, Any] = {}
+        if descriptor and palette_store is not None and descriptor.palette_key:
+            palette = palette_store.get_palette(descriptor.palette_key)
+            if palette is not None:
+                palettes[descriptor.palette_key] = palette
+
+        metadata = {
+            "layout": layout_spec.name,
+            "layout_parameters": dict(layout_spec.parameters),
+            "query": dict(query) if query else None,
+        }
+
+        return VisualizationDataset(
+            nodes=nodes,
+            positions=positions,
+            edges=edges,
+            fitness_name=fitness_name,
+            fitness_values=fitness_values,
+            annotation_name=annotation_layer.name if annotation_layer else None,
+            annotation_values=annotation_values,
+            palettes=palettes,
+            metadata=metadata,
+        )
+
+    def _normalise_layout(self, layout: LayoutSpec | str) -> LayoutSpec:
+        if isinstance(layout, LayoutSpec):
+            return layout
+        if not isinstance(layout, str):
+            raise TypeError("layout must be a string or LayoutSpec.")
+        return LayoutSpec(name=layout)
+
+    def _resolve_indices(
+        self,
+        *,
+        annotation: str | None,
+        query: Mapping[str, Any] | None,
+    ) -> np.ndarray:
+        if query and not annotation:
+            raise ValueError("Annotation name must be provided when using query filters.")
+
+        if query and annotation:
+            result = self.landscape.query_annotations(annotation, query)
+            return np.asarray(result.sequence_indices, dtype=int)
+
+        return np.arange(len(self.landscape.sequences))
+
+    def _node_for_index(self, index: int) -> Hashable:
+        try:
+            return self.landscape._nodes_by_index[index]  # type: ignore[attr-defined]
+        except AttributeError as exc:  # pragma: no cover - defensive fallback
+            raise RuntimeError("Landscape does not expose node index mapping.") from exc
+
+    def _resolve_fitness_layer(self, name: str | None) -> BaseFitnessLayer | None:
+        if name is None:
+            active = self.landscape.active_layer_name
+            if active is None:
+                return None
+            return self.landscape.get_layer(active)
+        return self.landscape.get_layer(name)
+
+    def _resolve_annotation_layer(
+        self, name: str | None
+    ) -> tuple[AnnotationLayer | None, AnnotationDescriptor | None]:
+        if name is None:
+            return None, None
+        if name in self.annotation_registry:
+            descriptor = self.annotation_registry.get(name)
+            return descriptor.layer, descriptor
+        layer = self.landscape.get_annotation_layer(name)
+        descriptor = self.annotation_registry.register(name, layer, source="landscape")
+        return layer, descriptor
+
+    def _collect_annotations(
+        self,
+        layer: AnnotationLayer,
+        indices: np.ndarray,
+    ) -> Dict[str, List[Any]]:
+        columns = layer.columns
+        data: Dict[str, List[Any]] = {c: [] for c in columns}
+        for idx in indices.tolist():
+            record = layer.get_record(int(idx))
+            for col in columns:
+                data[col].append(record.get(col))
+        return data
+
+    def _build_positions(
+        self,
+        nodes: List[Hashable],
+        layout_spec: LayoutSpec,
+        *,
+        indices: np.ndarray,
+        external_positions: Mapping[Hashable, Sequence[float]] | None,
+    ) -> np.ndarray:
+        name = layout_spec.name
+        params = layout_spec.parameters
+
+        if name == "graph":
+            return self._graph_layout(nodes, params)
+        if name == "embedding":
+            return self._embedding_layout(nodes)
+        if name == "diffusion":
+            return self._diffusion_layout(nodes, params)
+        if name == "external":
+            if not external_positions:
+                raise ValueError("external_positions must be provided for external layout.")
+            return self._external_layout(nodes, external_positions)
+
+        raise ValueError(f"Unknown layout '{name}'. Supported: graph, embedding, diffusion, external.")
+
+    def _graph_layout(self, nodes: List[Hashable], params: Mapping[str, Any]) -> np.ndarray:
+        subgraph = self.landscape.graph.subgraph(nodes) if self.landscape.graph else nx.Graph()
+        layout_params = dict(params)
+        seed = layout_params.pop("seed", 0)
+        positions = nx.spring_layout(subgraph, seed=seed, **layout_params)
+        return np.array([positions[node] for node in nodes], dtype=float)
+
+    def _embedding_layout(self, nodes: List[Hashable]) -> np.ndarray:
+        embeddings = getattr(self.landscape, "embeddings", None)
+        if embeddings is None:
+            raise ValueError("Landscape does not contain embeddings; cannot use 'embedding' layout.")
+        node_to_index = {node: i for i, node in enumerate(self.landscape._node_order)}  # type: ignore[attr-defined]
+        coords = []
+        for node in nodes:
+            idx = node_to_index.get(node)
+            if idx is None:
+                raise KeyError(f"Node '{node}' not found in embedding matrix.")
+            coords.append(embeddings[idx][:2])
+        coords_array = np.asarray(coords, dtype=float)
+        if coords_array.shape[1] < 2:
+            raise ValueError("Embeddings must have at least two dimensions for plotting.")
+        return coords_array[:, :2]
+
+    def _diffusion_layout(self, nodes: List[Hashable], params: Mapping[str, Any]) -> np.ndarray:
+        graph = self.landscape.graph
+        if graph is None:
+            raise ValueError("Landscape does not contain a graph; cannot use 'diffusion' layout.")
+        total_nodes = graph.number_of_nodes()
+        if total_nodes == 0:
+            return np.zeros((len(nodes), 2), dtype=float)
+
+        dims = int(params.get("dimensions", params.get("components", params.get("k", 2))))
+        dims = max(dims, 1)
+
+        matrix_type = "transition"
+        if total_nodes <= dims + 1:
+            eigvals, eigvecs = eigenmode_decomposition(graph, k=None, matrix=matrix_type)
+        else:
+            eigvals, eigvecs = eigenmode_decomposition(graph, k=dims + 1, matrix=matrix_type)
+        if eigvecs.shape[1] <= 1:
+            coords_full = np.zeros((total_nodes, dims), dtype=float)
+        else:
+            components = eigvecs[:, 1 : min(eigvecs.shape[1], dims + 1)]
+            if components.shape[1] < dims:
+                padding = np.zeros((components.shape[0], dims - components.shape[1]), dtype=float)
+                components = np.hstack([components, padding])
+            coords_full = components[:, :dims]
+
+        node_to_index = {node: i for i, node in enumerate(self.landscape._node_order)}  # type: ignore[attr-defined]
+        coords: list[np.ndarray] = []
+        for node in nodes:
+            idx = node_to_index.get(node)
+            if idx is None:
+                raise KeyError(f"Node '{node}' not found when building diffusion layout.")
+            coords.append(coords_full[idx])
+        return np.asarray(coords, dtype=float)
+
+    def _external_layout(
+        self,
+        nodes: List[Hashable],
+        external_positions: Mapping[Hashable, Sequence[float]],
+    ) -> np.ndarray:
+        coords = []
+        for node in nodes:
+            if node not in external_positions:
+                raise KeyError(f"Node '{node}' missing from external positions.")
+            pos = external_positions[node]
+            if len(pos) < 2:
+                raise ValueError("External positions must provide at least two dimensions.")
+            coords.append(pos[:2])
+        return np.asarray(coords, dtype=float)
