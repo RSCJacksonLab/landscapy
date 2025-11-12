@@ -58,7 +58,8 @@ from .epistasis import (
 from .graph import (
     graph_properties,
     calculate_ruggedness_local_optima,
-    graph_spectral_analysis
+    graph_spectral_analysis,
+    resistance_distance_matrix,
 )
 
 from .random_walk import (
@@ -86,6 +87,7 @@ __all__ = [
     'calculate_epistasis_reference_free',
     'graph_properties',
     'calculate_ruggedness_local_optima',
+    'resistance_distance_matrix',
     'calculate_ruggedness_autocorrelation_analytical',
     'calculate_ruggedness_autocorrelation_stochastic',
     'compute_persistent_homology',

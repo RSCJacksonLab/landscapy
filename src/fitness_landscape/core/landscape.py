@@ -1222,6 +1222,100 @@ class FitnessLandscape:
         )
         return figure
 
+    def get_components(self) -> list["FitnessLandscape"]:
+        """
+        Split the landscape into connected components.
+
+        Returns
+        -------
+        List[FitnessLandscape]
+            Landscapes corresponding to each connected component, ordered
+            from largest to smallest. All fitness and annotation layers are
+            restricted to the sequences present in each component.
+        """
+        if self.graph is None:
+            return [self]
+
+        if isinstance(self.graph, nx.DiGraph):
+            components_iter = nx.weakly_connected_components(self.graph)
+        else:
+            components_iter = nx.connected_components(self.graph)
+
+        components = sorted((set(comp) for comp in components_iter), key=len, reverse=True)
+        node_index_map = {node: idx for idx, node in enumerate(self._node_order)}
+        out: list[FitnessLandscape] = []
+
+        for comp_nodes in components:
+            ordered_nodes = [node for node in self._node_order if node in comp_nodes]
+            comp_indices = [node_index_map[node] for node in ordered_nodes]
+            comp_sequences = [self.sequences[i] for i in comp_indices]
+            comp_graph = self.graph.subgraph(ordered_nodes).copy()
+            comp_fitness = self._subset_fitness_layers(comp_indices)
+            comp_annotations = self._subset_annotation_layers(comp_indices)
+            comp_embeddings = (
+                self.embeddings[comp_indices].copy()
+                if self.embeddings is not None
+                else None
+            )
+
+            out.append(
+                FitnessLandscape(
+                    sequences=comp_sequences,
+                    graph=comp_graph,
+                    fitness_layers=comp_fitness,
+                    annotation_layers=comp_annotations,
+                    embeddings=comp_embeddings,
+                    emb_arr_key=self._emb_arr_key,
+                )
+            )
+
+        return out
+
+    def _subset_fitness_layers(self, indices: list[int]) -> dict[str, BaseFitnessLayer]:
+        subset: dict[str, BaseFitnessLayer] = {}
+        for name, layer in self.fitness_layers.items():
+            metadata = dict(layer.metadata) if getattr(layer, "metadata", None) else None
+            if isinstance(layer, NumericFitness):
+                values = []
+                for idx in indices:
+                    val = layer.get_value(idx)
+                    if isinstance(val, (list, tuple, np.ndarray)):
+                        values.append(list(val))
+                    else:
+                        values.append([val])
+                subset[name] = NumericFitness(name=name, values=values, metadata=metadata)
+            elif isinstance(layer, ProbabilisticCategoricalFitness):
+                probs = layer.probabilities[np.asarray(indices)]
+                subset[name] = ProbabilisticCategoricalFitness(
+                    name=name,
+                    probabilities=probs,
+                    categories=list(layer.categories),
+                    metadata=metadata,
+                )
+            elif isinstance(layer, CategoricalFitness):
+                vals = [layer.get_value(idx) for idx in indices]
+                subset[name] = CategoricalFitness(
+                    name=name,
+                    values=vals,
+                    categories=list(layer.categories),
+                    metadata=metadata,
+                )
+            else:
+                raise TypeError(
+                    f"Unsupported fitness layer type {type(layer).__name__} for component extraction."
+                )
+        return subset
+
+    def _subset_annotation_layers(self, indices: list[int]) -> dict[str, AnnotationLayer]:
+        subset: dict[str, AnnotationLayer] = {}
+        if not self.annotation_layers:
+            return subset
+        for name, layer in self.annotation_layers.items():
+            df = layer.to_dataframe().iloc[indices].reset_index(drop=True)
+            metadata = dict(layer.metadata) if getattr(layer, "metadata", None) else None
+            subset[name] = AnnotationLayer(name=name, data=df, metadata=metadata)
+        return subset
+
     def export_xgmml(
         self,
         filepath: str | Path,

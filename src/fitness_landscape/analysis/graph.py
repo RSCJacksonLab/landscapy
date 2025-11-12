@@ -3,7 +3,9 @@ import numpy as np
 import networkx as nx
 from ..core.landscape import FitnessLandscape
 from ..transforms.eigenmode import eigenmode_decomposition
-from typing import Union, Dict, Literal
+from typing import Union, Dict, Literal, Sequence, Optional, Iterable
+import scipy.sparse as sp
+from scipy.sparse.linalg import splu
 
 def graph_properties(graph: Union[FitnessLandscape, nx.Graph]) -> Dict:
     """
@@ -188,3 +190,146 @@ def graph_spectral_analysis(landscape: FitnessLandscape,
     hist, edges = np.histogram(w, bins=min(20, m))
     out['spectral_density'] = {'histogram': hist, 'bin_edges': edges}
     return out
+
+
+def resistance_distance_matrix(graph: Union[FitnessLandscape, nx.Graph],
+                               nodes: Optional[Sequence] = None,
+                               *,
+                               weight_key: Optional[str] = None,
+                               jitter: float = 1e-10,
+                               sparse_threshold: int = 1000,
+                               weight_epsilon: float = 1e-8,
+                               weight_normalisation: bool = True) -> np.ndarray:
+    """
+    Compute the pairwise effective resistance distances among a subset
+    of nodes in a weighted graph.
+
+    Parameters
+    ----------
+    graph : FitnessLandscape or networkx.Graph
+        Source graph. If a :class:`FitnessLandscape` is provided, its
+        underlying graph is used.
+    nodes : Sequence, optional
+        Optional ordered sequence of nodes to include. Defaults to all
+        nodes present in the graph.
+    weight_key : str, optional
+        Edge attribute representing conductance/weight. When ``None``,
+        edges are treated as unweighted.
+    jitter : float, default=1e-10
+        Diagonal regularisation added when the Laplacian is not full
+        rank to ensure a stable pseudoinverse.
+    weight_epsilon : float, default=1e-8
+        Small positive value added to every edge weight (via an
+        unweighted Laplacian) before factorisation to prevent the sparse
+        solver from encountering zero-weight conductances. This does
+        not modify the underlying graph; it only affects the temporary
+        Laplacian used for resistance calculations.
+    weight_normalisation : bool, default=True
+        If ``True``, rescales the temporary Laplacian so its largest
+        absolute entry is 1.0, improving numerical stability. The final
+        resistance distances are rescaled back so results remain in the
+        original units.
+
+    Returns
+    -------
+    np.ndarray
+        Symmetric matrix ``R`` where ``R[i, j]`` is the effective
+        resistance between ``nodes[i]`` and ``nodes[j]``.
+    """
+    G = graph.graph if isinstance(graph, FitnessLandscape) else graph
+    if G is None:
+        raise ValueError("Graph is required to compute resistance distances.")
+
+    if nodes is None:
+        node_order: Iterable = list(G.nodes())
+    else:
+        node_order = list(nodes)
+
+    if not node_order:
+        return np.zeros((0, 0), dtype=float)
+
+    sub = G.subgraph(node_order)
+    L_sparse = nx.laplacian_matrix(sub, nodelist=list(node_order), weight=weight_key).astype(float)
+    if weight_epsilon:
+        L_unweighted = nx.laplacian_matrix(sub, nodelist=list(node_order), weight=None).astype(float)
+        L_sparse = L_sparse + weight_epsilon * L_unweighted
+
+    norm_factor = 1.0
+    if weight_normalisation and L_sparse.nnz > 0:
+        max_entry = float(np.max(np.abs(L_sparse.data)))
+        if max_entry > 0:
+            norm_factor = max_entry
+            L_sparse = L_sparse / norm_factor
+    n = L_sparse.shape[0]
+    if n == 0:
+        return np.zeros((0, 0), dtype=float)
+
+    if n <= sparse_threshold:
+        L = L_sparse.toarray()
+        if np.linalg.matrix_rank(L) < n - 1:
+            L = L + jitter * np.eye(n)
+        try:
+            L_pinv = np.linalg.pinv(L)
+        except np.linalg.LinAlgError:
+            L = L + jitter * np.eye(n)
+            L_pinv = np.linalg.pinv(L)
+        diag = np.diag(L_pinv)
+        R = diag[:, None] + diag[None, :] - 2.0 * L_pinv
+        R[R < 0] = 0.0
+        return R / norm_factor
+
+    # Sparse path using grounded Laplacian solves
+    if n <= 1:
+        return np.zeros((n, n), dtype=float)
+
+    ground = n - 1
+    keep = list(range(n - 1))
+    L_reduced = L_sparse[keep, :][:, keep].tocsc()
+    if jitter:
+        L_reduced = L_reduced + jitter * sp.eye(n - 1, format="csc")
+    try:
+        solver = splu(L_reduced)
+    except RuntimeError:
+        L = L_sparse.toarray()
+        attempts = 0
+        rank = n
+        while attempts < 5:
+            try:
+                rank = np.linalg.matrix_rank(L)
+                break
+            except np.linalg.LinAlgError:
+                L = L + (10 ** attempts) * jitter * np.eye(n)
+                attempts += 1
+        if rank < n - 1:
+            L = L + jitter * np.eye(n)
+        attempts = 0
+        while attempts < 5:
+            try:
+                L_pinv = np.linalg.pinv(L)
+                break
+            except np.linalg.LinAlgError:
+                L = L + (10 ** attempts) * jitter * np.eye(n)
+                attempts += 1
+        else:
+            raise
+        diag = np.diag(L_pinv)
+        R = diag[:, None] + diag[None, :] - 2.0 * L_pinv
+        R[R < 0] = 0.0
+        return R / norm_factor
+
+    Z = np.zeros((n - 1, n - 1), dtype=float)
+    rhs = np.zeros(n - 1, dtype=float)
+    for idx in range(n - 1):
+        rhs[idx] = 1.0
+        Z[:, idx] = solver.solve(rhs)
+        rhs[idx] = 0.0
+
+    diag = np.diag(Z)
+    R_reduced = diag[:, None] + diag[None, :] - 2.0 * Z
+    R_reduced[R_reduced < 0] = 0.0
+
+    R = np.zeros((n, n), dtype=float)
+    R[: n - 1, : n - 1] = R_reduced
+    R[: n - 1, ground] = diag
+    R[ground, : n - 1] = diag
+    return R / norm_factor

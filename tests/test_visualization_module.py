@@ -11,6 +11,7 @@ import xml.etree.ElementTree as ET
 
 from fitness_landscape.core.sequence import BaseNumpySequence
 from fitness_landscape.core.fitness import NumericFitness
+from fitness_landscape.core.annotation import AnnotationLayer
 from fitness_landscape.core.landscape import FitnessLandscape
 from fitness_landscape.visualization import (
     VisualizationDatasetBuilder,
@@ -23,6 +24,7 @@ from fitness_landscape.visualization.adapters import (
     register_pct_palette,
 )
 from fitness_landscape.visualization.renderers import plot_landscape_matplotlib
+from fitness_landscape.analysis.graph import resistance_distance_matrix
 
 
 def _build_simple_landscape():
@@ -198,3 +200,47 @@ def test_export_xgmml_includes_annotations(tmp_path):
     }
     assert attr_map["taxonomy::superkingdom"] in {"A", "B"}
     assert "fitness::score" in attr_map
+
+
+def test_get_components_preserves_layers():
+    seqs = [
+        BaseNumpySequence([0], sequence_id="s0"),
+        BaseNumpySequence([1], sequence_id="s1"),
+        BaseNumpySequence([2], sequence_id="s2"),
+    ]
+    G = nx.Graph()
+    G.add_node("n0", sequence=seqs[0])
+    G.add_node("n1", sequence=seqs[1])
+    G.add_node("n2", sequence=seqs[2])
+    G.add_edge("n0", "n1")
+
+    fitness = NumericFitness.from_scalars("score", [0.1, 0.2, 0.3])
+    annotations = AnnotationLayer(name="labels", data={"label": ["A", "B", "C"]})
+
+    landscape = FitnessLandscape(
+        sequences=seqs,
+        graph=G,
+        fitness_layers={"score": fitness},
+        annotation_layers={"labels": annotations},
+    )
+
+    components = landscape.get_components()
+    assert len(components) == 2
+    assert components[0].graph.number_of_nodes() == 2
+    assert components[1].graph.number_of_nodes() == 1
+
+    comp0_scores = components[0].fitness_layers["score"].to_scalar()
+    np.testing.assert_allclose(comp0_scores, np.array([0.1, 0.2]))
+
+    comp1_scores = components[1].fitness_layers["score"].to_scalar()
+    np.testing.assert_allclose(comp1_scores, np.array([0.3]))
+
+    labels = components[1].annotation_layers["labels"].to_dataframe()["label"].tolist()
+    assert labels == ["C"]
+
+
+def test_resistance_distance_matrix_sparse_switch():
+    G = nx.path_graph(4)
+    dense = resistance_distance_matrix(G, sparse_threshold=1000)
+    sparse = resistance_distance_matrix(G, sparse_threshold=1)
+    np.testing.assert_allclose(dense, sparse, atol=1e-8)
