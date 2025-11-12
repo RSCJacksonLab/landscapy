@@ -19,6 +19,7 @@ from scipy.optimize import linear_sum_assignment
 from ..graph_matching import isorank_with_features
 from ..utils import _compute_embeddings_from_sequences, geodesic_distance_matrix
 from ..core.sequence import BaseNumpySequence
+from .graph import resistance_distance_matrix
 
 
 def _edge_set(G: nx.Graph) -> set:
@@ -868,29 +869,6 @@ def _safe_spearman(x: np.ndarray, y: np.ndarray) -> float:
     rho, _ = spearmanr(x[mask], y[mask])
     return float(rho)
 
-def _resistance_distance_matrix(G: nx.Graph,
-                                node_order: Sequence,
-                                weight_key: Optional[str],
-                                jitter: float = 1e-10) -> np.ndarray:
-    if not node_order:
-        return np.zeros((0, 0), dtype=float)
-    sub = G.subgraph(node_order)
-    L = nx.laplacian_matrix(sub, nodelist=list(node_order), weight=weight_key).astype(float).toarray()
-    n = L.shape[0]
-    if n == 0:
-        return np.zeros((0, 0), dtype=float)
-    if np.linalg.matrix_rank(L) < n - 1:
-        L = L + jitter * np.eye(n)
-    try:
-        L_pinv = np.linalg.pinv(L)
-    except np.linalg.LinAlgError:
-        L = L + jitter * np.eye(n)
-        L_pinv = np.linalg.pinv(L)
-    diag = np.diag(L_pinv)
-    R = diag[:, None] + diag[None, :] - 2.0 * L_pinv
-    R[R < 0] = 0.0
-    return R
-
 def _mutual_topk_from_weighted(G: nx.Graph,
                                node_order: Sequence,
                                k: int,
@@ -1115,8 +1093,8 @@ def compare_density_matched_geometry_to_phylogeny(diffusion_graph: Union[Fitness
         diff_equal = _mutual_topk_from_weighted(diff_G, diff_nodes, k_eval, diffusion_weight_key)
         knn_equal = _prune_to_degree_k_unweighted(knn_G, knn_nodes, k_eval, knn_weight_key)
 
-        R_diff = _resistance_distance_matrix(diff_equal, diff_nodes, resistance_weight_key)
-        R_knn = _resistance_distance_matrix(knn_equal, knn_nodes, resistance_weight_key)
+        R_diff = resistance_distance_matrix(diff_equal, diff_nodes, weight_key=resistance_weight_key)
+        R_knn = resistance_distance_matrix(knn_equal, knn_nodes, weight_key=resistance_weight_key)
 
         rho_diff = _safe_spearman(tree_upper, _upper_triangular_values(R_diff))
         rho_knn = _safe_spearman(tree_upper, _upper_triangular_values(R_knn))
