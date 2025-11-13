@@ -1,7 +1,7 @@
 import math
 import numpy as np
 import networkx as nx
-from typing import List, Union, Optional, Tuple, Dict, Sequence, Callable
+from typing import List, Union, Optional, Tuple, Dict, Sequence, Callable, Literal
 import torch
 from scipy import sparse as sp
 from scipy.spatial import cKDTree, distance_matrix
@@ -222,10 +222,14 @@ def geodesic_distance_matrix(G: Union['FitnessLandscape', nx.Graph],
     return D, node_list
 
 
-def _compute_embeddings_from_sequences(sequences: List[BaseNumpySequence],
-                                       model_name: str = 'facebook/esm2_t6_8M_UR50D',
-                                       device: str = None,
-                                       batch_size: int = 64) -> np.ndarray:
+def _compute_embeddings_from_sequences(
+    sequences: List[BaseNumpySequence],
+    model_name: str = 'facebook/esm2_t6_8M_UR50D',
+    device: str = None,
+    batch_size: int = 64,
+    *,
+    embedding_mode: Literal["hard", "soft"] = "hard",
+) -> np.ndarray:
     """
     Function to compute soft node embeddings from a list of sequnce
     objects. 
@@ -241,37 +245,57 @@ def _compute_embeddings_from_sequences(sequences: List[BaseNumpySequence],
     batch_size : int, default=`64`
         The batch size. 
     
+    embedding_mode : {'hard', 'soft'}, default=`"hard"`
+        Whether to embed discrete (hard) sequences via token ids or to
+        pass relaxed posteriors/one-hot encodings through the PLM.
+    
     Returns
     -------
     embeddings : np.ndarray
         Array of embedded (soft) sequences.
     """
+
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    from .embedding.soft_embedding import ESMEmbedder
+    embedding_mode = embedding_mode.lower()
+    if embedding_mode not in {"hard", "soft"}:
+        raise ValueError("embedding_mode must be 'hard' or 'soft'.")
+
+    if embedding_mode == "hard":
+        from .embedding.hard_embedding import ESMEmbedder as HardESMEmbedder
+
+        def _to_text(seq: BaseNumpySequence) -> str:
+            symbols = []
+            for sym in seq.to_array():
+                token = str(sym)
+                symbols.append("-" if token == "gap" else token)
+            return "".join(symbols)
+
+        embedder = HardESMEmbedder(
+            model_name=model_name,
+            device=device,
+            batch_size=batch_size,
+        )
+        sequences_to_embed = [_to_text(seq) for seq in sequences]
+        return embedder.embed_relaxed_seqs(sequences_to_embed, batch_size=batch_size)
+
+    from .embedding.soft_embedding import ESMEmbedder as SoftESMEmbedder
 
     ohe_arrays = []
     for seq in sequences:
         if isinstance(seq, SoftSequence):
-
-            # For SoftSequence, the posterior is the OHE
+            # For SoftSequence, the posterior is the relaxed encoding
             ohe_arrays.append(seq.posterior)
         else:
-
-            # For standard sequences, generate the OHE
             ohe_arrays.append(seq.to_one_hot())
-    
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    embedder = ESMEmbedder(model_name=model_name,
-                           device=device,
-                           batch_size=batch_size)
-    
-    embeddings = embedder.embed_relaxed_seqs(
-        sequences=ohe_arrays
-        )
-    
-    return embeddings
+
+    embedder = SoftESMEmbedder(
+        model_name=model_name,
+        device=device,
+        batch_size=batch_size,
+    )
+    return embedder.embed_relaxed_seqs(ohe_arrays, batch_size=batch_size)
 
 def make_latent_geometric_graph_connected(n_latent: int = 120,
                                           d_target: int = 4,

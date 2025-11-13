@@ -1315,9 +1315,10 @@ def test_landscape_build_attach_embeddings_toggle(graph_type, clustered_data):
         **ctor_kwargs
     )
     if graph_type in {"tda", "diffusion"}:
-        assert fl.embeddings is not None
+        assert "ohe" in fl.embeddings
+        assert fl.embeddings["ohe"].shape[0] == len(seqs)
     else:
-        assert fl.embeddings is None
+        assert fl.embeddings == {}
 
 def test_landscape_build_phylogenetic_requires_alignment(phylo_test_data):
     with pytest.raises(ValueError, match="from_alignment"):
@@ -1934,14 +1935,98 @@ def test_build_embedding_graph_auto_ohe_and_x_tensor_shape():
         n_components=1
     )
     # Embeddings should be computed/attached
-    assert L.embeddings is not None
-    assert isinstance(L.embeddings, np.ndarray)
+    assert "ohe" in L.embeddings
+    assert isinstance(L.embeddings["ohe"], np.ndarray)
     # Export to PyG tensor; x should be present
     pyg = L.to_graph_tensor()
     assert hasattr(pyg, "x")
     assert pyg.num_nodes == len(seqs)
     assert pyg.x.shape[0] == len(seqs)
 
+def test_compute_plm_embeddings_stores_domain_and_annotations(monkeypatch):
+    seqs = _toy_seqs()
+    landscape = FitnessLandscape.build(
+        sequences=seqs,
+        graph="hamming",
+        attach_embeddings=False,
+    )
+    dummy = np.arange(len(seqs) * 2, dtype=float).reshape(len(seqs), 2)
+    called = {}
+
+    def fake_compute(sequences, **kwargs):
+        called["mode"] = kwargs["embedding_mode"]
+        return dummy
+
+    monkeypatch.setattr(
+        "fitness_landscape.core.landscape._compute_embeddings_from_sequences",
+        fake_compute,
+    )
+
+    result = landscape.compute_plm_embeddings(
+        domain="plm_test",
+        embedding_mode="hard",
+        attach_to_graph=True,
+    )
+    assert called["mode"] == "hard"
+    assert result is dummy
+    assert landscape.active_embedding_domain == "plm_test"
+    assert np.array_equal(landscape.embeddings["plm_test"], dummy)
+    for idx, node in enumerate(landscape.graph.nodes()):
+        np.testing.assert_array_equal(
+            landscape.graph.nodes[node]["emb_arr"],
+            dummy[idx],
+        )
+
+def test_compute_plm_embeddings_defaults_soft_for_soft_sequences(monkeypatch):
+    posterior_a = np.zeros((3, len(PROT_20)), dtype=float)
+    posterior_a[:, 0] = 1.0
+    posterior_b = np.zeros_like(posterior_a)
+    posterior_b[:, 1] = 1.0
+    seqs = [
+        SoftSequence(posterior_a, alphabet=PROT_20),
+        SoftSequence(posterior_b, alphabet=PROT_20),
+    ]
+    landscape = FitnessLandscape.build(
+        sequences=seqs,
+        graph="hamming",
+        attach_embeddings=False,
+    )
+    dummy = np.zeros((len(seqs), 4))
+    called = {}
+
+    def fake_compute(sequences, **kwargs):
+        called["mode"] = kwargs["embedding_mode"]
+        return dummy
+
+    monkeypatch.setattr(
+        "fitness_landscape.core.landscape._compute_embeddings_from_sequences",
+        fake_compute,
+    )
+
+    landscape.compute_plm_embeddings()
+    assert called["mode"] == "soft"
+    assert "plm" in landscape.embeddings
+
+
+def test_get_components_handles_legacy_embedding_state():
+    seqs = _toy_seqs()
+    landscape = FitnessLandscape.build(
+        sequences=seqs,
+        graph="tda",
+        embedding_domain="ohe",
+        attach_embeddings=True,
+        n_components=1,
+    )
+    # Simulate older pickle where embeddings stored as ndarray and the active
+    # domain attribute was absent.
+    legacy = landscape
+    legacy.embeddings = legacy.embeddings["ohe"]
+    if hasattr(legacy, "_active_embedding_domain"):
+        delattr(legacy, "_active_embedding_domain")
+
+    components = legacy.get_components()
+    assert components
+    assert isinstance(components[0].embeddings, dict)
 def test_view_and_get_layer_selection_and_errors():
     seqs = _toy_seqs()
     layers = {
