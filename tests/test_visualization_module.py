@@ -52,6 +52,16 @@ def _build_simple_landscape():
     return landscape
 
 
+def _landscape_with_embeddings():
+    landscape = _build_simple_landscape()
+    base = np.arange(len(landscape.sequences) * 4, dtype=float).reshape(len(landscape.sequences), 4)
+    landscape.embeddings = {
+        "beta": base + 10.0,
+        "alpha": base + 20.0,
+    }
+    return landscape
+
+
 def test_builder_graph_layout_with_annotations():
     landscape = _build_simple_landscape()
     registry = AnnotationRegistry()
@@ -170,6 +180,22 @@ def test_diffusion_layout_positions():
     assert dataset.positions.shape == (3, 2)
 
 
+def test_builder_embedding_matrix_default_key():
+    landscape = _landscape_with_embeddings()
+    builder = VisualizationDatasetBuilder(landscape)
+    matrix, key = builder._get_embedding_matrix(None)
+    assert key == "beta"
+    np.testing.assert_array_equal(matrix, landscape.embeddings["beta"])
+
+
+def test_umap_layout_defaults_to_first_embedding_key():
+    pytest.importorskip("umap")
+    landscape = _landscape_with_embeddings()
+    builder = VisualizationDatasetBuilder(landscape)
+    dataset = builder.build(layout="umap")
+    assert dataset.positions.shape == (3, 2)
+
+
 def test_landscape_plot_method_matplotlib():
     landscape = _build_simple_landscape()
     fig, ax = landscape.plot(interactive=False, show=False)
@@ -244,3 +270,11 @@ def test_resistance_distance_matrix_sparse_switch():
     dense = resistance_distance_matrix(G, sparse_threshold=1000)
     sparse = resistance_distance_matrix(G, sparse_threshold=1)
     np.testing.assert_allclose(dense, sparse, atol=1e-8)
+
+
+def test_landscape_plot_umap_with_emb_key():
+    pytest.importorskip("umap")
+    landscape = _landscape_with_embeddings()
+    fig, ax = landscape.plot(layout="umap", emb_key="alpha", interactive=False, show=False)
+    assert len(ax.collections) >= 1
+    plt.close(fig)

@@ -367,7 +367,12 @@ def evol_diffusion_landscape(
         time.process_time() - _c_graph0,
     )
 
-    landscape = FitnessLandscape.from_graph(G)
+    embedding_payload = {embedding_domain: E} if E is not None else None
+    landscape = FitnessLandscape.from_graph(
+        G,
+        embeddings=embedding_payload,
+        active_embedding_domain=embedding_domain if E is not None else None,
+    )
 
     _t_save0 = time.perf_counter()
     _c_save0 = time.process_time()
@@ -644,7 +649,12 @@ def knn_landscape(
         time.process_time() - _c_graph0,
     )
 
-    landscape = FitnessLandscape.from_graph(G)
+    embedding_payload = {embedding_domain: E} if E is not None else None
+    landscape = FitnessLandscape.from_graph(
+        G,
+        embeddings=embedding_payload,
+        active_embedding_domain=embedding_domain if E is not None else None,
+    )
 
     _t_save0 = time.perf_counter()
     _c_save0 = time.process_time()

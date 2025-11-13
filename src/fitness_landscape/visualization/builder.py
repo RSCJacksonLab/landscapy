@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Hashable, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Hashable, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import networkx as nx
 import numpy as np
@@ -182,15 +182,19 @@ class VisualizationDatasetBuilder:
         if name == "graph":
             return self._graph_layout(nodes, params)
         if name == "embedding":
-            return self._embedding_layout(nodes)
+            return self._embedding_layout(nodes, params)
         if name == "diffusion":
             return self._diffusion_layout(nodes, params)
         if name == "external":
             if not external_positions:
                 raise ValueError("external_positions must be provided for external layout.")
             return self._external_layout(nodes, external_positions)
+        if name == "umap":
+            return self._umap_layout(nodes, params)
 
-        raise ValueError(f"Unknown layout '{name}'. Supported: graph, embedding, diffusion, external.")
+        raise ValueError(
+            f"Unknown layout '{name}'. Supported: graph, embedding, diffusion, umap, external."
+        )
 
     def _graph_layout(self, nodes: List[Hashable], params: Mapping[str, Any]) -> np.ndarray:
         subgraph = self.landscape.graph.subgraph(nodes) if self.landscape.graph else nx.Graph()
@@ -199,10 +203,8 @@ class VisualizationDatasetBuilder:
         positions = nx.spring_layout(subgraph, seed=seed, **layout_params)
         return np.array([positions[node] for node in nodes], dtype=float)
 
-    def _embedding_layout(self, nodes: List[Hashable]) -> np.ndarray:
-        embeddings = getattr(self.landscape, "embeddings", None)
-        if embeddings is None:
-            raise ValueError("Landscape does not contain embeddings; cannot use 'embedding' layout.")
+    def _embedding_layout(self, nodes: List[Hashable], params: Mapping[str, Any]) -> np.ndarray:
+        embeddings, _ = self._get_embedding_matrix(params.get("emb_key"))
         node_to_index = {node: i for i, node in enumerate(self.landscape._node_order)}  # type: ignore[attr-defined]
         coords = []
         for node in nodes:
@@ -235,10 +237,10 @@ class VisualizationDatasetBuilder:
             coords_full = np.zeros((total_nodes, dims), dtype=float)
         else:
             components = eigvecs[:, 1 : min(eigvecs.shape[1], dims + 1)]
-            if components.shape[1] < dims:
-                padding = np.zeros((components.shape[0], dims - components.shape[1]), dtype=float)
-                components = np.hstack([components, padding])
-            coords_full = components[:, :dims]
+        if components.shape[1] < dims:
+            padding = np.zeros((components.shape[0], dims - components.shape[1]), dtype=float)
+            components = np.hstack([components, padding])
+        coords_full = components[:, :dims]
 
         node_to_index = {node: i for i, node in enumerate(self.landscape._node_order)}  # type: ignore[attr-defined]
         coords: list[np.ndarray] = []
@@ -248,6 +250,66 @@ class VisualizationDatasetBuilder:
                 raise KeyError(f"Node '{node}' not found when building diffusion layout.")
             coords.append(coords_full[idx])
         return np.asarray(coords, dtype=float)
+
+    def _umap_layout(self, nodes: List[Hashable], params: Mapping[str, Any]) -> np.ndarray:
+        embeddings, _ = self._get_embedding_matrix(params.get("emb_key"))
+        total = embeddings.shape[0]
+        if total == 0:
+            return np.zeros((len(nodes), 2), dtype=float)
+        if total < 2:
+            coords_full = np.zeros((total, 2), dtype=float)
+        else:
+            try:
+                import umap  # type: ignore
+            except ImportError as exc:  # pragma: no cover
+                raise RuntimeError("layout='umap' requires the 'umap-learn' package.") from exc
+            max_neighbors = max(2, total - 1)
+            n_neighbors = int(params.get("n_neighbors", min(15, max_neighbors)))
+            n_neighbors = max(2, min(n_neighbors, max_neighbors))
+            min_dist = float(params.get("min_dist", 0.1))
+            metric = params.get("metric", "euclidean")
+            random_state = params.get("random_state", 42)
+            reducer = umap.UMAP(
+                n_components=2,
+                n_neighbors=n_neighbors,
+                min_dist=min_dist,
+                metric=metric,
+                random_state=random_state,
+            )
+            coords_full = reducer.fit_transform(embeddings)
+
+        node_to_index = {node: i for i, node in enumerate(self.landscape._node_order)}  # type: ignore[attr-defined]
+        coords = []
+        for node in nodes:
+            idx = node_to_index.get(node)
+            if idx is None:
+                raise KeyError(f"Node '{node}' not found when building UMAP layout.")
+            coords.append(coords_full[idx])
+        return np.asarray(coords, dtype=float)
+
+    def _get_embedding_matrix(self, emb_key: str | None) -> Tuple[np.ndarray, str]:
+        embeddings = getattr(self.landscape, "embeddings", None)
+        if embeddings is None:
+            raise ValueError("Landscape does not contain embeddings; cannot use this layout.")
+        if isinstance(embeddings, np.ndarray):
+            embeddings_store: Mapping[str, np.ndarray] = {"default": embeddings}
+        else:
+            if not isinstance(embeddings, Mapping):
+                raise TypeError("Landscape embeddings must be a mapping or numpy array.")
+            embeddings_store = embeddings
+        if not embeddings_store:
+            raise ValueError("No embeddings are available on the landscape.")
+        key = emb_key if emb_key is not None else next(iter(embeddings_store))
+        if key not in embeddings_store:
+            raise KeyError(
+                f"Embedding domain '{key}' not found. Available keys: {list(embeddings_store.keys())}"
+            )
+        matrix = np.asarray(embeddings_store[key], dtype=float)
+        if matrix.ndim != 2:
+            raise ValueError("Embeddings must be a 2-D array.")
+        if matrix.shape[1] < 2:
+            raise ValueError("Embeddings must have at least two dimensions for plotting.")
+        return matrix, key
 
     def _external_layout(
         self,
