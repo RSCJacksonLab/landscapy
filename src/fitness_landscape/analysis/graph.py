@@ -1,9 +1,12 @@
 from networkx.algorithms.bipartite import matrix
+from networkx.algorithms.community import louvain_communities
+from networkx.algorithms.community.quality import modularity
 import numpy as np
 import networkx as nx
+from ..core.annotation import AnnotationLayer
 from ..core.landscape import FitnessLandscape
 from ..transforms.eigenmode import eigenmode_decomposition
-from typing import Union, Dict, Literal, Sequence, Optional, Iterable
+from typing import Union, Dict, Literal, Sequence, Optional, Iterable, Hashable
 import scipy.sparse as sp
 from scipy.sparse.linalg import splu
 
@@ -69,6 +72,121 @@ def graph_properties(graph: Union[FitnessLandscape, nx.Graph]) -> Dict:
             raise ValueError(f"Unsupported property: {prop}")
     
     return results
+
+
+def annotate_louvain_communities(
+    landscape: FitnessLandscape,
+    *,
+    annotation_name: str = "louvain_communities",
+    weight: Optional[str] = "weight",
+    resolution: float = 1.0,
+    threshold: float = 1e-7,
+    seed: Optional[Union[int, np.random.Generator, np.random.RandomState]] = None,
+    overwrite: bool = False,
+) -> AnnotationLayer:
+    """
+    Detect graph communities with the Louvain algorithm and attach them as annotations.
+
+    Parameters
+    ----------
+    landscape :
+        Target landscape with an instantiated graph.
+    annotation_name :
+        Name for the annotation layer that will store community metadata.
+    weight :
+        Edge attribute representing weights. ``None`` treats the graph as unweighted.
+    resolution :
+        Resolution parameter passed to :func:`networkx.algorithms.community.louvain_communities`.
+    threshold :
+        Convergence threshold for the Louvain optimiser.
+    seed :
+        Optional seed controlling the stochastic parts of the algorithm.
+    overwrite :
+        Replace an existing annotation layer with ``annotation_name`` if present.
+
+    Returns
+    -------
+    AnnotationLayer
+        Newly attached annotation layer describing community assignments.
+    """
+    graph = landscape.graph
+    if graph is None:
+        raise ValueError("Cannot compute communities: landscape graph is missing.")
+    if graph.number_of_nodes() == 0:
+        raise ValueError("Cannot compute communities: landscape graph has no nodes.")
+
+    if annotation_name in landscape.annotation_layers:
+        if not overwrite:
+            raise ValueError(
+                f"Annotation layer '{annotation_name}' already exists; "
+                "set overwrite=True to recompute."
+            )
+        landscape.detach_annotation(annotation_name)
+
+    communities = list(
+        louvain_communities(graph, weight=weight, resolution=resolution, threshold=threshold, seed=seed)
+    )
+    if not communities:
+        raise RuntimeError("Louvain community detection returned no communities.")
+
+    node_to_comm: Dict[Hashable, int] = {}
+    comm_sizes: Dict[int, int] = {}
+    for cid, members in enumerate(communities):
+        comm_sizes[cid] = len(members)
+        for node in members:
+            node_to_comm[node] = cid
+
+    try:
+        modularity_score = float(modularity(graph, communities, weight=weight))
+    except Exception:
+        modularity_score = None
+
+    node_index_map = getattr(landscape, "_nodes_by_index", None)
+    if node_index_map is None:
+        raise RuntimeError("Landscape is missing node index mapping; cannot align annotations.")
+
+    n = len(landscape.sequences)
+    community_ids: list[Optional[int]] = [None] * n
+    community_labels: list[Optional[str]] = [None] * n
+    community_sizes: list[Optional[int]] = [None] * n
+
+    for idx in range(n):
+        node = node_index_map.get(idx)
+        if node is None:
+            continue
+        cid = node_to_comm.get(node)
+        if cid is None:
+            continue
+        community_ids[idx] = int(cid)
+        community_labels[idx] = f"community_{cid}"
+        community_sizes[idx] = comm_sizes.get(cid)
+
+    metadata_seed: Optional[Union[int, str]] = None
+    if isinstance(seed, (int, np.integer)):
+        metadata_seed = int(seed)
+    elif seed is not None:
+        metadata_seed = seed.__class__.__name__
+
+    metadata = {
+        "algorithm": "louvain",
+        "weight_key": weight,
+        "resolution": resolution,
+        "threshold": threshold,
+        "seed": metadata_seed,
+        "community_count": len(communities),
+        "modularity": modularity_score,
+    }
+
+    return landscape.attach_annotation(
+        name=annotation_name,
+        data={
+            "community_id": community_ids,
+            "community_label": community_labels,
+            "community_size": community_sizes,
+        },
+        metadata=metadata,
+        map_by="index",
+    )
 
 def calculate_ruggedness_local_optima(landscape: FitnessLandscape,
                                       **kwargs) -> Dict:
