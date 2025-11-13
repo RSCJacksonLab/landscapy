@@ -9,7 +9,7 @@ from torch_geometric.data import Data
 from torch_geometric.utils import from_networkx
 from typing import List, Union, Dict, Any, Iterable, Literal,  Protocol, runtime_checkable, Hashable, Union, Tuple, Mapping, Callable, Optional, Sequence, TYPE_CHECKING
 from dataclasses import dataclass
-from .sequence import BaseNumpySequence, make_sequence
+from .sequence import BaseNumpySequence, SoftSequence, make_sequence
 from .graph import (
     create_diffusion_emb_graph,
     create_hamming_graph,
@@ -135,9 +135,15 @@ def _resolve_embeddings_for_graph(sequences: list[BaseNumpySequence],
     if embeddings is not None:
         return embeddings, {"embeddings": embeddings}
 
+    use_soft = embedding_domain == "plm" and any(isinstance(seq, SoftSequence) for seq in sequences)
+
     if embedding_domain == "plm":
         E = _compute_embeddings_from_sequences(
-            sequences, model_name=model_name, batch_size=batch_size, device=device
+            sequences,
+            model_name=model_name,
+            batch_size=batch_size,
+            device=device,
+            embedding_mode="soft" if use_soft else "hard",
         )
         return E, {"embeddings": E}
 
@@ -146,6 +152,37 @@ def _resolve_embeddings_for_graph(sequences: list[BaseNumpySequence],
         return E, {"embeddings": E}
 
     raise ValueError(f"embedding_domain must be 'plm' or 'ohe', got {embedding_domain!r}")
+
+
+def _prepare_embedding_store(
+    embeddings: Mapping[str, np.ndarray] | np.ndarray | None,
+    embedding_domain: str,
+) -> tuple[np.ndarray | None, dict[str, np.ndarray]]:
+    """
+    Normalize embedding inputs into a dict keyed by domain.
+    Returns the array corresponding to the requested domain (if any)
+    alongside the full store for attachment.
+    """
+    if embeddings is None:
+        return None, {}
+    if isinstance(embeddings, np.ndarray):
+        return embeddings, {embedding_domain: embeddings}
+    store: dict[str, np.ndarray] = {
+        str(domain): np.asarray(arr) for domain, arr in embeddings.items()
+    }
+    return store.get(embedding_domain), store
+
+
+def _choose_active_embedding_domain(
+    store: Mapping[str, np.ndarray],
+    preferred: str | None,
+    attach_embeddings: bool,
+) -> str | None:
+    if not attach_embeddings or not store:
+        return None
+    if preferred and preferred in store:
+        return preferred
+    return next(iter(store))
 
 SeqKey = Union['BaseNumpySequence', str, Tuple]
 
@@ -163,11 +200,16 @@ class FitnessLandscape:
     graph : nx.Graph
         The instantianted graph.
     
-    embeddings : np.ndarray, default=`None`
-        The node embeddings.
+    embeddings : Mapping[str, np.ndarray] | np.ndarray | None, default=`None`
+        Mapping from embedding domain to aligned embedding arrays. Plain
+        numpy arrays are accepted for backwards compatibility.
     
-    emb_arr_key.: str, default=`emb_arr`
+    emb_arr_key : str, default=`'emb_arr'`
         The keyword embeddings are stored under.
+
+    active_embedding_domain : str | None
+        The domain key used when annotating graph nodes or exporting
+        tensors. Defaults to the first available domain.
 
     annotation_layers : Dict[str, AnnotationLayer], optional
         User-supplied metadata layers aligned with the landscape sequences.
@@ -177,8 +219,9 @@ class FitnessLandscape:
                  graph: nx.Graph,
                  fitness_layers: Dict[str, BaseFitnessLayer] | None = None,
                  annotation_layers: Dict[str, AnnotationLayer] | None = None,
-                 embeddings: np.ndarray = None,
-                 emb_arr_key: str = 'emb_arr'):
+                 embeddings: Mapping[str, np.ndarray] | np.ndarray | None = None,
+                 emb_arr_key: str = 'emb_arr',
+                 active_embedding_domain: str | None = None):
         
         # Initialize Core Attributes with pre-computed objects
         self.sequences = sequences
@@ -187,7 +230,22 @@ class FitnessLandscape:
         self.annotation_layers = (
             annotation_layers if annotation_layers is not None else {}
         )
-        self.embeddings = embeddings
+        if embeddings is None:
+            self.embeddings: dict[str, np.ndarray] = {}
+        elif isinstance(embeddings, np.ndarray):
+            key = active_embedding_domain or "default"
+            self.embeddings = {key: embeddings}
+        else:
+            self.embeddings = {str(domain): np.asarray(arr) for domain, arr in embeddings.items()}
+        if active_embedding_domain is not None and active_embedding_domain not in self.embeddings:
+            raise KeyError(
+                f"Active embedding domain {active_embedding_domain!r} not found in provided embeddings."
+            )
+        self._active_embedding_domain = (
+            active_embedding_domain
+            if active_embedding_domain is not None
+            else (next(iter(self.embeddings), None))
+        )
         self._emb_arr_key = emb_arr_key
 
         # Finalize Setup and Annotate Graph
@@ -197,7 +255,7 @@ class FitnessLandscape:
         self._nodes_by_index = {i: n for i, n in enumerate(self._node_order)}  # 0..N-1 -> node key
         self._annotate_graph_nodes_with_fitness()
         self._annotate_graph_nodes_with_annotations()
-        if self.embeddings is not None:
+        if self.get_embedding() is not None:
             self._annotate_graph_nodes_with_embeddings()
         self._records = self._build_sequence_index() 
         self._enforce_unique_sequences()
@@ -261,6 +319,47 @@ class FitnessLandscape:
                 continue
             mapping.setdefault(str(seq_id), []).append(i)
         return mapping, missing
+
+    def _ensure_embedding_state(self) -> None:
+        """
+        Backwards-compatible guard to ensure embeddings and active domain
+        exist even for historical pickles or pre-refactor instances.
+        """
+        if not isinstance(self.embeddings, dict):
+            if self.embeddings is None:
+                self.embeddings = {}
+            else:
+                default_key = getattr(self, "_active_embedding_domain", None) or "default"
+                self.embeddings = {default_key: np.asarray(self.embeddings)}
+        if not hasattr(self, "_active_embedding_domain"):
+            self._active_embedding_domain = next(iter(self.embeddings), None)
+    
+    @property
+    def active_embedding_domain(self) -> str | None:
+        """Domain key currently used for graph annotations and tensors."""
+        self._ensure_embedding_state()
+        return self._active_embedding_domain
+    
+    def set_active_embedding_domain(self, domain: str) -> None:
+        """
+        Set the active embedding domain used for downstream exports.
+        """
+        self._ensure_embedding_state()
+        if domain not in self.embeddings:
+            raise KeyError(f"Embedding domain {domain!r} is not available.")
+        self._active_embedding_domain = domain
+    
+    def get_embedding(self, domain: str | None = None) -> np.ndarray | None:
+        """
+        Retrieve the embedding array for the requested domain.
+        """
+        self._ensure_embedding_state()
+        if not self.embeddings:
+            return None
+        key = domain if domain is not None else self._active_embedding_domain
+        if key is None:
+            return None
+        return self.embeddings.get(key)
     
     def _normalize_seq_key(self, k: SeqKey) -> Tuple:
         """
@@ -526,11 +625,12 @@ class FitnessLandscape:
         """
         Helper to attach the stored embeddings to the graph nodes.
         """
-        if self.graph is None or self.embeddings is None:
+        emb_array = self.get_embedding()
+        if self.graph is None or emb_array is None:
             return
-        if self.embeddings.shape[0] != len(self._node_order):
+        if emb_array.shape[0] != len(self._node_order):
             raise ValueError("Embeddings rows != number of graph nodes; cannot annotate safely.")
-        attrs = {node: {self._emb_arr_key: self.embeddings[i]}
+        attrs = {node: {self._emb_arr_key: emb_array[i]}
                 for i, node in enumerate(self._node_order)}
         nx.set_node_attributes(self.graph, attrs)
 
@@ -1071,6 +1171,7 @@ class FitnessLandscape:
         self,
         *,
         layout: str | "LayoutSpec" = "graph",
+        emb_key: str | None = None,
         fitness_layer: str | None = None,
         annotation: str | None = None,
         annotation_field: str | None = None,
@@ -1093,6 +1194,13 @@ class FitnessLandscape:
         ----------
         layout : str or LayoutSpec, default="graph"
             Layout strategy passed to :class:`VisualizationDatasetBuilder`.
+            Supported options include ``"graph"``, ``"embedding"``,
+            ``"diffusion"``, ``"umap"``, and ``"external"`` (with
+            ``external_positions``).
+        emb_key : str, optional
+            Embedding domain to use when ``layout`` consumes embeddings
+            (currently ``"embedding"`` and ``"umap"``). When omitted,
+            the first available embedding store entry is used.
         fitness_layer : str, optional
             Fitness layer to use for continuous colouring. Defaults to the
             active layer.
@@ -1142,6 +1250,7 @@ class FitnessLandscape:
             AnnotationRegistry,
             PaletteStore,
             VisualizationDatasetBuilder,
+            LayoutSpec,
         )
         from ..visualization.renderers import (
             plot_landscape_matplotlib,
@@ -1174,9 +1283,29 @@ class FitnessLandscape:
             if annotation is None:
                 annotation = layer.name
 
+        def _inject_embedding_key(layout_value: str | LayoutSpec) -> str | LayoutSpec:
+            if emb_key is None:
+                return layout_value
+            target_name: str | None
+            if isinstance(layout_value, LayoutSpec):
+                target_name = layout_value.name
+            elif isinstance(layout_value, str):
+                target_name = layout_value
+            else:
+                return layout_value
+            if target_name not in {"embedding", "umap"}:
+                return layout_value
+            params = {}
+            if isinstance(layout_value, LayoutSpec):
+                params.update(layout_value.parameters)
+            params["emb_key"] = emb_key
+            return LayoutSpec(name=target_name, parameters=params)
+
+        layout_arg = _inject_embedding_key(layout)
+
         builder = VisualizationDatasetBuilder(self, annotation_registry=registry)
         dataset = builder.build(
-            layout=layout,
+            layout=layout_arg,
             fitness_layer=fitness_layer,
             annotation=annotation,
             query=query,
@@ -1243,6 +1372,7 @@ class FitnessLandscape:
 
         components = sorted((set(comp) for comp in components_iter), key=len, reverse=True)
         node_index_map = {node: idx for idx, node in enumerate(self._node_order)}
+        self._ensure_embedding_state()
         out: list[FitnessLandscape] = []
 
         for comp_nodes in components:
@@ -1253,8 +1383,11 @@ class FitnessLandscape:
             comp_fitness = self._subset_fitness_layers(comp_indices)
             comp_annotations = self._subset_annotation_layers(comp_indices)
             comp_embeddings = (
-                self.embeddings[comp_indices].copy()
-                if self.embeddings is not None
+                {
+                    domain: emb[comp_indices].copy()
+                    for domain, emb in self.embeddings.items()
+                }
+                if self.embeddings
                 else None
             )
 
@@ -1266,6 +1399,7 @@ class FitnessLandscape:
                     annotation_layers=comp_annotations,
                     embeddings=comp_embeddings,
                     emb_arr_key=self._emb_arr_key,
+                    active_embedding_domain=self._active_embedding_domain,
                 )
             )
 
@@ -1455,10 +1589,12 @@ class FitnessLandscape:
             - token_ids (optional): LongTensor [N, Lmax] of token ids when tokenizer provided.
             - attention_mask (optional): LongTensor [N, Lmax] mask (1=real token, 0=pad).
         """
-        if not self.graph: raise ValueError("Graph not constructed.")
+        if not self.graph:
+            raise ValueError("Graph not constructed.")
         pyg_data = from_networkx(self.graph)
-        if self.embeddings is not None:
-            pyg_data.x = torch.tensor(self.embeddings, dtype=torch.float32)
+        emb_array = self.get_embedding()
+        if emb_array is not None:
+            pyg_data.x = torch.tensor(emb_array, dtype=torch.float32)
         else:
             x_tensor = torch.tensor(np.array([s.to_one_hot() for s in self.sequences]), dtype=torch.float32)
             pyg_data.x = x_tensor.view(len(self.sequences), -1)
@@ -1619,6 +1755,60 @@ class FitnessLandscape:
             'fitness_tensors': {name: layer.get_tensor()[i] for name, layer in self.fitness_layers.items()}
         } for i in target_indices]
 
+    def compute_plm_embeddings(
+        self,
+        *,
+        domain: str = "plm",
+        model_name: str = "facebook/esm2_t6_8M_UR50D",
+        batch_size: int = 64,
+        device: str | None = None,
+        embedding_mode: Literal["hard", "soft"] | None = None,
+        attach_to_graph: bool = True,
+    ) -> np.ndarray:
+        """
+        Compute PLM embeddings for the landscape sequences and store them
+        under ``self.embeddings[domain]``.
+
+        Parameters
+        ----------
+        domain : str, default=`"plm"`
+            Dictionary key under which the embeddings will be stored.
+        model_name : str, default=`"facebook/esm2_t6_8M_UR50D"`
+            HuggingFace model identifier for the PLM.
+        batch_size : int, default=`64`
+            Batch size used during embedding.
+        device : str or None, default=`None`
+            Device to run the model on. Defaults to GPU when available.
+        embedding_mode : {'hard', 'soft'} or None, default=`None`
+            Whether to embed discrete sequences or relaxed posteriors. When
+            ``None``, defaults to `"soft"` if any sequence is a SoftSequence,
+            otherwise `"hard"`.
+        attach_to_graph : bool, default=`True`
+            When True, sets the new domain as active and annotates graph
+            nodes with the computed embeddings.
+
+        Returns
+        -------
+        np.ndarray
+            The computed embedding matrix.
+        """
+        self._ensure_embedding_state()
+        mode = embedding_mode
+        if mode is None:
+            mode = "soft" if any(isinstance(seq, SoftSequence) for seq in self.sequences) else "hard"
+        embeddings = _compute_embeddings_from_sequences(
+            self.sequences,
+            model_name=model_name,
+            batch_size=batch_size,
+            device=device,
+            embedding_mode=mode,
+        )
+        self.embeddings[domain] = embeddings
+        if attach_to_graph:
+            self._active_embedding_domain = domain
+            self._annotate_graph_nodes_with_embeddings()
+        return embeddings
+
 
     # Legacy methods for compatibility with old code.
     def get_fitness(self, sequence: BaseNumpySequence) -> float:
@@ -1704,7 +1894,7 @@ class FitnessLandscape:
               graph: str | nx.Graph = "hamming",
               fitness_layers: dict[str, BaseFitnessLayer] | None = None,
               annotation_layers: dict[str, AnnotationLayer] | None = None,
-              embeddings: np.ndarray | None = None,
+              embeddings: Mapping[str, np.ndarray] | np.ndarray | None = None,
               embedding_domain: Literal["plm", "ohe"] = "ohe",
               attach_embeddings: bool = True,
               emb_arr_key: str = "emb_arr",
@@ -1714,8 +1904,7 @@ class FitnessLandscape:
               device: str | None = None,
               **graph_kwargs) -> "FitnessLandscape":
         """
-        Constructor method for main entry to FitnessLandscape
-        initialisaition. 
+        Constructor method for main entry to FitnessLandscape initialisation.
 
         Parameters
         ----------
@@ -1733,9 +1922,11 @@ class FitnessLandscape:
         annotation_layers : dict[str, AnnotationLayer], optional
             Dictionary of annotation layers aligned to the sequence order.
         
-        embeddings : np.ndarray, optional
-            Pre-computed embeddings for the sequences. If `None`, they
-            will be computed based on the `embedding_domain`.
+        embeddings : Mapping[str, np.ndarray] | np.ndarray | None, optional
+            Pre-computed embeddings for the sequences. Plain numpy arrays
+            are assumed to correspond to the provided `embedding_domain`.
+            If `None`, embeddings will be computed when the selected graph
+            requires them.
         
         embedding_domain : str, default=`"ohe"`
             The domain for embeddings. Options are:
@@ -1766,6 +1957,8 @@ class FitnessLandscape:
         FitnessLandscape
             The constructed fitness landscape object.
         """
+        graph_embeddings, embedding_store = _prepare_embedding_store(embeddings, embedding_domain)
+
         if isinstance(graph, nx.Graph):
             # annotate & return
             G = graph
@@ -1778,21 +1971,30 @@ class FitnessLandscape:
                 raise ValueError(f"Unknown graph type {gtype!r}. Options: {list(_GRAPH_REGISTRY)}")
 
             # resolve embeddings only if needed
-            embeddings, extra = _resolve_embeddings_for_graph(
-                sequences, gtype, embeddings, embedding_domain,
-                model_name=model_name, batch_size=batch_size, device=device
+            graph_embeddings, extra = _resolve_embeddings_for_graph(
+                sequences,
+                gtype,
+                graph_embeddings,
+                embedding_domain,
+                model_name=model_name,
+                batch_size=batch_size,
+                device=device,
             )
+            if graph_embeddings is not None:
+                embedding_store[embedding_domain] = graph_embeddings
             ctor = reg.resolve()
             G = ctor(sequences, **graph_kwargs, **extra)
 
-        # Attach embeddings to nodes if flagged
-        final_embeddings = embeddings if attach_embeddings else None
+        active_domain = _choose_active_embedding_domain(
+            embedding_store, embedding_domain, attach_embeddings
+        )
         return cls(sequences=sequences,
                    graph=G,
                    fitness_layers=fitness_layers,
                    annotation_layers=annotation_layers,
-                   embeddings=final_embeddings,
-                   emb_arr_key=emb_arr_key)
+                   embeddings=(embedding_store or None),
+                   emb_arr_key=emb_arr_key,
+                   active_embedding_domain=active_domain)
 
     @classmethod
     def from_alignment(cls,
@@ -1862,21 +2064,27 @@ class FitnessLandscape:
         G = create_phylo_graph(aln, **phylo_kwargs)
         seqs = [data["sequence"] for _, data in G.nodes(data=True)]
 
-        E = None
+        embedding_store: dict[str, np.ndarray] = {}
         if _compute_phylo_embeddings:
             if embedding_domain == "plm":
-                E = _compute_embeddings_from_sequences(seqs, model_name=model_name, batch_size=batch_size, device=device)
+                E = _compute_embeddings_from_sequences(
+                    seqs, model_name=model_name, batch_size=batch_size, device=device
+                )
             elif embedding_domain == "ohe":
                 E, _ = _encode_multiallele(seqs)
             else:
                 raise ValueError(f"embedding_domain must be 'plm' or 'ohe', got {embedding_domain!r}")
+            embedding_store[embedding_domain] = E
 
         return cls(sequences=seqs,
                    graph=G,
                    fitness_layers=fitness_layers,
                    annotation_layers=annotation_layers,
-                   embeddings=(E if attach_embeddings else None),
-                   emb_arr_key=emb_arr_key)
+                   embeddings=(embedding_store or None),
+                   emb_arr_key=emb_arr_key,
+                   active_embedding_domain=_choose_active_embedding_domain(
+                       embedding_store, embedding_domain, attach_embeddings
+                   ))
 
     @classmethod
     def from_phylogeny(cls,
@@ -2237,7 +2445,7 @@ class DirectedFitnessLandscape(FitnessLandscape):
               digraph: str | nx.DiGraph = "phylogenetic",
               fitness_layers: dict[str, BaseFitnessLayer] | None = None,
               annotation_layers: dict[str, AnnotationLayer] | None = None,
-              embeddings: np.ndarray | None = None,
+              embeddings: Mapping[str, np.ndarray] | np.ndarray | None = None,
               embedding_domain: Literal["plm", "ohe"] = "ohe",
               attach_embeddings: bool = True,
               emb_arr_key: str = "emb_arr",
@@ -2265,9 +2473,10 @@ class DirectedFitnessLandscape(FitnessLandscape):
         annotation_layers : dict[str, AnnotationLayer], optional
             Dictionary of annotation layers aligned to the sequence order.
 
-        embeddings : np.ndarray, optional
-            Pre-computed embeddings for the sequences. If `None`, they
-            will be computed based on the `embedding_domain`.
+        embeddings : Mapping[str, np.ndarray] | np.ndarray | None, optional
+            Pre-computed embeddings for the sequences. Plain numpy arrays
+            are assumed to match `embedding_domain`. If `None`, they will
+            be computed when required.
 
         embedding_domain : str, default=`"ohe"`
             The domain for embeddings. Options are:
@@ -2304,12 +2513,18 @@ class DirectedFitnessLandscape(FitnessLandscape):
         if isinstance(digraph, nx.DiGraph):
             DG = digraph
             seqs = [data["sequence"] for _, data in DG.nodes(data=True)]
-            E = embeddings
-            # attach optional embeddings
-            final_E = E if attach_embeddings else None
-            return cls(sequences=seqs, graph=DG, fitness_layers=fitness_layers,
-                       annotation_layers=annotation_layers,
-                       embeddings=final_E, emb_arr_key=emb_arr_key)
+            _, embedding_store = _prepare_embedding_store(embeddings, embedding_domain)
+            return cls(
+                sequences=seqs,
+                graph=DG,
+                fitness_layers=fitness_layers,
+                annotation_layers=annotation_layers,
+                embeddings=(embedding_store or None),
+                emb_arr_key=emb_arr_key,
+                active_embedding_domain=_choose_active_embedding_domain(
+                    embedding_store, embedding_domain, attach_embeddings
+                ),
+            )
 
         dtype = str(digraph)
         if dtype == "phylogenetic":
@@ -2317,18 +2532,29 @@ class DirectedFitnessLandscape(FitnessLandscape):
             DG = create_phylo_digraph(aln, **kwargs)
             seqs = [data["sequence"] for _, data in DG.nodes(data=True)]
 
-            E = None
+            embedding_store: dict[str, np.ndarray] = {}
             if _compute_phylo_embeddings:
                 if embedding_domain == "plm":
-                    E = _compute_embeddings_from_sequences(seqs, model_name=model_name, batch_size=batch_size, device=device)
+                    E = _compute_embeddings_from_sequences(
+                        seqs, model_name=model_name, batch_size=batch_size, device=device
+                    )
                 elif embedding_domain == "ohe":
                     E, _ = _encode_multiallele(seqs)
                 else:
                     raise ValueError(f"embedding_domain must be 'plm' or 'ohe', got {embedding_domain!r}")
+                embedding_store[embedding_domain] = E
 
-            return cls(sequences=seqs, graph=DG, fitness_layers=fitness_layers,
-                       annotation_layers=annotation_layers,
-                       embeddings=(E if attach_embeddings else None), emb_arr_key=emb_arr_key)
+            return cls(
+                sequences=seqs,
+                graph=DG,
+                fitness_layers=fitness_layers,
+                annotation_layers=annotation_layers,
+                embeddings=(embedding_store or None),
+                emb_arr_key=emb_arr_key,
+                active_embedding_domain=_choose_active_embedding_domain(
+                    embedding_store, embedding_domain, attach_embeddings
+                ),
+            )
 
         # embedding-based directed constructors 
         ctor_map = {
@@ -2338,16 +2564,36 @@ class DirectedFitnessLandscape(FitnessLandscape):
         if dtype not in ctor_map:
             raise ValueError(f"Unknown digraph type {dtype!r}. Options: {list(ctor_map)}")
 
-        seqs = sequences if not isinstance(sequences, (Path, Alignment)) else alignment_to_base_numpy_sequences(sequences)
-        # resolve embeddings if needed 
-        E, extra = _resolve_embeddings_for_graph(
-            seqs, "diffusion", embeddings, embedding_domain,
-            model_name=model_name, batch_size=batch_size, device=device
+        seqs = (
+            sequences
+            if not isinstance(sequences, (Path, Alignment))
+            else alignment_to_base_numpy_sequences(sequences)
         )
+        graph_embeddings, embedding_store = _prepare_embedding_store(embeddings, embedding_domain)
+        # resolve embeddings if needed 
+        graph_embeddings, extra = _resolve_embeddings_for_graph(
+            seqs,
+            "diffusion",
+            graph_embeddings,
+            embedding_domain,
+            model_name=model_name,
+            batch_size=batch_size,
+            device=device,
+        )
+        if graph_embeddings is not None:
+            embedding_store[embedding_domain] = graph_embeddings
         DG = ctor_map[dtype](seqs, **kwargs, **extra)
-        return cls(sequences=seqs, graph=DG, fitness_layers=fitness_layers,
-                   annotation_layers=annotation_layers,
-                   embeddings=(E if attach_embeddings else None), emb_arr_key=emb_arr_key)
+        return cls(
+            sequences=seqs,
+            graph=DG,
+            fitness_layers=fitness_layers,
+            annotation_layers=annotation_layers,
+            embeddings=(embedding_store or None),
+            emb_arr_key=emb_arr_key,
+            active_embedding_domain=_choose_active_embedding_domain(
+                embedding_store, embedding_domain, attach_embeddings
+            ),
+        )
     
 def read_csv_landscape(path: str | Path,
                        *,
@@ -2364,7 +2610,7 @@ def read_csv_landscape(path: str | Path,
                        probabilistic_specs: dict[str, list[str]] | None = None, # {"label": ["label=A","label=B","label=C"]}
                        
                        # embeddings for graph if needed
-                       embeddings: np.ndarray | None = None,
+                       embeddings: Mapping[str, np.ndarray] | np.ndarray | None = None,
                        embedding_domain: Literal["plm", "ohe"] = "ohe",
                        attach_embeddings: bool = True,
                        emb_arr_key: str = "emb_arr",
@@ -2407,8 +2653,10 @@ def read_csv_landscape(path: str | Path,
     probabilistic_specs : dict[str, list[str]] | None, optional
         Dictionary mapping layer names to lists of probabilistic column names.
     
-    embeddings : np.ndarray | None, optional
-        Pre-computed embeddings for the sequences. If None, they will be computed.
+    embeddings : Mapping[str, np.ndarray] | np.ndarray | None, optional
+        Pre-computed embeddings for the sequences. Plain numpy arrays are
+        assumed to correspond to `embedding_domain`. If None, embeddings
+        will be computed when the selected graph type requires them.
     
     embedding_domain : Literal["plm", "ohe"], default=`"ohe"`
         The domain for embeddings. Options are:
