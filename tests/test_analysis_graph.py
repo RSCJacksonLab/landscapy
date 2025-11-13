@@ -15,7 +15,7 @@ def test_annotate_louvain_communities_creates_layer(binary_3bit_landscape):
     assert layer.name == "auto_comm"
     frame = layer.to_dataframe()
     assert isinstance(frame, pd.DataFrame)
-    assert "community_id" in frame.columns
+    assert {"community_id", "community_label", "community_size", "louvain_community"} <= set(frame.columns)
     assert len(frame) == len(landscape.sequences)
     assert frame["community_id"].notna().any()
 

@@ -149,6 +149,7 @@ def annotate_louvain_communities(
     community_ids: list[Optional[int]] = [None] * n
     community_labels: list[Optional[str]] = [None] * n
     community_sizes: list[Optional[int]] = [None] * n
+    louvain_community: list[Optional[str]] = [None] * n
 
     for idx in range(n):
         node = node_index_map.get(idx)
@@ -158,8 +159,10 @@ def annotate_louvain_communities(
         if cid is None:
             continue
         community_ids[idx] = int(cid)
-        community_labels[idx] = f"community_{cid}"
+        label = f"community_{cid}"
+        community_labels[idx] = label
         community_sizes[idx] = comm_sizes.get(cid)
+        louvain_community[idx] = label
 
     metadata_seed: Optional[Union[int, str]] = None
     if isinstance(seed, (int, np.integer)):
@@ -183,6 +186,7 @@ def annotate_louvain_communities(
             "community_id": community_ids,
             "community_label": community_labels,
             "community_size": community_sizes,
+            "louvain_community": louvain_community,
         },
         metadata=metadata,
         map_by="index",
