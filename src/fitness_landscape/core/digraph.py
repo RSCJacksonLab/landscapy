@@ -1,5 +1,6 @@
 from pathlib import Path
-from typing import Union, Dict, List, Literal, Optional
+from typing import Union, Dict, List, Literal, Optional, Sequence, Iterator, Hashable
+from itertools import count
 import numpy as np
 import networkx as nx
 import logging
@@ -15,11 +16,18 @@ from .._const import ALPHABET_21, PROT_20
 from ..phylo._sub_matrices import nq_pfam
 from sklearn.neighbors import NearestNeighbors
 from ..phylo.phylogenetic_asr import ASRConstructor
-from ..utils import calculate_gapped_soft_score
+from ..utils import (
+    calculate_gapped_soft_score,
+    sequence_to_text,
+    string_to_sequence,
+    hamming_distance_str,
+    resolve_plm_embedder,
+)
 from .graph import (
     _find_knn_balltree,
     _find_knn_faiss,
     _encode_multiallele,
+    create_knn_graph,
     attach_expected_hamming_to_edges,
     compute_edge_mutations_star,
     _ensure_ray_initialized,
@@ -32,7 +40,11 @@ from ..embedding.particle_sampler import (
     SequenceGenerator,
     ParentSelector,
     TopPSampler,
-    ESMEmbedder
+    ESMEmbedder as SoftSamplerESMEmbedder,
+)
+from ..embedding.beam_search import (
+    PseudoLogLikelihoodScorer,
+    InterpolationBeamSearch,
 )
 from softalign.soft_alignment import align_soft_sequences
 import ray
@@ -383,7 +395,7 @@ def create_particle_filter_digraph(sequences: List[BaseNumpySequence],
         The constructed directed fitness landscape.
     """
     selector = ParentSelector(max_state_size=max_state_size)
-    embedder = ESMEmbedder(model_name=kwargs.get('model_name', "facebook/esm2_t6_8M_UR50D"))
+    embedder = SoftSamplerESMEmbedder(model_name=kwargs.get('model_name', "facebook/esm2_t6_8M_UR50D"))
     sampler = TopPSampler(temperature=temperature, top_p=top_p)
     generator = SequenceGenerator(embedder=embedder,sampler=sampler, batch_size=batch_size)
 
@@ -407,4 +419,240 @@ def create_particle_filter_digraph(sequences: List[BaseNumpySequence],
     
     return digraph
 
-    # TODO: Evolutionary velocity connectivity
+def create_plm_interpolation_digraph(
+    sequences: List[BaseNumpySequence],
+    *,
+    k: int = 12,
+    backend: Literal["auto", "faiss", "balltree"] = "auto",
+    index_type: Literal["hnsw", "flat", "ivf"] = "hnsw",
+    faiss_metric: Literal["ip", "l2"] = "ip",
+    include_self: bool = False,
+    use_gpu: bool = False,
+    hnsw_M: int = 32,
+    tiebuffer: int = 128,
+    tie_policy: Literal["all", "min_index", "random"] = "all",
+    seed: int | None = None,
+    gradient_threshold: float = 0.0,
+    alpha_schedule: Sequence[float] = (0.25, 0.5, 0.75),
+    beam_width: int = 6,
+    distance_penalty: float = 0.5,
+    max_beam_rounds: int = 20,
+    max_children_per_parent: int | None = None,
+    max_candidates_per_round: int | None = None,
+    min_pll_gain: float = 1e-3,
+    embedding_mode: Literal["auto", "hard", "soft"] = "auto",
+    model_name: str = "facebook/esm2_t6_8M_UR50D",
+    batch_size: int = 16,
+    device: str | None = None,
+    embeddings: np.ndarray | None = None,
+    _compute_hamming_edges: bool = True,
+    **_,
+) -> nx.DiGraph:
+    """
+    Construct a directed kNN graph whose edges follow the pseudo
+    log-likelihood gradient implied by an ESM model, with optional
+    Steiner nodes discovered via beam-search interpolation.
+    """
+
+    if not sequences:
+        return nx.DiGraph()
+
+    knn_graph = create_knn_graph(
+        sequences,
+        k,
+        backend=backend,
+        index_type=index_type,
+        faiss_metric=faiss_metric,
+        include_self=include_self,
+        use_gpu=use_gpu,
+        hnsw_M=hnsw_M,
+        tiebuffer=tiebuffer,
+        tie_policy=tie_policy,
+        seed=seed,
+        _compute_hamming_edges=False,
+    )
+
+    embedder, resolved_mode = resolve_plm_embedder(
+        sequences,
+        embedding_mode=embedding_mode,
+        model_name=model_name,
+        device=device,
+        batch_size=batch_size,
+    )
+    scorer = PseudoLogLikelihoodScorer(embedder, batch_size=batch_size)
+
+    node_strings: Dict[Hashable, str] = {}
+    for node, data in knn_graph.nodes(data=True):
+        node_strings[node] = sequence_to_text(data["sequence"])
+
+    pll_values = scorer.score([node_strings[n] for n in knn_graph.nodes()])
+    pll_by_node = {node: pll for node, pll in zip(knn_graph.nodes(), pll_values)}
+
+    directed = nx.DiGraph()
+    for node, data in knn_graph.nodes(data=True):
+        attrs = dict(data)
+        attrs["pll"] = pll_by_node[node]
+        attrs["embedding_mode"] = resolved_mode
+        directed.add_node(node, **attrs)
+
+    beam = InterpolationBeamSearch(
+        scorer,
+        beam_width=beam_width,
+        distance_penalty=distance_penalty,
+        max_rounds=max_beam_rounds,
+        max_children_per_parent=max_children_per_parent,
+        max_candidates_per_round=max_candidates_per_round,
+        min_pll_gain=min_pll_gain,
+    )
+    steiner_counter = count()
+
+    for u, v, edge_data in knn_graph.edges(data=True):
+        seq_u = node_strings[u]
+        seq_v = node_strings[v]
+        pll_u = pll_by_node[u]
+        pll_v = pll_by_node[v]
+        base_attrs = dict(edge_data)
+
+        if pll_v - pll_u >= gradient_threshold:
+            _attach_directed_path(
+                directed,
+                beam,
+                steiner_counter,
+                source_node=u,
+                target_node=v,
+                source_seq=seq_u,
+                target_seq=seq_v,
+                source_pll=pll_u,
+                target_pll=pll_v,
+                alpha_schedule=alpha_schedule,
+                base_edge_attrs=base_attrs,
+            )
+
+        if pll_u - pll_v >= gradient_threshold:
+            _attach_directed_path(
+                directed,
+                beam,
+                steiner_counter,
+                source_node=v,
+                target_node=u,
+                source_seq=seq_v,
+                target_seq=seq_u,
+                source_pll=pll_v,
+                target_pll=pll_u,
+                alpha_schedule=alpha_schedule,
+                base_edge_attrs=base_attrs,
+            )
+
+    if _compute_hamming_edges:
+        try:
+            compute_edge_mutations_star(G=directed)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Failed to attach mutation annotations to PLM interpolation graph: %s", exc
+            )
+
+    return directed
+
+
+def _attach_directed_path(
+    graph: nx.DiGraph,
+    beam: InterpolationBeamSearch,
+    steiner_counter: Iterator[int],
+    *,
+    source_node,
+    target_node,
+    source_seq: str,
+    target_seq: str,
+    source_pll: float,
+    target_pll: float,
+    alpha_schedule: Sequence[float],
+    base_edge_attrs: Dict,
+) -> None:
+    diff_positions = [i for i, (a, b) in enumerate(zip(source_seq, target_seq)) if a != b]
+    if not diff_positions:
+        return
+
+    target_counts = []
+    total_diffs = len(diff_positions)
+    for alpha in alpha_schedule:
+        count = int(np.round(alpha * total_diffs))
+        count = max(1, min(total_diffs - 1, count))
+        if count not in target_counts:
+            target_counts.append(count)
+    if not target_counts:
+        target_counts = [total_diffs - 1]
+
+    intermediates = beam.interpolate(
+        source_seq,
+        target_seq,
+        target_counts=target_counts,
+        diff_positions=diff_positions,
+        start_pll=source_pll,
+    )
+
+    previous_node = source_node
+    previous_seq = source_seq
+    previous_pll = source_pll
+
+    for state in intermediates:
+        node_id = _next_steiner_node_id(graph, steiner_counter)
+        seq_obj = string_to_sequence(state.sequence, sequence_id=node_id)
+        graph.add_node(
+            node_id,
+            sequence=seq_obj,
+            pll=state.pll,
+            steiner=True,
+            alpha=float(state.matches) / float(total_diffs),
+        )
+        _add_directed_edge(
+            graph,
+            previous_node,
+            node_id,
+            previous_seq,
+            state.sequence,
+            previous_pll,
+            state.pll,
+            base_edge_attrs,
+        )
+        previous_node = node_id
+        previous_seq = state.sequence
+        previous_pll = state.pll
+
+    _add_directed_edge(
+        graph,
+        previous_node,
+        target_node,
+        previous_seq,
+        target_seq,
+        previous_pll,
+        target_pll,
+        base_edge_attrs,
+    )
+
+
+def _next_steiner_node_id(graph: nx.DiGraph, counter: Iterator[int]):
+    while True:
+        candidate = f"steiner_{next(counter)}"
+        if candidate not in graph:
+            return candidate
+
+
+def _add_directed_edge(
+    graph: nx.DiGraph,
+    source,
+    target,
+    source_seq: str,
+    target_seq: str,
+    source_pll: float,
+    target_pll: float,
+    base_edge_attrs: Dict,
+):
+    attrs = dict(base_edge_attrs)
+    distance = hamming_distance_str(source_seq, target_seq)
+    attrs["distance"] = distance
+    attrs["weight"] = distance
+    attrs["knn_weight"] = distance
+    delta = float(target_pll - source_pll)
+    attrs["delta_pll"] = delta
+    attrs["pll_delta"] = delta
+    graph.add_edge(source, target, **attrs)

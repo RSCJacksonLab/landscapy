@@ -20,7 +20,12 @@ from .graph import (
     create_evol_diffusion_graph,
     compute_edge_mutations_star,
 )
-from .digraph import create_phylo_digraph, create_evol_diffusion_digraph, create_particle_filter_digraph
+from .digraph import (
+    create_phylo_digraph,
+    create_evol_diffusion_digraph,
+    create_particle_filter_digraph,
+    create_plm_interpolation_digraph,
+)
 from .fitness import NumericFitness, CategoricalFitness, BaseFitnessLayer, ProbabilisticCategoricalFitness
 from .annotation import AnnotationLayer
 from abc import ABC, abstractmethod
@@ -2560,6 +2565,7 @@ class DirectedFitnessLandscape(FitnessLandscape):
         ctor_map = {
             "diffusion_nq": create_evol_diffusion_digraph,
             "particle_filter": create_particle_filter_digraph,
+            "plm_interpolation": create_plm_interpolation_digraph,
         }
         if dtype not in ctor_map:
             raise ValueError(f"Unknown digraph type {dtype!r}. Options: {list(ctor_map)}")
@@ -2583,6 +2589,38 @@ class DirectedFitnessLandscape(FitnessLandscape):
         if graph_embeddings is not None:
             embedding_store[embedding_domain] = graph_embeddings
         DG = ctor_map[dtype](seqs, **kwargs, **extra)
+        seqs = [data["sequence"] for _, data in DG.nodes(data=True)]
+
+        if embedding_store:
+            mismatch_domains = [
+                domain for domain, emb in embedding_store.items() if emb.shape[0] != len(seqs)
+            ]
+            if mismatch_domains:
+                if attach_embeddings:
+                    warnings.warn(
+                        "Node count increased during digraph construction (e.g., due to Steiner "
+                        "nodes); recomputing embeddings so they align with the expanded graph.",
+                        RuntimeWarning,
+                    )
+                    embedding_store.clear()
+                    if embedding_domain == "plm":
+                        new_emb = _compute_embeddings_from_sequences(
+                            seqs,
+                            model_name=model_name,
+                            batch_size=batch_size,
+                            device=device,
+                        )
+                        embedding_store[embedding_domain] = new_emb
+                    elif embedding_domain == "ohe":
+                        new_emb, _ = _encode_multiallele(seqs)
+                        embedding_store[embedding_domain] = new_emb
+                else:
+                    warnings.warn(
+                        "Node count increased during digraph construction, but embeddings are not "
+                        "attached; dropping stored embeddings to avoid mismatches.",
+                        RuntimeWarning,
+                    )
+                    embedding_store.clear()
         return cls(
             sequences=seqs,
             graph=DG,
