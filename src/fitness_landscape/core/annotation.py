@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence, Hashable
 
 import numpy as np
 import pandas as pd
@@ -149,3 +149,27 @@ def _is_iterable(value: Any) -> bool:
     if isinstance(value, (str, bytes)):
         return False
     return isinstance(value, (Sequence, set, pd.Series, np.ndarray))
+
+
+def register_auto_annotation(
+    graph,
+    layer_name: str,
+    records: Mapping[Hashable, Mapping[str, Any] | Any],
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> None:
+    """
+    Attach per-node annotation specifications so that Landscape.build
+    can materialise them later as full AnnotationLayer objects.
+    """
+    store = graph.graph.setdefault("_auto_annotations", {})
+    formatted = {}
+    for node, record in records.items():
+        if isinstance(record, Mapping):
+            formatted[node] = {str(k): v for k, v in record.items()}
+        else:
+            formatted[node] = {layer_name: record}
+    store[layer_name] = {
+        "records": formatted,
+        "metadata": dict(metadata) if metadata else {},
+    }

@@ -23,6 +23,7 @@ from fitness_landscape.phylo._sub_matrices import nq_pfam
 from fitness_landscape.embedding.particle_sampler import SequenceGenerator, TopPSampler
 from unittest.mock import patch
 from cogent3 import get_moltype
+from fitness_landscape.core.annotation import register_auto_annotation
 
 @pytest.mark.parametrize("n,L,B", [(60, 6, 3), (80, 5, 4)])
 def test_hamming_graph_multiallele_smoke_largeish(n, L, B):
@@ -687,6 +688,35 @@ def test_phylo_graph_is_a_tree(phylo_test_data):
     assert graph.number_of_edges() == graph.number_of_nodes() - 1, "The graph should have N-1 edges to be a tree."
 
 
+def test_create_phylo_graph_registers_auto_annotations(monkeypatch):
+    """Ensure phylo graph constructor records node-role annotations."""
+
+    base_seq = BaseNumpySequence.from_string("ACDE", alphabet=PROT_20)
+    fake_graph = nx.Graph()
+    fake_graph.add_edge("anc", "tip1")
+    fake_graph.add_edge("anc", "tip2")
+    for node in ["anc", "tip1", "tip2"]:
+        fake_graph.nodes[node]["sequence"] = base_seq
+        fake_graph.nodes[node]["gapped_arr"] = np.zeros((4, 21))
+
+    class DummyCtor:
+        def __init__(self, *args, **kwargs):
+            self.tip_names = ["tip1", "tip2"]
+
+        def construct_dag(self, graph_type: str = "undirected"):
+            assert graph_type == "undirected"
+            return fake_graph.copy()
+
+    monkeypatch.setattr("fitness_landscape.core.graph.ASRConstructor", DummyCtor)
+
+    graph = create_phylo_graph(sequences="dummy_alignment", model_fitting=False, replacement_matrix=["LG"])
+    auto = graph.graph.get("_auto_annotations")
+    assert auto and "node_role" in auto
+    records = auto["node_role"]["records"]
+    assert records["tip1"]["node_role"] == "extant"
+    assert records["anc"]["node_role"] == "ancestral"
+
+
 def test_landscape_from_phylogeny_builds_expected_graph(tmp_path: Path):
     tree_path = tmp_path / "tree.nwk"
     tree_path.write_text("((seq1:0.1,seq2:0.2)anc1:0.3,seq3:0.4)root;")
@@ -920,6 +950,35 @@ def test_create_evol_diffusion_graph_is_undirected_and_symmetric(diffusion_test_
     assert not graph.is_directed(), "The graph should not be directed."
     adj_matrix = nx.to_numpy_array(graph)
     assert np.allclose(adj_matrix, adj_matrix.T), "The adjacency matrix of an undirected graph must be symmetric."
+
+
+def test_directed_landscape_build_attaches_auto_annotations():
+    """register_auto_annotation metadata becomes an AnnotationLayer in DirectedFitnessLandscape."""
+    seq_a = BaseNumpySequence.from_string("ACDE", alphabet=PROT_20, sequence_id="a")
+    seq_b = BaseNumpySequence.from_string("ACDF", alphabet=PROT_20, sequence_id="b")
+
+    G = nx.DiGraph()
+    G.add_node("a", sequence=seq_a)
+    G.add_node("b", sequence=seq_b)
+    G.add_edge("a", "b")
+
+    register_auto_annotation(
+        G,
+        "node_role",
+        {"a": {"node_role": "terminal"}, "b": {"node_role": "steiner"}},
+        metadata={"source": "unit-test"},
+    )
+
+    landscape = DirectedFitnessLandscape.build(
+        sequences=[seq_a, seq_b],
+        digraph=G,
+        attach_embeddings=False,
+    )
+
+    layer = landscape.annotation_layers.get("node_role")
+    assert layer is not None
+    frame = layer.to_dataframe()
+    assert list(frame["node_role"]) == ["terminal", "steiner"]
 
 def test_hamming_graph_binary_hypercube_degree_and_edges():
     """

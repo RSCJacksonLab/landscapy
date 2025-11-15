@@ -2,7 +2,7 @@ import math
 import warnings
 import numpy as np
 import networkx as nx
-from typing import List, Union, Literal, Tuple, Optional, Sequence
+from typing import List, Union, Literal, Tuple, Optional, Sequence, Mapping, Hashable, Any
 from .sequence import BaseNumpySequence, BinarySequence, sequence_distance, SoftSequence
 from ..phylo.phylogenetic_asr import ASRConstructor
 from ..phylo._sub_matrices import lg
@@ -15,6 +15,7 @@ from pathlib import Path
 from cogent3.core.alignment import Alignment
 from .._const import PROT_20
 from ..utils import calculate_gapped_soft_score
+from .annotation import register_auto_annotation
 from softalign.soft_alignment import align_soft_sequences
 from scipy import sparse
 from scipy.sparse import csr_matrix
@@ -1292,6 +1293,17 @@ def create_phylo_graph(sequences: Union[Path, Alignment],
     # Attach edge attributes (serial by default to avoid nested Ray OOM)
     if _compute_hamming_edges:
         compute_edge_mutations_star(G=graph, _log_progress=_log_progress, _nested_parallel=_nested_parallel)
+
+    role_records = {
+        node: {"node_role": "extant" if node in constructor.tip_names else "ancestral"}
+        for node in graph.nodes()
+    }
+    register_auto_annotation(
+        graph,
+        "node_role",
+        role_records,
+        metadata={"description": "Phylogenetic node roles (ancestral vs extant)."},
+    )
     return graph
 
 # Remote ray function for evol alignment.

@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Union, Dict, List, Literal, Optional, Sequence, Iterator, Hashable
+from typing import Union, Dict, List, Literal, Optional, Sequence, Iterator, Hashable, Mapping, Any
 from itertools import count
 import numpy as np
 import networkx as nx
@@ -23,6 +23,7 @@ from ..utils import (
     hamming_distance_str,
     resolve_plm_embedder,
 )
+from .annotation import register_auto_annotation
 from .graph import (
     _find_knn_balltree,
     _find_knn_faiss,
@@ -112,6 +113,17 @@ def create_phylo_digraph(sequences: Union[Path, Alignment],
     # Attach edge attributes.
     if _compute_hamming_edges:
         compute_edge_mutations_star(G=digraph, _log_progress=_log_progress, _nested_parallel=_nested_parallel)
+
+    role_records = {
+        node: {"node_role": "extant" if digraph.out_degree(node) == 0 else "ancestral"}
+        for node in digraph.nodes()
+    }
+    register_auto_annotation(
+        digraph,
+        "node_role",
+        role_records,
+        metadata={"description": "Phylogenetic node roles (ancestral vs extant)."},
+    )
     return digraph
 
 # Remote ray function for evol alignment.
@@ -550,6 +562,17 @@ def create_plm_interpolation_digraph(
             logging.getLogger(__name__).warning(
                 "Failed to attach mutation annotations to PLM interpolation graph: %s", exc
             )
+
+    role_records = {
+        node: {"node_role": "steiner" if directed.nodes[node].get("steiner") else "terminal"}
+        for node in directed.nodes()
+    }
+    register_auto_annotation(
+        directed,
+        "node_role",
+        role_records,
+        metadata={"description": "PLM interpolation node roles (terminal vs steiner)."},
+    )
 
     return directed
 

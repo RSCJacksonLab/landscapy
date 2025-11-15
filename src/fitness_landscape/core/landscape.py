@@ -189,6 +189,66 @@ def _choose_active_embedding_domain(
         return preferred
     return next(iter(store))
 
+
+def _collect_auto_annotation_layers(graph: nx.Graph) -> dict[str, AnnotationLayer]:
+    """
+    Convert auto-annotation metadata stored on a graph into
+    AnnotationLayer instances keyed by layer name.
+    """
+    specs = graph.graph.get("_auto_annotations")
+    if not specs:
+        return {}
+
+    node_order = list(graph.nodes())
+    layers: dict[str, AnnotationLayer] = {}
+
+    for name, payload in specs.items():
+        records = payload.get("records", {})
+        metadata = payload.get("metadata") or {}
+
+        keyed: dict[Hashable, dict[str, Any]] = {}
+        columns: set[str] = set()
+
+        for node, rec in records.items():
+            clean = {str(k): v for k, v in rec.items()}
+            keyed[node] = clean
+            columns.update(clean.keys())
+
+        if not columns:
+            continue
+
+        data = {col: [] for col in columns}
+        for node in node_order:
+            record = keyed.get(node, {})
+            for col in columns:
+                data[col].append(record.get(col))
+
+        frame = pd.DataFrame(data)
+        try:
+            layer = AnnotationLayer(name=name, data=frame, metadata=metadata)
+        except ValueError:
+            continue
+        layers[name] = layer
+
+    return layers
+
+
+def _merge_annotation_layers(
+    base_layers: dict[str, AnnotationLayer] | None,
+    auto_layers: dict[str, AnnotationLayer],
+) -> dict[str, AnnotationLayer] | None:
+    if not auto_layers:
+        return base_layers
+    merged = dict(base_layers) if base_layers else {}
+    for name, layer in auto_layers.items():
+        if name in merged:
+            warnings.warn(
+                f"Annotation layer '{name}' already provided; skipping auto-generated layer.",
+                RuntimeWarning,
+            )
+            continue
+        merged[name] = layer
+    return merged
 SeqKey = Union['BaseNumpySequence', str, Tuple]
 
 class FitnessLandscape:
@@ -2519,6 +2579,8 @@ class DirectedFitnessLandscape(FitnessLandscape):
             DG = digraph
             seqs = [data["sequence"] for _, data in DG.nodes(data=True)]
             _, embedding_store = _prepare_embedding_store(embeddings, embedding_domain)
+            auto_layers = _collect_auto_annotation_layers(DG)
+            annotation_layers = _merge_annotation_layers(annotation_layers, auto_layers)
             return cls(
                 sequences=seqs,
                 graph=DG,
@@ -2549,6 +2611,8 @@ class DirectedFitnessLandscape(FitnessLandscape):
                     raise ValueError(f"embedding_domain must be 'plm' or 'ohe', got {embedding_domain!r}")
                 embedding_store[embedding_domain] = E
 
+            auto_layers = _collect_auto_annotation_layers(DG)
+            annotation_layers = _merge_annotation_layers(annotation_layers, auto_layers)
             return cls(
                 sequences=seqs,
                 graph=DG,
@@ -2621,6 +2685,9 @@ class DirectedFitnessLandscape(FitnessLandscape):
                         RuntimeWarning,
                     )
                     embedding_store.clear()
+
+        auto_layers = _collect_auto_annotation_layers(DG)
+        annotation_layers = _merge_annotation_layers(annotation_layers, auto_layers)
         return cls(
             sequences=seqs,
             graph=DG,
