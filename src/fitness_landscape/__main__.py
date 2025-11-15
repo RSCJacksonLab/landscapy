@@ -14,9 +14,9 @@ import numpy as np
 from cogent3 import load_aligned_seqs
 
 from ._const import PROT_20
-from .core.digraph import create_evol_diffusion_digraph, create_phylo_digraph
+from .core.digraph import create_evol_diffusion_digraph, create_phylo_digraph, create_plm_interpolation_digraph
 from .core.graph import _encode_multiallele, create_evol_diffusion_graph, create_knn_graph, create_phylo_graph
-from .core.landscape import FitnessLandscape
+from .core.landscape import FitnessLandscape, DirectedFitnessLandscape
 from .phylo._sub_matrices import lg, nq_pfam
 from .utils import _compute_embeddings_from_sequences, fasta_to_prot20_sequences, sanitize_alignment
 
@@ -447,7 +447,7 @@ def evol_diffusion_landscape(
     )
 
     embedding_payload = {embedding_domain: E} if E is not None else None
-    landscape = FitnessLandscape.from_graph(
+    landscape = DirectedFitnessLandscape.from_graph(
         G,
         embeddings=embedding_payload,
         active_embedding_domain=embedding_domain if E is not None else None,
@@ -465,6 +465,202 @@ def evol_diffusion_landscape(
     logger.info("Landscape saved to %s", output)
     logger.info(
         "evol-diffusion-landscape: end wall=%.2fs cpu=%.2fs",
+        time.perf_counter() - t0,
+        time.process_time() - c0,
+    )
+
+    if resolved_log:
+        click.echo(f"Log written to {resolved_log}")
+
+
+@cli.command()
+@click.option("--sequences", required=True, type=click.Path(exists=True), help="Path to the input FASTA file or directory.")
+@click.option("--output", required=True, type=click.Path(), help="Destination for the serialized DirectedFitnessLandscape (.pkl).")
+# kNN scaffold parameters
+@click.option("--k", type=int, default=12, show_default=True, help="kNN neighbours for the initial scaffold.")
+@click.option("--backend", type=click.Choice(["auto", "faiss", "balltree"]), default="auto", show_default=True, help="kNN backend.")
+@click.option("--index-type", type=click.Choice(["hnsw", "flat", "ivf"]), default="hnsw", show_default=True, help="FAISS index type.")
+@click.option("--faiss-metric", type=click.Choice(["ip", "l2"]), default="ip", show_default=True, help="FAISS metric.")
+@click.option("--include-self", is_flag=True, default=False, help="Include self edges in the kNN graph.")
+@click.option("--use-gpu", is_flag=True, default=False, help="Use GPU for FAISS (when available for selected index).")
+@click.option("--hnsw-M", "hnsw_m", type=int, default=32, show_default=True, help="HNSW M parameter.")
+@click.option("--tiebuffer", type=int, default=128, show_default=True, help="Extra neighbours retained when breaking kNN tie distances.")
+@click.option("--tie-policy", type=click.Choice(["all", "min_index", "random"]), default="all", show_default=True, help="How to break kNN tie distances.")
+@click.option("--seed", type=int, default=None, help="Random seed used when tie-policy=random.")
+@click.option("--compute-hamming-edges/--no-compute-hamming-edges", default=True, show_default=True, help="Attach expected Hamming edge annotations when possible.")
+# PLL interpolation parameters
+@click.option("--gradient-threshold", type=float, default=0.0, show_default=True, help="Minimum PLL delta required to orient an edge.")
+@click.option("--alpha", "alpha_schedule", type=click.FloatRange(min=0.0, max=1.0), multiple=True, default=(0.25, 0.5, 0.75), show_default=True, help="Intermediate target fractions toward the destination sequence. Provide multiple times to customise the schedule.")
+@click.option("--beam-width", type=int, default=6, show_default=True, help="Beam width for PLL interpolation.")
+@click.option("--distance-penalty", type=float, default=0.5, show_default=True, help="Penalty weight for deviating from the alpha target during beam search.")
+@click.option("--max-beam-rounds", type=int, default=20, show_default=True, help="Maximum number of beam-search rounds per edge.")
+@click.option("--max-children-per-parent", type=int, default=None, help="Optional cap on the number of mutation proposals per beam state.")
+@click.option("--max-candidates-per-round", type=int, default=None, help="Optional cap on the total candidates evaluated per round.")
+@click.option("--min-pll-gain", type=float, default=1e-3, show_default=True, help="Minimum PLL gain required to keep an intermediate node.")
+# PLM scoring options
+@click.option("--plm-model-name", type=str, default="facebook/esm2_t6_8M_UR50D", show_default=True, help="Protein language model used for PLL scoring.")
+@click.option("--plm-batch-size", type=int, default=16, show_default=True, help="Batch size for PLL scoring calls.")
+@click.option("--plm-device", type=str, default=None, help="Device for PLL scoring (e.g. 'cpu' or 'cuda').")
+@click.option("--plm-embedding-mode", type=click.Choice(["auto", "hard", "soft"]), default="auto", show_default=True, help="Tokenisation strategy for PLL scoring.")
+# Logging
+@click.option("--log-file", type=click.Path(), default=None, help="Optional log file path.")
+@click.option("--log-level", type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"]), default="INFO", show_default=True)
+@click.option("--log-progress", is_flag=True, default=False, help="Enable verbose progress logging.")
+@click.option("--log-prefix", type=str, default=None, help="Derive a log filename using this prefix when --log-file is omitted.")
+def plm_interpolation_dilandscape(
+    sequences: str,
+    output: str,
+    k: int,
+    backend: str,
+    index_type: str,
+    faiss_metric: str,
+    include_self: bool,
+    use_gpu: bool,
+    hnsw_m: int,
+    tiebuffer: int,
+    tie_policy: str,
+    seed: int | None,
+    compute_hamming_edges: bool,
+    gradient_threshold: float,
+    alpha_schedule: tuple[float, ...],
+    beam_width: int,
+    distance_penalty: float,
+    max_beam_rounds: int,
+    max_children_per_parent: int | None,
+    max_candidates_per_round: int | None,
+    min_pll_gain: float,
+    plm_model_name: str,
+    plm_batch_size: int,
+    plm_device: str | None,
+    plm_embedding_mode: str,
+    log_file: str | None,
+    log_level: str,
+    log_progress: bool,
+    log_prefix: str | None,
+) -> None:
+    """Construct a PLM-guided interpolation digraph and save it."""
+
+    if k < 1:
+        raise click.UsageError("--k must be at least 1.")
+    if beam_width < 1:
+        raise click.UsageError("--beam-width must be at least 1.")
+    if max_beam_rounds < 1:
+        raise click.UsageError("--max-beam-rounds must be at least 1.")
+    if max_children_per_parent is not None and max_children_per_parent < 1:
+        raise click.UsageError("--max-children-per-parent must be >= 1 when provided.")
+    if max_candidates_per_round is not None and max_candidates_per_round < 1:
+        raise click.UsageError("--max-candidates-per-round must be >= 1 when provided.")
+    if min_pll_gain < 0:
+        raise click.UsageError("--min-pll-gain must be non-negative.")
+
+    alpha_values = list(alpha_schedule) or [0.25, 0.5, 0.75]
+    if not alpha_values:
+        alpha_values = [0.25]
+    for alpha in alpha_values:
+        if not 0.0 < alpha < 1.0:
+            raise click.UsageError("--alpha values must be strictly between 0 and 1.")
+
+    seq_path = Path(sequences)
+    out_path = Path(output)
+    logger, resolved_log = _configure_logger(log_file, log_level, log_prefix, seq_path, out_path)
+
+    if log_progress:
+        logger.info("Progress logging enabled.")
+
+    t0 = time.perf_counter()
+    c0 = time.process_time()
+    logger.info("plm-interpolation-dilandscape: start")
+
+    try:
+        _t_read0 = time.perf_counter()
+        _c_read0 = time.process_time()
+        if seq_path.is_dir():
+            fasta_files = sorted(
+                p for p in seq_path.iterdir() if p.suffix.lower() in {".fasta", ".fa", ".fas"}
+            )
+            if not fasta_files:
+                raise click.UsageError(f"The directory '{sequences}' contains no FASTA files.")
+            seqs = []
+            for fp in fasta_files:
+                logger.info("Reading FASTA: %s", fp)
+                seqs.extend(fasta_to_prot20_sequences(fp, strict=False))
+            logger.info(
+                "Combined sequences from %d FASTA files (total=%d)",
+                len(fasta_files),
+                len(seqs),
+            )
+        else:
+            seqs = fasta_to_prot20_sequences(seq_path, strict=False)
+        logger.info(
+            "Read sequences: n=%d wall=%.2fs cpu=%.2fs",
+            len(seqs),
+            time.perf_counter() - _t_read0,
+            time.process_time() - _c_read0,
+        )
+    except Exception as exc:
+        raise click.UsageError(str(exc)) from exc
+
+    if len(seqs) < 2:
+        raise click.UsageError("At least two sequences are required to build the digraph.")
+
+    _t_graph0 = time.perf_counter()
+    _c_graph0 = time.process_time()
+    logger.info(
+        "Building PLM interpolation digraph (n=%d, k=%d, beam_width=%d).",
+        len(seqs),
+        k,
+        beam_width,
+    )
+    try:
+        graph = create_plm_interpolation_digraph(
+            sequences=seqs,
+            k=k,
+            backend=backend,
+            index_type=index_type,
+            faiss_metric=faiss_metric,
+            include_self=include_self,
+            use_gpu=use_gpu,
+            hnsw_M=hnsw_m,
+            tiebuffer=tiebuffer,
+            tie_policy=tie_policy,
+            seed=seed,
+            gradient_threshold=gradient_threshold,
+            alpha_schedule=list(alpha_values),
+            beam_width=beam_width,
+            distance_penalty=distance_penalty,
+            max_beam_rounds=max_beam_rounds,
+            max_children_per_parent=max_children_per_parent,
+            max_candidates_per_round=max_candidates_per_round,
+            min_pll_gain=min_pll_gain,
+            embedding_mode=plm_embedding_mode,
+            model_name=plm_model_name,
+            batch_size=plm_batch_size,
+            device=plm_device,
+            _compute_hamming_edges=compute_hamming_edges,
+        )
+    except Exception as exc:
+        raise click.UsageError(f"Failed to construct PLM interpolation digraph: {exc}") from exc
+    logger.info(
+        "DiGraph constructed: nodes=%d edges=%d wall=%.2fs cpu=%.2fs",
+        graph.number_of_nodes(),
+        graph.number_of_edges(),
+        time.perf_counter() - _t_graph0,
+        time.process_time() - _c_graph0,
+    )
+
+    landscape = DirectedFitnessLandscape.from_graph(graph)
+
+    _t_save0 = time.perf_counter()
+    _c_save0 = time.process_time()
+    landscape.save(out_path)
+    logger.info(
+        "Saved landscape: wall=%.2fs cpu=%.2fs",
+        time.perf_counter() - _t_save0,
+        time.process_time() - _c_save0,
+    )
+    logger.info("Landscape saved to %s", output)
+    logger.info(
+        "plm-interpolation-dilandscape: end wall=%.2fs cpu=%.2fs",
         time.perf_counter() - t0,
         time.process_time() - c0,
     )
@@ -1209,7 +1405,7 @@ def phylo_landscape(
         time.process_time() - _c_graph0,
     )
 
-    landscape = FitnessLandscape.from_graph(graph)
+    landscape = DirectedFitnessLandscape.from_graph(graph)
 
     _t_save0 = time.perf_counter()
     _c_save0 = time.process_time()
@@ -1358,7 +1554,7 @@ def phylo_dilandscape(
         time.process_time() - _c_graph0,
     )
 
-    landscape = FitnessLandscape.from_graph(graph)
+    landscape = DirectedFitnessLandscape.from_graph(graph)
 
     _t_save0 = time.perf_counter()
     _c_save0 = time.process_time()
