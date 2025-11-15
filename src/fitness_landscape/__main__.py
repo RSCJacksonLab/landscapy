@@ -14,8 +14,10 @@ import numpy as np
 from cogent3 import load_aligned_seqs
 
 from ._const import PROT_20
+from .core.digraph import create_evol_diffusion_digraph, create_phylo_digraph
 from .core.graph import _encode_multiallele, create_evol_diffusion_graph, create_knn_graph, create_phylo_graph
 from .core.landscape import FitnessLandscape
+from .phylo._sub_matrices import lg, nq_pfam
 from .utils import _compute_embeddings_from_sequences, fasta_to_prot20_sequences, sanitize_alignment
 
 
@@ -110,6 +112,57 @@ def _composition_embeddings(seqs: Sequence[Any]) -> np.ndarray:
             counts[:] = 1.0 / len(PROT_20)
         emb[idx] = counts
     return emb
+
+_REPLACEMENT_MATRIX_REGISTRY: dict[str, np.ndarray] = {
+    "lg": lg,
+    "nq_pfam": nq_pfam,
+    "nq.pfam": nq_pfam,
+    "nqpfam": nq_pfam,
+}
+
+
+def _resolve_replacement_matrix(value: str | None) -> np.ndarray:
+    """Resolve a replacement matrix name or file path to a numpy array."""
+    if value is None:
+        return nq_pfam
+
+    key = value.strip().lower()
+    matrix = _REPLACEMENT_MATRIX_REGISTRY.get(key)
+    if matrix is not None:
+        return matrix
+
+    path = Path(value)
+    if path.exists():
+        try:
+            if path.suffix.lower() == ".npz":
+                with np.load(path, allow_pickle=False) as data:
+                    if len(data.files) != 1:
+                        raise click.BadParameter(
+                            f"Replacement matrix archive {value} must contain exactly one array.",
+                            param_hint="replacement-matrix",
+                        )
+                    arr = np.asarray(data[data.files[0]], dtype=float)
+            else:
+                arr = np.asarray(np.load(path, allow_pickle=False), dtype=float)
+        except click.BadParameter:
+            raise
+        except Exception as exc:
+            raise click.BadParameter(
+                f"Failed to load replacement matrix from {value!r}: {exc}",
+                param_hint="replacement-matrix",
+            ) from exc
+
+        if arr.ndim != 2 or arr.shape[0] != arr.shape[1]:
+            raise click.BadParameter(
+                "Replacement matrix must be a square 2D array.",
+                param_hint="replacement-matrix",
+            )
+        return arr
+
+    raise click.BadParameter(
+        f"Unknown replacement matrix '{value}'. Provide a known name (e.g. 'nq_pfam') or a valid .npy/.npz file path.",
+        param_hint="replacement-matrix",
+    )
 
 
 @cli.command()
@@ -412,6 +465,322 @@ def evol_diffusion_landscape(
     logger.info("Landscape saved to %s", output)
     logger.info(
         "evol-diffusion-landscape: end wall=%.2fs cpu=%.2fs",
+        time.perf_counter() - t0,
+        time.process_time() - c0,
+    )
+
+    if resolved_log:
+        click.echo(f"Log written to {resolved_log}")
+
+
+@cli.command()
+# Reading / writing
+@click.option("--sequences", required=True, type=click.Path(exists=True), help="Path to the input FASTA file or directory.")
+@click.option(
+    "--output",
+    type=click.Path(),
+    default=None,
+    help="Destination for the serialized FitnessLandscape (.pkl). Required unless --only-embeddings.",
+)
+# Diffusion digraph parameters
+@click.option("--k", type=int, default=50, show_default=True, help="kNN neighbours for pre-filtering.")
+@click.option("--tiebuffer", type=int, default=0, show_default=True, help="Extra neighbours retained when breaking kNN tie distances.")
+@click.option("--t", callback=_parse_diffusion_power, type=str, default="5", show_default=True, help="Diffusion power; accepts integers, 'inf', or 'none'.")
+@click.option("--tau", type=float, default=1.0, show_default=True, help="Score temperature for kernel conversion.")
+@click.option("--connectivity-threshold", type=float, default=1e-4, show_default=True, help="Connectivity threshold for the diffused transition matrix.")
+@click.option("--backend", type=click.Choice(["auto", "faiss", "balltree"]), default="auto", show_default=True, help="kNN backend.")
+@click.option("--index-type", type=click.Choice(["hnsw", "flat", "ivf"]), default="hnsw", show_default=True, help="FAISS index type.")
+@click.option("--faiss-metric", type=click.Choice(["ip", "l2"]), default="ip", show_default=True, help="FAISS metric.")
+@click.option("--include-self", is_flag=True, default=False, help="Include self edges in the kNN graph.")
+@click.option("--use-gpu", is_flag=True, default=False, help="Use GPU for FAISS (when available for selected index).")
+@click.option("--hnsw-M", "hnsw_m", type=int, default=32, show_default=True, help="HNSW M parameter.")
+@click.option("--cpus", type=int, default=1, show_default=True, help="Total Ray CPU slots to allocate for alignment tasks.")
+@click.option("--replacement-matrix", type=str, default="nq_pfam", show_default=True, help="Replacement matrix name or .npy/.npz path for asymmetric scoring.")
+@click.option("--compute-hamming-edges/--no-compute-hamming-edges", default=True, show_default=True, help="Attach expected Hamming edge weights when possible.")
+# Embeddings
+@click.option("--compute-embeddings/--no-compute-embeddings", default=True, show_default=True, help="Compute node embeddings (OHE, composition, or PLM).")
+@click.option(
+    "--embedding-domain",
+    type=click.Choice(["ohe", "composition", "plm"]),
+    default=None,
+    show_default=False,
+    help="Embedding domain for node attributes. Defaults to 'ohe' unless --only-embeddings is set, where 'plm' is assumed.",
+)
+@click.option("--plm-model-name", type=str, default="facebook/esm2_t6_8M_UR50D", show_default=True, help="Protein language model to use when embedding-domain=plm.")
+@click.option("--plm-batch-size", type=int, default=64, show_default=True, help="Batch size for PLM embeddings.")
+@click.option("--plm-device", type=str, default=None, help="Device for PLM embeddings (e.g. 'cpu' or 'cuda').")
+@click.option("--soft-embedding", is_flag=True, default=False, show_default=True, help="Use relaxed (soft) embeddings when embedding-domain=plm.")
+# Embedding checkpoints
+@click.option("--embeddings-in", type=click.Path(exists=True), default=None, help="Optional .npy file with precomputed embeddings.")
+@click.option("--embeddings-out", type=click.Path(), default=None, help="Optional path to save computed/loaded embeddings (.npy).")
+@click.option("--only-embeddings", is_flag=True, default=False, help="Only produce embeddings (skip graph build). Requires --embeddings-out.")
+# Logging
+@click.option("--log-file", type=click.Path(), default=None, help="Optional log file path.")
+@click.option("--log-level", type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"]), default="INFO", show_default=True)
+@click.option("--log-progress", is_flag=True, default=False, help="Enable verbose progress logging.")
+@click.option("--log-prefix", type=str, default=None, help="Derive a log filename using this prefix when --log-file is not provided.")
+def evol_diffusion_dilandscape(
+    sequences: str,
+    output: str | None,
+    k: int,
+    tiebuffer: int,
+    t: Optional[Union[int, float]],
+    tau: float,
+    connectivity_threshold: float,
+    backend: str,
+    index_type: str,
+    faiss_metric: str,
+    include_self: bool,
+    use_gpu: bool,
+    hnsw_m: int,
+    cpus: int,
+    replacement_matrix: str,
+    compute_hamming_edges: bool,
+    compute_embeddings: bool,
+    embedding_domain: str | None,
+    plm_model_name: str,
+    plm_batch_size: int,
+    plm_device: str | None,
+    soft_embedding: bool,
+    embeddings_in: str | None,
+    embeddings_out: str | None,
+    only_embeddings: bool,
+    log_file: str | None,
+    log_level: str,
+    log_progress: bool,
+    log_prefix: str | None,
+) -> None:
+    """Construct a directed evolutionary diffusion FitnessLandscape and save it."""
+
+    user_set_embedding_domain = embedding_domain is not None
+    if not user_set_embedding_domain:
+        embedding_domain = "plm" if only_embeddings else "ohe"
+
+    seq_path = Path(sequences)
+    out_path = Path(output) if output is not None else None
+    log_target = out_path if out_path is not None else seq_path
+    logger, resolved_log = _configure_logger(log_file, log_level, log_prefix, seq_path, log_target)
+
+    if not user_set_embedding_domain and only_embeddings:
+        logger.info("Auto-selected embedding-domain=plm for --only-embeddings.")
+
+    if log_progress:
+        logger.info("Progress logging enabled.")
+
+    t0 = time.perf_counter()
+    c0 = time.process_time()
+    logger.info("evol-diffusion-dilandscape: start")
+
+    need_gapped_embeddings = embedding_domain == "ohe"
+    if not only_embeddings and out_path is None:
+        raise click.UsageError("--output is required unless --only-embeddings is set.")
+    seqs_gapped_alignment: list | None = None
+
+    # Read sequences
+    try:
+        _t_read0 = time.perf_counter()
+        _c_read0 = time.process_time()
+        if seq_path.is_dir():
+            fasta_files = sorted(
+                p for p in seq_path.iterdir() if p.suffix.lower() in {".fasta", ".fa", ".fas"}
+            )
+            if not fasta_files:
+                raise click.UsageError(f"The directory '{sequences}' contains no FASTA files.")
+            seqs = []
+            use_gapped = need_gapped_embeddings and len(fasta_files) == 1
+            for fp in fasta_files:
+                logger.info("Reading FASTA: %s", fp)
+                if use_gapped:
+                    seq_list, gapped = fasta_to_prot20_sequences(fp, strict=False, return_gapped=True)
+                    seqs.extend(seq_list)
+                    seqs_gapped_alignment = gapped
+                else:
+                    seqs.extend(fasta_to_prot20_sequences(fp, strict=False))
+            logger.info(
+                "Combined sequences from %d FASTA files (total=%d)",
+                len(fasta_files),
+                len(seqs),
+            )
+        else:
+            if need_gapped_embeddings:
+                seqs, seqs_gapped_alignment = fasta_to_prot20_sequences(
+                    seq_path, strict=False, return_gapped=True
+                )
+            else:
+                seqs = fasta_to_prot20_sequences(seq_path, strict=False)
+        logger.info(
+            "Read sequences: n=%d wall=%.2fs cpu=%.2fs",
+            len(seqs),
+            time.perf_counter() - _t_read0,
+            time.process_time() - _c_read0,
+        )
+    except Exception as exc:
+        raise click.UsageError(str(exc)) from exc
+
+    if not seqs:
+        raise click.UsageError("No sequences parsed from the provided input.")
+
+    # Embeddings
+    E = None
+    if embeddings_in is not None:
+        _t_emb0 = time.perf_counter()
+        _c_emb0 = time.process_time()
+        logger.info("Loading embeddings from %s", embeddings_in)
+        try:
+            E = np.load(embeddings_in)
+        except Exception as exc:
+            raise click.UsageError(f"Failed to load embeddings from {embeddings_in}: {exc}") from exc
+        if getattr(E, "shape", (None,))[0] != len(seqs):
+            raise click.UsageError(
+                f"Embeddings count ({getattr(E, 'shape', (None,))[0]}) does not match sequences ({len(seqs)})."
+            )
+        logger.info(
+            "Embeddings loaded: shape=%s wall=%.2fs cpu=%.2fs",
+            getattr(E, "shape", None),
+            time.perf_counter() - _t_emb0,
+            time.process_time() - _c_emb0,
+        )
+    elif not compute_embeddings:
+        raise click.UsageError(
+            "--no-compute-embeddings provided but no --embeddings-in; supply precomputed embeddings or enable computation."
+        )
+    elif embedding_domain == "ohe":
+        _t_emb0 = time.perf_counter()
+        _c_emb0 = time.process_time()
+        source_for_embeddings = seqs_gapped_alignment if seqs_gapped_alignment is not None else seqs
+        lengths = {len(s) for s in source_for_embeddings}
+        if len(lengths) != 1:
+            raise click.UsageError(
+                "Sequences have non-uniform lengths under the provided alignment. "
+                "Provide a single aligned FASTA or rerun with --embedding-domain composition."
+            )
+        E, _ = _encode_multiallele(source_for_embeddings)
+        if seqs_gapped_alignment is not None:
+            logger.info("Using gapped alignment (length=%d) for OHE embeddings.", len(source_for_embeddings[0]))
+        logger.info(
+            "Embeddings (ohe) built: shape=%s wall=%.2fs cpu=%.2fs",
+            getattr(E, "shape", None),
+            time.perf_counter() - _t_emb0,
+            time.process_time() - _c_emb0,
+        )
+    elif embedding_domain == "composition":
+        _t_emb0 = time.perf_counter()
+        _c_emb0 = time.process_time()
+        E = _composition_embeddings(seqs)
+        logger.info(
+            "Embeddings (composition) built: shape=%s wall=%.2fs cpu=%.2fs",
+            getattr(E, "shape", None),
+            time.perf_counter() - _t_emb0,
+            time.process_time() - _c_emb0,
+        )
+    else:
+        _t_emb0 = time.perf_counter()
+        _c_emb0 = time.process_time()
+        plm_embedding_mode = "soft" if soft_embedding else "hard"
+        E = _compute_embeddings_from_sequences(
+            seqs,
+            model_name=plm_model_name,
+            batch_size=plm_batch_size,
+            device=plm_device,
+            embedding_mode=plm_embedding_mode,
+        )
+        logger.info(
+            "Embeddings (PLM-%s) built: shape=%s wall=%.2fs cpu=%.2fs",
+            plm_embedding_mode,
+            getattr(E, "shape", None),
+            time.perf_counter() - _t_emb0,
+            time.process_time() - _c_emb0,
+        )
+
+    logger.info("Embeddings shape=%s", getattr(E, "shape", None))
+
+    if embeddings_out is not None:
+        try:
+            np.save(embeddings_out, E)
+            logger.info("Saved embeddings to %s", embeddings_out)
+        except Exception as exc:
+            raise click.UsageError(f"Failed to save embeddings to {embeddings_out}: {exc}") from exc
+
+    if only_embeddings:
+        if embeddings_out is None:
+            raise click.UsageError("--only-embeddings requires --embeddings-out.")
+        logger.info("only-embeddings set; skipping digraph construction.")
+        logger.info(
+            "evol-diffusion-dilandscape: end wall=%.2fs cpu=%.2fs",
+            time.perf_counter() - t0,
+            time.process_time() - c0,
+        )
+        return
+
+    matrix = _resolve_replacement_matrix(replacement_matrix)
+    logger.info(
+        "Using replacement matrix '%s' (shape=%s)",
+        replacement_matrix,
+        getattr(matrix, "shape", None),
+    )
+
+    if cpus < 1:
+        raise click.UsageError("--cpus must be at least 1.")
+
+    approx_pairs = 0
+    max_pairs = len(seqs) * (len(seqs) - 1)
+    if len(seqs) and k > 0:
+        approx_pairs = len(seqs) * min(k, max(0, len(seqs) - 1))
+    if approx_pairs:
+        logger.info(
+            "Estimated directed neighbour pairs ≈ %d (k=%d, n=%d).",
+            approx_pairs,
+            k,
+            len(seqs),
+        )
+
+    _t_graph0 = time.perf_counter()
+    _c_graph0 = time.process_time()
+    G = create_evol_diffusion_digraph(
+        sequences=seqs,
+        embeddings=E,
+        replacement_matrix=matrix,
+        k=k,
+        tiebuffer=tiebuffer,
+        backend=backend,
+        index_type=index_type,
+        faiss_metric=faiss_metric,
+        include_self=include_self,
+        use_gpu=use_gpu,
+        hnsw_M=hnsw_m,
+        t=t,
+        tau=tau,
+        connectivity_threshold=connectivity_threshold,
+        cpus=cpus,
+        _compute_hamming_edges=compute_hamming_edges,
+    )
+    logger.info(
+        "DiGraph constructed: nodes=%d edges=%d wall=%.2fs cpu=%.2fs",
+        G.number_of_nodes(),
+        G.number_of_edges(),
+        time.perf_counter() - _t_graph0,
+        time.process_time() - _c_graph0,
+    )
+
+    embedding_payload = {embedding_domain: E} if E is not None else None
+    landscape = FitnessLandscape.from_graph(
+        G,
+        embeddings=embedding_payload,
+        active_embedding_domain=embedding_domain if E is not None else None,
+    )
+
+    _t_save0 = time.perf_counter()
+    _c_save0 = time.process_time()
+    assert out_path is not None, "Output path must be set when constructing the landscape."
+    landscape.save(out_path)
+    logger.info(
+        "Saved landscape: wall=%.2fs cpu=%.2fs",
+        time.perf_counter() - _t_save0,
+        time.process_time() - _c_save0,
+    )
+    logger.info("Landscape saved to %s", output)
+    logger.info(
+        "evol-diffusion-dilandscape: end wall=%.2fs cpu=%.2fs",
         time.perf_counter() - t0,
         time.process_time() - c0,
     )
@@ -859,5 +1228,156 @@ def phylo_landscape(
 
     if resolved_log:
         click.echo(f"Log written to {resolved_log}")
+
+
+@cli.command()
+@click.option("--alignment", required=True, type=click.Path(exists=True), help="Path to an aligned FASTA file (.fa/.fasta/.fas).")
+@click.option("--output", required=True, type=click.Path(), help="Destination for the serialized FitnessLandscape (.pkl).")
+@click.option("--replacement-matrix", "replacement_matrix", multiple=True, default=("NQ.pfam",), show_default=True,
+              help="Non-equilibrium replacement matrix (or matrices) for phylogenetic reconstruction. Repeat to provide multiple.")
+@click.option("--model-fitting/--no-model-fitting", default=True, show_default=True,
+              help="Enable model selection / fitting when building the tree.")
+@click.option("--phylo-backend", type=click.Choice(["cogent_nj", "iqtree"]), default="iqtree", show_default=True,
+              help="Backend used for phylogenetic inference.")
+@click.option("--distance", "dist_calc", type=click.Choice(["pdist", "paralinear", "hamming"]), default="pdist", show_default=True,
+              help="Distance measure supplied to the phylogenetic backend.")
+@click.option("--tree", "tree_path", type=click.Path(exists=True), default=None,
+              help="Optional Newick tree to reuse instead of inferring a new one.")
+@click.option("--sanitize/--no-sanitize", default=True, show_default=True,
+              help="Sanitize the alignment (uppercase, canonical residues, unique IDs).")
+@click.option("--compute-hamming-edges/--no-compute-hamming-edges", default=True, show_default=False,
+              help="Attach expected Hamming edge annotations when possible.")
+@click.option("--lightweight-nodes", is_flag=True, default=False, help="Drop heavy posterior arrays from nodes to save memory.")
+@click.option("--hard-ancestors", is_flag=True, default=False,
+              help="Collapse ancestral posterior sequences to hard consensus strings.")
+@click.option("--nested-parallel", is_flag=True, default=False,
+              help="Allow nested parallelism during edge annotation (use with care).")
+@click.option("--log-file", type=click.Path(), default=None, help="Optional log file path.")
+@click.option("--log-level", type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"]), default="INFO", show_default=True)
+@click.option("--log-progress", is_flag=True, default=False, help="Enable verbose progress logging during ASR.")
+@click.option("--log-prefix", type=str, default=None, help="Derive a log filename using this prefix when --log-file is omitted.")
+def phylo_dilandscape(
+    alignment: str,
+    output: str,
+    replacement_matrix: tuple[str, ...],
+    model_fitting: bool,
+    phylo_backend: str,
+    dist_calc: str,
+    tree_path: str | None,
+    sanitize: bool,
+    compute_hamming_edges: bool,
+    lightweight_nodes: bool,
+    hard_ancestors: bool,
+    nested_parallel: bool,
+    log_file: str | None,
+    log_level: str,
+    log_progress: bool,
+    log_prefix: str | None,
+) -> None:
+    """Construct a directed phylogenetic FitnessLandscape from an aligned FASTA."""
+
+    aln_path = Path(alignment)
+    out_path = Path(output)
+    logger, resolved_log = _configure_logger(log_file, log_level, log_prefix, aln_path, out_path)
+
+    if log_progress:
+        logger.info("Progress logging enabled.")
+
+    t0 = time.perf_counter()
+    c0 = time.process_time()
+    logger.info("phylo-dilandscape: start")
+
+    # Load alignment
+    try:
+        _t_aln0 = time.perf_counter()
+        _c_aln0 = time.process_time()
+        aln = load_aligned_seqs(str(aln_path), moltype="protein")
+        n_tips = len(aln.names)
+        aln_len = getattr(aln, "seq_len", None)
+        if aln_len is None:
+            try:
+                aln_len = aln.shape[1]  # type: ignore[index]
+            except Exception:
+                aln_len = len(str(aln.get_gapped_seq(aln.names[0]))) if n_tips else 0
+        logger.info(
+            "Alignment loaded: tips=%d length=%s wall=%.2fs cpu=%.2fs",
+            n_tips,
+            aln_len,
+            time.perf_counter() - _t_aln0,
+            time.process_time() - _c_aln0,
+        )
+    except Exception as exc:
+        raise click.UsageError(f"Failed to load alignment {alignment!r}: {exc}") from exc
+
+    if sanitize:
+        _t_san0 = time.perf_counter()
+        _c_san0 = time.process_time()
+        aln = sanitize_alignment(aln)
+        logger.info(
+            "Alignment sanitised: tips=%d length=%d wall=%.2fs cpu=%.2fs",
+            len(aln.names),
+            getattr(aln, "seq_len", aln.shape[1] if hasattr(aln, "shape") else 0),
+            time.perf_counter() - _t_san0,
+            time.process_time() - _c_san0,
+        )
+
+    matrices = [str(m) for m in (replacement_matrix or ("NQ.pfam",))]
+    if not matrices:
+        matrices = ["NQ.pfam"]
+
+    if not all("nq" in m.lower() for m in matrices):
+        raise click.UsageError("Directed phylogenetic construction requires non-equilibrium (NQ) models.")
+
+    kwargs: dict[str, Any] = {}
+    if tree_path is not None:
+        kwargs["phylogenetic_tree"] = Path(tree_path)
+
+    _t_graph0 = time.perf_counter()
+    _c_graph0 = time.process_time()
+    try:
+        graph = create_phylo_digraph(
+            sequences=aln,
+            replacement_matrix=matrices,
+            model_fitting=model_fitting,
+            _log_progress=log_progress,
+            _nested_parallel=nested_parallel,
+            _compute_hamming_edges=compute_hamming_edges,
+            _lightweight_nodes=lightweight_nodes,
+            _hard_ancestors=hard_ancestors,
+            phylo_backend=phylo_backend,
+            _dist_calc=dist_calc,
+            **kwargs,
+        )
+    except Exception as exc:
+        raise click.UsageError(f"Failed to construct phylogenetic digraph: {exc}") from exc
+    logger.info(
+        "Phylogenetic digraph constructed: nodes=%d edges=%d wall=%.2fs cpu=%.2fs",
+        graph.number_of_nodes(),
+        graph.number_of_edges(),
+        time.perf_counter() - _t_graph0,
+        time.process_time() - _c_graph0,
+    )
+
+    landscape = FitnessLandscape.from_graph(graph)
+
+    _t_save0 = time.perf_counter()
+    _c_save0 = time.process_time()
+    landscape.save(out_path)
+    logger.info(
+        "Saved landscape: wall=%.2fs cpu=%.2fs",
+        time.perf_counter() - _t_save0,
+        time.process_time() - _c_save0,
+    )
+    logger.info("Landscape saved to %s", output)
+    logger.info(
+        "phylo-dilandscape: end wall=%.2fs cpu=%.2fs",
+        time.perf_counter() - t0,
+        time.process_time() - c0,
+    )
+
+    if resolved_log:
+        click.echo(f"Log written to {resolved_log}")
+
+
 if __name__ == "__main__":  # pragma: no cover
     cli()
