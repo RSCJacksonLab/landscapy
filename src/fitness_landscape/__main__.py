@@ -115,7 +115,12 @@ def _composition_embeddings(seqs: Sequence[Any]) -> np.ndarray:
 @cli.command()
 # Reading / writing
 @click.option("--sequences", required=True, type=click.Path(exists=True), help="Path to the input FASTA file or directory.")
-@click.option("--output", required=True, type=click.Path(), help="Destination for the serialized FitnessLandscape (.pkl).")
+@click.option(
+    "--output",
+    type=click.Path(),
+    default=None,
+    help="Destination for the serialized FitnessLandscape (.pkl). Required unless --only-embeddings.",
+)
 # Diffusion graph parameters
 @click.option("--k", type=int, default=50, show_default=True, help="kNN neighbours for pre-filtering.")
 @click.option("--t", callback=_parse_diffusion_power, type=str, default="5", show_default=True, help="Diffusion power; accepts integers, 'inf', or 'none'.")
@@ -131,10 +136,17 @@ def _composition_embeddings(seqs: Sequence[Any]) -> np.ndarray:
 @click.option("--compute-hamming-edges/--no-compute-hamming-edges", default=True, show_default=True, help="Attach expected Hamming edge weights when possible.")
 # Embeddings
 @click.option("--compute-embeddings/--no-compute-embeddings", default=True, show_default=True, help="Compute node embeddings (OHE, composition, or PLM).")
-@click.option("--embedding-domain", type=click.Choice(["ohe", "composition", "plm"]), default="ohe", show_default=True, help="Embedding domain for node attributes.")
+@click.option(
+    "--embedding-domain",
+    type=click.Choice(["ohe", "composition", "plm"]),
+    default=None,
+    show_default=False,
+    help="Embedding domain for node attributes. Defaults to 'ohe' unless --only-embeddings is set, where 'plm' is assumed.",
+)
 @click.option("--plm-model-name", type=str, default="facebook/esm2_t6_8M_UR50D", show_default=True, help="Protein language model to use when embedding-domain=plm.")
 @click.option("--plm-batch-size", type=int, default=64, show_default=True, help="Batch size for PLM embeddings.")
 @click.option("--plm-device", type=str, default=None, help="Device for PLM embeddings (e.g. 'cpu' or 'cuda').")
+@click.option("--soft-embedding", is_flag=True, default=False, show_default=True, help="Use relaxed (soft) embeddings when embedding-domain=plm.")
 # Embedding checkpoints
 @click.option("--embeddings-in", type=click.Path(exists=True), default=None, help="Optional .npy file with precomputed embeddings.")
 @click.option("--embeddings-out", type=click.Path(), default=None, help="Optional path to save computed/loaded embeddings (.npy).")
@@ -146,7 +158,7 @@ def _composition_embeddings(seqs: Sequence[Any]) -> np.ndarray:
 @click.option("--log-prefix", type=str, default=None, help="Derive a log filename using this prefix when --log-file is not provided.")
 def evol_diffusion_landscape(
     sequences: str,
-    output: str,
+    output: str | None,
     k: int,
     t: Optional[Union[int, float]],
     tau: float,
@@ -160,10 +172,11 @@ def evol_diffusion_landscape(
     cpus: int,
     compute_hamming_edges: bool,
     compute_embeddings: bool,
-    embedding_domain: str,
+    embedding_domain: str | None,
     plm_model_name: str,
     plm_batch_size: int,
     plm_device: str | None,
+    soft_embedding: bool,
     embeddings_in: str | None,
     embeddings_out: str | None,
     only_embeddings: bool,
@@ -174,9 +187,17 @@ def evol_diffusion_landscape(
 ) -> None:
     """Construct an evolutionary diffusion FitnessLandscape and save it."""
 
+    user_set_embedding_domain = embedding_domain is not None
+    if not user_set_embedding_domain:
+        embedding_domain = "plm" if only_embeddings else "ohe"
+
     seq_path = Path(sequences)
-    out_path = Path(output)
-    logger, resolved_log = _configure_logger(log_file, log_level, log_prefix, seq_path, out_path)
+    out_path = Path(output) if output is not None else None
+    log_target = out_path if out_path is not None else seq_path
+    logger, resolved_log = _configure_logger(log_file, log_level, log_prefix, seq_path, log_target)
+
+    if not user_set_embedding_domain and only_embeddings:
+        logger.info("Auto-selected embedding-domain=plm for --only-embeddings.")
 
     if log_progress:
         logger.info("Progress logging enabled.")
@@ -186,6 +207,8 @@ def evol_diffusion_landscape(
     logger.info("evol-diffusion-landscape: start")
 
     need_gapped_embeddings = embedding_domain == "ohe"
+    if not only_embeddings and out_path is None:
+        raise click.UsageError("--output is required unless --only-embeddings is set.")
     seqs_gapped_alignment: list | None = None
 
     # Read sequences
@@ -288,14 +311,17 @@ def evol_diffusion_landscape(
     else:
         _t_emb0 = time.perf_counter()
         _c_emb0 = time.process_time()
+        plm_embedding_mode = "soft" if soft_embedding else "hard"
         E = _compute_embeddings_from_sequences(
             seqs,
             model_name=plm_model_name,
             batch_size=plm_batch_size,
             device=plm_device,
+            embedding_mode=plm_embedding_mode,
         )
         logger.info(
-            "Embeddings (PLM) built: shape=%s wall=%.2fs cpu=%.2fs",
+            "Embeddings (PLM-%s) built: shape=%s wall=%.2fs cpu=%.2fs",
+            plm_embedding_mode,
             getattr(E, "shape", None),
             time.perf_counter() - _t_emb0,
             time.process_time() - _c_emb0,
@@ -376,6 +402,7 @@ def evol_diffusion_landscape(
 
     _t_save0 = time.perf_counter()
     _c_save0 = time.process_time()
+    assert out_path is not None, "Output path must be set when constructing the landscape."
     landscape.save(out_path)
     logger.info(
         "Saved landscape: wall=%.2fs cpu=%.2fs",
@@ -412,7 +439,13 @@ def evol_diffusion_landscape(
 @click.option("--compute-hamming-edges/--no-compute-hamming-edges", default=True, show_default=True, help="Attach expected Hamming edge weights when possible.")
 # Embeddings
 @click.option("--compute-embeddings/--no-compute-embeddings", default=True, show_default=True, help="Compute node embeddings (OHE, composition, or PLM).")
-@click.option("--embedding-domain", type=click.Choice(["ohe", "composition", "plm"]), default="ohe", show_default=True, help="Embedding domain for node attributes.")
+@click.option(
+    "--embedding-domain",
+    type=click.Choice(["ohe", "composition", "plm"]),
+    default=None,
+    show_default=False,
+    help="Embedding domain for node attributes. Defaults to 'ohe' unless --only-embeddings is set, where 'plm' is assumed.",
+)
 @click.option("--plm-model-name", type=str, default="facebook/esm2_t6_8M_UR50D", show_default=True, help="Protein language model to use when embedding-domain=plm.")
 @click.option("--plm-batch-size", type=int, default=64, show_default=True, help="Batch size for PLM embeddings.")
 @click.option("--plm-device", type=str, default=None, help="Device for PLM embeddings (e.g. 'cpu' or 'cuda').")
@@ -441,7 +474,7 @@ def knn_landscape(
     seed: int | None,
     compute_hamming_edges: bool,
     compute_embeddings: bool,
-    embedding_domain: str,
+    embedding_domain: str | None,
     plm_model_name: str,
     plm_batch_size: int,
     plm_device: str | None,
@@ -455,9 +488,16 @@ def knn_landscape(
 ) -> None:
     """Construct a k-nearest neighbour FitnessLandscape and save it."""
 
+    user_set_embedding_domain = embedding_domain is not None
+    if not user_set_embedding_domain:
+        embedding_domain = "plm" if only_embeddings else "ohe"
+
     seq_path = Path(sequences)
     out_path = Path(output)
     logger, resolved_log = _configure_logger(log_file, log_level, log_prefix, seq_path, out_path)
+
+    if not user_set_embedding_domain and only_embeddings:
+        logger.info("Auto-selected embedding-domain=plm for --only-embeddings.")
 
     if log_progress:
         logger.info("Progress logging enabled.")
