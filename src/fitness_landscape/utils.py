@@ -813,11 +813,17 @@ def fasta_to_prot20_sequences(filepath: str | Path,
                 continue
             seqs.append(BaseNumpySequence(ungapped, alphabet=PROT_20, sequence_id=name))
         return seqs
+    record_count: Optional[int] = None
     try:
-        with open(p, 'r'):
-            pass
+        with open(p, 'r') as _fh_check:
+            record_count = 0
+            for line in _fh_check:
+                if line.lstrip().startswith('>'):
+                    record_count += 1
     except FileNotFoundError:
         raise
+    except OSError:
+        record_count = None
     # Try alignment path first
     try:
         aln_loaded = load_aligned_seqs(str(p), moltype='protein')
@@ -845,9 +851,12 @@ def fasta_to_prot20_sequences(filepath: str | Path,
                 raise
             sequences = _ungapped_sequences_from(aln)
 
-        if return_gapped:
-            return sequences, aligned_sequences
-        return sequences
+        if record_count and len(sequences) != record_count:
+            aln_loaded = None
+        else:
+            if return_gapped:
+                return sequences, aligned_sequences
+            return sequences
 
     # Fallback path: manually parse FASTA
     legal = set(PROT_20)
