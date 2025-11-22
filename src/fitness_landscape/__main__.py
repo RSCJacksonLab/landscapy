@@ -447,7 +447,7 @@ def evol_diffusion_landscape(
     )
 
     embedding_payload = {embedding_domain: E} if E is not None else None
-    landscape = DirectedFitnessLandscape.from_graph(
+    landscape = FitnessLandscape.from_graph(
         G,
         embeddings=embedding_payload,
         active_embedding_domain=embedding_domain if E is not None else None,
@@ -959,7 +959,7 @@ def evol_diffusion_dilandscape(
     )
 
     embedding_payload = {embedding_domain: E} if E is not None else None
-    landscape = FitnessLandscape.from_graph(
+    landscape = DirectedFitnessLandscape.from_graph(
         G,
         embeddings=embedding_payload,
         active_embedding_domain=embedding_domain if E is not None else None,
@@ -1405,7 +1405,7 @@ def phylo_landscape(
         time.process_time() - _c_graph0,
     )
 
-    landscape = DirectedFitnessLandscape.from_graph(graph)
+    landscape = FitnessLandscape.from_graph(graph)
 
     _t_save0 = time.perf_counter()
     _c_save0 = time.process_time()

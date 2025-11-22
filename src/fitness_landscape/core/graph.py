@@ -427,9 +427,38 @@ def _one_hot_matrix_amino(seqs: List[BaseNumpySequence]) -> np.ndarray:
             X[r, p*W + amap[str(sym)]] = 1.0
     return X
 
+def _is_binary_like_matrix(X: np.ndarray, sample: int = 10000) -> bool:
+    """
+    Lightweight heuristic to decide if an embedding matrix represents
+    discrete encodings (e.g., integer labels or one-hot vectors). For
+    such matrices Hamming distance is appropriate; otherwise we should
+    use a continuous metric like Euclidean.
+    """
+    if np.issubdtype(X.dtype, np.bool_) or np.issubdtype(X.dtype, np.integer):
+        return True
+
+    if not np.issubdtype(X.dtype, np.floating):
+        return False
+
+    flat = X.ravel()
+    if flat.size > sample:
+        flat = flat[:sample]
+    return np.all((flat == 0.0) | (flat == 1.0))
+
+def _resolve_balltree_metric(X: np.ndarray, metric: str | None = None) -> str:
+    """
+    Choose an appropriate BallTree metric when none is provided.
+    Defaults to Hamming for discrete encodings and Euclidean otherwise.
+    """
+    if metric is not None:
+        return metric
+    return "hamming" if _is_binary_like_matrix(X) else "euclidean"
+
 def _find_knn_balltree(X : np.ndarray,
                        k : int,
-                       tiebuffer : int = 0) -> Tuple[np.ndarray, np.ndarray]:
+                       tiebuffer : int = 0,
+                       *,
+                       metric: str | None = None) -> Tuple[np.ndarray, np.ndarray]:
     """
     Helper function to find nearest neighbors by BallTree.
 
@@ -443,6 +472,11 @@ def _find_knn_balltree(X : np.ndarray,
         
     tiebuffer : int, defaut=1
         The tiebuffer for equidistant neighbors above k. 
+
+    metric : str, optional
+        Distance metric to use. When ``None`` (default) the function
+        auto-selects ``'hamming'`` for discrete/binary encodings and
+        ``'euclidean'`` otherwise.
     
     Returns
     -------
@@ -450,7 +484,8 @@ def _find_knn_balltree(X : np.ndarray,
         Tuple of distances and indices.
     """
     n = X.shape[0]
-    nn = NearestNeighbors(algorithm='auto', metric='hamming')
+    metric = _resolve_balltree_metric(X, metric)
+    nn = NearestNeighbors(algorithm='auto', metric=metric)
     nn.fit(X)
     kq = min(k + 1 + tiebuffer, n)
     dists, inds = nn.kneighbors(X, n_neighbors=kq, return_distance=True)
@@ -1463,8 +1498,11 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     if num_cpus < 1:
         raise ValueError("`cpus` must be an integer >= 1.")
     _t_knn0 = time.perf_counter(); _c_knn0 = time.process_time()
+    balltree_metric = _resolve_balltree_metric(embeddings)
+    metric_used = None
     if backend == 'balltree':
-        _, neighbor_indices = _find_knn_balltree(embeddings, k, tiebuffer)
+        _, neighbor_indices = _find_knn_balltree(embeddings, k, tiebuffer, metric=balltree_metric)
+        metric_used = balltree_metric
     
     # Use FAISS algorithm (approx or exact).
     elif backend == 'faiss':
@@ -1475,11 +1513,13 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                                        use_gpu=use_gpu,
                                        hnsw_M=hnsw_M,
                                        tiebuffer=tiebuffer) 
+        metric_used = faiss_metric
                                     
     # Select backend algorithm based on size of embeddings.
     elif backend == 'auto':
         if embeddings.shape[0] < 5000:
-            _, neighbor_indices = _find_knn_balltree(embeddings, k, tiebuffer)
+            _, neighbor_indices = _find_knn_balltree(embeddings, k, tiebuffer, metric=balltree_metric)
+            metric_used = balltree_metric
         else:
             _, neighbor_indices = _find_knn_faiss(embeddings,
                                            k,
@@ -1488,7 +1528,8 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                                            use_gpu=use_gpu,
                                            hnsw_M=hnsw_M,
                                            tiebuffer=tiebuffer) 
-    _logger.info('kNN prefilter done: backend=%s k=%d n=%d wall=%.2fs cpu=%.2fs', backend, k, n_sequences, time.perf_counter()-_t_knn0, time.process_time()-_c_knn0)
+            metric_used = faiss_metric
+    _logger.info('kNN prefilter done: backend=%s metric=%s k=%d n=%d wall=%.2fs cpu=%.2fs', backend, metric_used, k, n_sequences, time.perf_counter()-_t_knn0, time.process_time()-_c_knn0)
 
     pairs_to_align = set()
     for i in range(n_sequences):
