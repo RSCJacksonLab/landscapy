@@ -1176,9 +1176,13 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
     if embeddings is None:
         embeddings, _ = _encode_multiallele(sequences)
 
-    k_for_scale = k
-    if embeddings.shape[0] <= k_for_scale:
-        k_for_scale = embeddings.shape[0] - 1
+    n_points = embeddings.shape[0]
+    k_for_scale = min(k, n_points - 1)
+    if n_points > 1 and k >= n_points and k_for_scale == n_points - 1:
+        # When k overshoots a small dataset, avoid using the farthest neighbour
+        # to set the RBF bandwidth; otherwise distant points flatten the kernel
+        # and collapse clustered structure (e.g., fully connected graphs).
+        k_for_scale = max(1, int(np.sqrt(n_points)))
     
     # Use balltree algorithm (will fail as shape of embeddings >>>)
     if backend == 'balltree':
@@ -1218,8 +1222,6 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         median_sigma_sq = float(np.median(pos))**2
         if not np.isfinite(median_sigma_sq) or median_sigma_sq <= 0:
             median_sigma_sq = 1.0
-
-    gamma = 1.0 / (2 * median_sigma_sq)
 
     gamma = 1.0 / (2 * median_sigma_sq)
     kernel_matrix = rbf_kernel(embeddings, gamma=gamma)
