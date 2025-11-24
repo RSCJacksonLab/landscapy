@@ -640,6 +640,74 @@ def get_ohe_seq(sequence: Union[str, np.ndarray, torch.Tensor],
     else:
         raise ValueError("Input must be a string, numpy array, or torch tensor.")
 
+
+def sequence_to_text(seq: BaseNumpySequence) -> str:
+    """
+    Convert a BaseNumpySequence (or compatible sequence proxy) to a
+    plain amino-acid string using '-' for gaps.
+    """
+    tokens = []
+    for token in seq.to_array():
+        symbol = str(token)
+        if symbol == "gap":
+            symbol = "-"
+        tokens.append(symbol.upper() if len(symbol) == 1 else symbol)
+    return "".join(tokens)
+
+
+def string_to_sequence(seq_str: str, *, sequence_id: str | None = None) -> BaseNumpySequence:
+    """
+    Create a BaseNumpySequence from an amino-acid string (using '-'
+    for gaps). Preserves whether the sequence contains gaps when
+    constructing the alphabet.
+    """
+    chars: list[str] = []
+    has_gap = False
+    for ch in seq_str:
+        if ch == "-":
+            chars.append("-")
+            has_gap = True
+        else:
+            chars.append(ch.upper())
+    alphabet = PROT_20 + (["-"] if has_gap else [])
+    return BaseNumpySequence(chars, alphabet=alphabet, sequence_id=sequence_id)
+
+
+def hamming_distance_str(a: str, b: str) -> int:
+    """Compute the Hamming distance between two equal-length strings."""
+    if len(a) != len(b):
+        raise ValueError("Sequences must have the same length to compute Hamming distance.")
+    return sum(ch1 != ch2 for ch1, ch2 in zip(a, b))
+
+
+def resolve_plm_embedder(
+    sequences: Sequence[BaseNumpySequence],
+    *,
+    embedding_mode: Literal["auto", "hard", "soft"],
+    model_name: str,
+    device: str | None,
+    batch_size: int,
+):
+    """
+    Select the appropriate PLM embedder (hard tokens vs relaxed) based
+    on the requested embedding_mode and whether any sequences are soft.
+    """
+    mode = embedding_mode.lower()
+    if mode == "auto":
+        mode = "soft" if any(isinstance(seq, SoftSequence) for seq in sequences) else "hard"
+
+    if mode == "soft":
+        from .embedding.soft_embedding import ESMEmbedder as SoftESMEmbedder
+
+        embedder = SoftESMEmbedder(model_name=model_name, device=device, batch_size=batch_size)
+    elif mode == "hard":
+        from .embedding.hard_embedding import ESMEmbedder as HardESMEmbedder
+
+        embedder = HardESMEmbedder(model_name=model_name, device=device, batch_size=batch_size)
+    else:
+        raise ValueError("embedding_mode must be 'auto', 'hard', or 'soft'.")
+    return embedder, mode
+
 def alignment_to_base_numpy_sequences(alignment: Alignment,
                                       alphabet: List[str] = PROT_20) -> List[BaseNumpySequence]:
     """
@@ -745,11 +813,17 @@ def fasta_to_prot20_sequences(filepath: str | Path,
                 continue
             seqs.append(BaseNumpySequence(ungapped, alphabet=PROT_20, sequence_id=name))
         return seqs
+    record_count: Optional[int] = None
     try:
-        with open(p, 'r'):
-            pass
+        with open(p, 'r') as _fh_check:
+            record_count = 0
+            for line in _fh_check:
+                if line.lstrip().startswith('>'):
+                    record_count += 1
     except FileNotFoundError:
         raise
+    except OSError:
+        record_count = None
     # Try alignment path first
     try:
         aln_loaded = load_aligned_seqs(str(p), moltype='protein')
@@ -777,9 +851,12 @@ def fasta_to_prot20_sequences(filepath: str | Path,
                 raise
             sequences = _ungapped_sequences_from(aln)
 
-        if return_gapped:
-            return sequences, aligned_sequences
-        return sequences
+        if record_count and len(sequences) != record_count:
+            aln_loaded = None
+        else:
+            if return_gapped:
+                return sequences, aligned_sequences
+            return sequences
 
     # Fallback path: manually parse FASTA
     legal = set(PROT_20)
