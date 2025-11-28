@@ -422,8 +422,10 @@ class FitnessLandscape:
         if not self.embeddings:
             return None
         key = domain if domain is not None else self._active_embedding_domain
-        if key is None:
-            return None
+        if key is None and self.embeddings:
+            # If no active domain is set but embeddings exist, default to the first
+            key = next(iter(self.embeddings))
+            self._active_embedding_domain = key
         return self.embeddings.get(key)
     
     def _normalize_seq_key(self, k: SeqKey) -> Tuple:
@@ -1153,6 +1155,114 @@ class FitnessLandscape:
             if not annotations:
                 self.graph.nodes[node].pop("annotations", None)
 
+    def annotation_to_fitness(
+        self,
+        annotation: AnnotationLayer | str,
+        *,
+        field: str | None = None,
+        name: str | None = None,
+        dtype: Literal["categorical", "numeric"] = "categorical",
+        categories: list[Any] | None = None,
+        missing_category: Any = "__missing__",
+        metadata: Mapping[str, Any] | None = None,
+        attach: bool = False,
+    ) -> BaseFitnessLayer:
+        """
+        Convert an annotation column into a fitness layer.
+
+        Parameters
+        ----------
+        annotation : AnnotationLayer or str
+            Layer instance or name to convert.
+        field : str, optional
+            Column to use. If omitted and the layer has a single column,
+            that column is used.
+        name : str, optional
+            Name for the resulting fitness layer. Defaults to ``field`` or
+            the annotation layer name.
+        dtype : {"categorical", "numeric"}, default="categorical"
+            Target fitness layer type.
+        categories : list, optional
+            Explicit categories for categorical conversion. When omitted,
+            categories are inferred (including a placeholder for missing
+            values when present).
+        missing_category : Any, default="__missing__"
+            Placeholder used for None/NaN entries. Set to ``None`` to keep
+            ``None`` as a category.
+        metadata : mapping, optional
+            Metadata to attach to the new layer.
+        attach : bool, default=False
+            When True, attach the resulting fitness layer to the landscape.
+
+        Returns
+        -------
+        BaseFitnessLayer
+            The constructed fitness layer.
+        """
+        layer = self.get_annotation_layer(annotation) if isinstance(annotation, str) else annotation
+        if not isinstance(layer, AnnotationLayer):
+            raise TypeError("`annotation` must be an AnnotationLayer instance or name.")
+
+        df = layer.to_dataframe(copy=True)
+        if field is None:
+            if df.shape[1] != 1:
+                raise ValueError("Annotation layer has multiple columns; specify `field`.")
+            field = df.columns[0]
+        if field not in df.columns:
+            raise KeyError(f"Field '{field}' not found in annotation layer '{layer.name}'.")
+
+        values = df[field].tolist()
+
+        def _is_missing(v: Any) -> bool:
+            try:
+                return pd.isna(v)
+            except Exception:
+                return False
+
+        normalized: list[Any] = []
+        missing_seen = False
+        for v in values:
+            if _is_missing(v):
+                missing_seen = True
+                normalized.append(missing_category)
+            else:
+                normalized.append(v)
+
+        resolved_name = name or field or layer.name
+
+        if dtype == "numeric":
+            if missing_seen and missing_category is not None:
+                raise ValueError("Cannot convert to numeric fitness with missing values present.")
+            try:
+                scalars = np.asarray(normalized, dtype=float).tolist()
+            except Exception as exc:
+                raise ValueError("Annotation values cannot be coerced to numeric.") from exc
+            fitness_layer = NumericFitness.from_scalars(resolved_name, scalars, metadata=metadata)
+        elif dtype == "categorical":
+            def _unique_preserve(seq: Iterable[Any]) -> list[Any]:
+                seen = set()
+                out = []
+                for x in seq:
+                    if x not in seen:
+                        seen.add(x)
+                        out.append(x)
+                return out
+
+            if categories is None:
+                categories = _unique_preserve(normalized if missing_seen else list(normalized))
+            fitness_layer = CategoricalFitness(
+                name=resolved_name,
+                values=normalized,
+                categories=categories,
+                metadata=metadata,
+            )
+        else:
+            raise ValueError(f"Unsupported dtype {dtype!r}; use 'categorical' or 'numeric'.")
+
+        if attach:
+            self.attach(fitness_layer)
+        return fitness_layer
+
     def query_annotations(
         self,
         layer_name: str,
@@ -1715,11 +1825,14 @@ class FitnessLandscape:
                             *,
                             sequence_idx: Union[List[int], int] = None,
                             sequence: Union[List[str], str] = None,
-                            tokenizer: Any | str | None = "facebook/esm2_t6_8M_UR50D") -> List[Dict[str, Any]]:
+                            tokenizer: Any | str | None = "facebook/esm2_t6_8M_UR50D",
+                            feature_view: Literal["auto", "tokens", "embedding", "ohe"] = "auto",
+                            include_embeddings: bool = False,
+                            as_batch: bool = False) -> List[Dict[str, Any]] | Dict[str, Any]:
         """
         Exports the sequences and their fitness layers as a list of
-        dictionaries containing tensors. Supports indexing by sequence
-        and by int.
+        dictionaries containing tensors, or as a stacked batch when
+        `as_batch=True`. Supports indexing by sequence and by int.
 
         Parameters
         ----------
@@ -1737,22 +1850,34 @@ class FitnessLandscape:
               1-D LongTensor of token ids (including special tokens as per the tokenizer).
             - If explicitly set to `None`, behavior matches current defaults: sequences are
               exported as one-hot tensors per position.
+        
+        feature_view : {"auto", "tokens", "embedding", "ohe"}, default=`"auto"`
+            Controls what is placed in `sequence_tensor`. `"auto"` prefers tokenized
+            text when a tokenizer is provided, otherwise embeddings when available,
+            otherwise one-hot encodings.
+
+        include_embeddings : bool, default=`False`
+            When True and embeddings are available, also include them under an
+            `embedding` key in the returned structure (in addition to whichever
+            `sequence_tensor` view is selected).
+
+        as_batch : bool, default=`False`
+            When True, returns a single dictionary with stacked tensors instead of
+            a list of per-sequence dictionaries.
 
         Returns
         -------
-        List[Dict[str, Any]]
-            A list where each item is a dictionary representing a
-            single sequence and its associated data. Each dictionary
-            has the keys:
-            - 'sequence_tensor': The one-hot encoded sequence or
-            embedding.
-            - 'fitness_tensors': A dictionary where keys are layer
-            names and values are the corresponding fitness tensors
-            for that sequence.
+        List[Dict[str, Any]] or Dict[str, Any]
+            Per-sequence dictionaries (default) or a stacked batch when
+            `as_batch=True`. Each record contains:
+            - 'sequence_tensor': token ids, embeddings, or one-hot encodings.
+            - 'fitness_tensors': dict of fitness layer tensors.
+            - 'attention_mask': only when tokenized.
+            - 'embedding': optional extra view when `include_embeddings=True`.
         """
-        target_indices = []
+        target_indices: list[int] = []
         if sequence_idx is not None:
-            target_indices = [sequence_idx] if isinstance(sequence_idx, int) else sequence_idx
+            target_indices = [sequence_idx] if isinstance(sequence_idx, int) else list(sequence_idx)
         elif sequence is not None:
             sequence_list = [sequence] if isinstance(sequence, str) else sequence
             dtype = self.sequences[0].to_array().dtype
@@ -1762,11 +1887,38 @@ class FitnessLandscape:
                 if idx is not None: target_indices.append(idx)
                 else: raise ValueError(f"Sequence '{seq_str}' not found.")
         else:
-            target_indices = range(len(self.sequences))
-        
-        # If tokenizer is provided (instance or model name), produce token id tensors.
-        if tokenizer is not None:
-            # Prepare tokenizer instance
+            target_indices = list(range(len(self.sequences)))
+
+        emb_array = self.get_embedding()
+        emb_tensor: torch.Tensor | None = None
+        if emb_array is not None:
+            emb_tensor = torch.as_tensor(emb_array, dtype=torch.float32)
+            if emb_tensor.shape[0] != len(self.sequences):
+                raise ValueError(
+                    f"Embeddings rows {emb_tensor.shape[0]} != number of sequences {len(self.sequences)}; "
+                    "cannot export tensors safely."
+                )
+
+        # Decide which feature view to export.
+        mode = feature_view
+        if feature_view == "auto":
+            if tokenizer is not None:
+                mode = "tokens"
+            elif emb_tensor is not None:
+                mode = "embedding"
+            else:
+                mode = "ohe"
+        if mode == "tokens" and tokenizer is None:
+            raise ValueError("feature_view='tokens' requires a tokenizer.")
+        if mode not in {"tokens", "embedding", "ohe"}:
+            raise ValueError(f"Unsupported feature_view: {feature_view!r}")
+
+        fitness_dict = {
+            name: layer.get_tensor()[target_indices] for name, layer in self.fitness_layers.items()
+        }
+
+        # Tokenization path (padded)
+        if mode == "tokens":
             tok = None
             try:
                 if isinstance(tokenizer, str):
@@ -1781,44 +1933,81 @@ class FitnessLandscape:
             except Exception:
                 tok = None
 
-            if tok is not None:
-                # First pass: tokenize and collect lengths
+            if tok is None:
+                # Fallback to OHE/emb when tokenization failed
+                mode = "embedding" if emb_tensor is not None else "ohe"
+            else:
                 ids_list: list[torch.Tensor] = []
                 max_len = 0
-                seq_cache: dict[int, str] = {}
+                seq_texts: dict[int, str] = {}
                 for i in target_indices:
                     s = self.sequences[i]
                     arr = [str(x) for x in s.to_array()]
                     arr = ['-' if x == 'gap' else x for x in arr]
                     seq_text = ''.join(arr)
                     spaced = ' '.join(list(seq_text))
-                    seq_cache[i] = spaced
+                    seq_texts[i] = spaced
                     enc = tok(spaced, add_special_tokens=True, return_tensors='pt')
                     ids = enc['input_ids'].squeeze(0).to(torch.long)
                     ids_list.append(ids)
                     if ids.numel() > max_len:
                         max_len = int(ids.numel())
 
-                # Second pass: pad and build output records
-                out: list[dict[str, Any]] = []
-                for ids, i in zip(ids_list, target_indices):
+                token_ids = torch.zeros((len(ids_list), max_len), dtype=torch.long)
+                attn_mask = torch.zeros((len(ids_list), max_len), dtype=torch.long)
+                for row, ids in enumerate(ids_list):
                     L = ids.numel()
-                    padded = torch.zeros((max_len,), dtype=torch.long)
-                    mask = torch.zeros((max_len,), dtype=torch.long)
-                    padded[:L] = ids
-                    mask[:L] = 1
-                    out.append({
-                        'sequence_tensor': padded,
-                        'attention_mask': mask,
-                        'fitness_tensors': {name: layer.get_tensor()[i] for name, layer in self.fitness_layers.items()}
-                    })
+                    token_ids[row, :L] = ids
+                    attn_mask[row, :L] = 1
+
+                if as_batch:
+                    batch: dict[str, Any] = {
+                        "sequence_tensor": token_ids,
+                        "attention_mask": attn_mask,
+                        "fitness_tensors": fitness_dict,
+                    }
+                    if include_embeddings and emb_tensor is not None:
+                        batch["embedding"] = emb_tensor[target_indices]
+                    return batch
+
+                out: list[dict[str, Any]] = []
+                for row, i in enumerate(target_indices):
+                    rec = {
+                        "sequence_tensor": token_ids[row],
+                        "attention_mask": attn_mask[row],
+                        "fitness_tensors": {name: tensor[row] for name, tensor in fitness_dict.items()},
+                    }
+                    if include_embeddings and emb_tensor is not None:
+                        rec["embedding"] = emb_tensor[i]
+                    out.append(rec)
                 return out
 
-        # Default: one-hot per-position tensor (current behavior)
-        return [{
-            'sequence_tensor': torch.tensor(self.sequences[i].to_one_hot(), dtype=torch.float32),
-            'fitness_tensors': {name: layer.get_tensor()[i] for name, layer in self.fitness_layers.items()}
-        } for i in target_indices]
+        # Non-token views: embeddings or one-hot encodings.
+        def _base_tensor(i: int) -> torch.Tensor:
+            if mode == "embedding":
+                return emb_tensor[i]  # type: ignore[index]
+            return torch.tensor(self.sequences[i].to_one_hot(), dtype=torch.float32)
+
+        if as_batch:
+            features = torch.stack([_base_tensor(i) for i in target_indices], dim=0)
+            batch = {
+                "sequence_tensor": features,
+                "fitness_tensors": fitness_dict,
+            }
+            if include_embeddings and emb_tensor is not None and mode != "embedding":
+                batch["embedding"] = emb_tensor[target_indices]
+            return batch
+
+        records: list[dict[str, Any]] = []
+        for row, i in enumerate(target_indices):
+            rec = {
+                "sequence_tensor": _base_tensor(i),
+                "fitness_tensors": {name: tensor[row] for name, tensor in fitness_dict.items()}
+            }
+            if include_embeddings and emb_tensor is not None:
+                rec["embedding"] = emb_tensor[i]
+            records.append(rec)
+        return records
 
     def compute_plm_embeddings(
         self,

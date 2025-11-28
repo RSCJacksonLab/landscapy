@@ -63,3 +63,13 @@ def test_to_graph_tensor_tokenizer_padding(binary_3bit_landscape):
     row = data.attention_mask[0]
     ones = int(row.sum().item())
     assert ones <= row.numel()
+
+
+def test_to_sequence_tensors_as_batch_tokenizer(binary_3bit_landscape):
+    tok = DummyTokenizer()
+    batch = binary_3bit_landscape.to_sequence_tensors(tokenizer=tok, as_batch=True)
+    assert isinstance(batch, dict)
+    assert "sequence_tensor" in batch and "attention_mask" in batch
+    assert batch["sequence_tensor"].shape == batch["attention_mask"].shape
+    assert batch["sequence_tensor"].shape[0] == len(binary_3bit_landscape.sequences)
+    assert "fitness_tensors" in batch
