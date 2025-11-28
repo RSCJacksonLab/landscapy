@@ -1,10 +1,12 @@
 import networkx as nx
 import pandas as pd
+import numpy as np
 import pytest
 
 from fitness_landscape.core.annotation import AnnotationLayer
 from fitness_landscape.core.landscape import FitnessLandscape
 from fitness_landscape.core.sequence import BaseNumpySequence
+from fitness_landscape.core.fitness import CategoricalFitness
 
 
 def test_annotation_layer_query_supports_membership():
@@ -167,3 +169,32 @@ def test_attach_annotation_map_by_index_records_allow_missing():
     assert df.loc[0, "region"] == "north"
     assert pd.isna(df.loc[1, "region"])
     assert df.loc[2, "region"] == "south"
+
+
+def test_fitness_from_annotation_layer_defaults_categorical_and_handles_missing():
+    layer = AnnotationLayer("anno", {"label": ["A", None, "B", np.nan]})
+    seqs = [BaseNumpySequence([i]) for i in range(len(layer))]
+    G = nx.Graph()
+    for idx, seq in enumerate(seqs):
+        G.add_node(idx, sequence=seq)
+    fl = FitnessLandscape(seqs, graph=G, annotation_layers={"anno": layer})
+    fit = fl.annotation_to_fitness("anno")
+    assert isinstance(fit, CategoricalFitness)
+    assert len(fit) == len(layer)
+    assert "__missing__" in fit.categories
+    missing_idx = fit.categories.index("__missing__")
+    tensor = fit.get_tensor()
+    assert tensor.shape[0] == len(layer)
+    assert tensor[1, missing_idx] == 1.0
+    assert tensor[3, missing_idx] == 1.0
+
+
+def test_fitness_from_annotation_layer_requires_field_for_multi_column():
+    layer = AnnotationLayer("anno", {"a": [1], "b": [2]})
+    seqs = [BaseNumpySequence([0])]
+    G = nx.Graph()
+    for idx, seq in enumerate(seqs):
+        G.add_node(idx, sequence=seq)
+    fl = FitnessLandscape(seqs, graph=G, annotation_layers={"anno": layer})
+    with pytest.raises(ValueError):
+        fl.annotation_to_fitness("anno")

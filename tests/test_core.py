@@ -364,6 +364,25 @@ def test_to_sequence_tensors_full_export(basic_landscape):
     assert 'default' in first_item['fitness_tensors']
     assert isinstance(first_item['sequence_tensor'], torch.Tensor)
 
+
+def test_to_sequence_tensors_as_batch_with_embeddings():
+    seqs = [BinarySequence([0, 0]), BinarySequence([0, 1])]
+    vals = [[0.1], [0.2]]
+    emb = np.arange(len(seqs) * 3, dtype=float).reshape(len(seqs), 3)
+    layers = {"fit": NumericFitness(name="fit", values=vals)}
+    fl = FitnessLandscape.build(
+        sequences=seqs,
+        graph="hamming",
+        fitness_layers=layers,
+        embeddings={"plm": emb},
+        embedding_domain="plm",
+        attach_embeddings=False,
+    )
+    batch = fl.to_sequence_tensors(as_batch=True, feature_view="embedding")
+    assert isinstance(batch, dict)
+    assert batch["sequence_tensor"].shape == emb.shape
+    assert batch["fitness_tensors"]["fit"].shape[0] == len(seqs)
+
 def test_to_sequence_tensors_indexed_export(basic_landscape):
     """
     Tests the export of a single sequence by its index.
