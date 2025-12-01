@@ -8,7 +8,12 @@ import numpy as np
 
 from ..core.landscape import FitnessLandscape
 from ..core.annotation import AnnotationLayer
-from ..core.fitness import BaseFitnessLayer
+from ..core.fitness import (
+    BaseFitnessLayer,
+    CategoricalFitness,
+    NumericFitness,
+    ProbabilisticCategoricalFitness,
+)
 from ..transforms.eigenmode import eigenmode_decomposition
 from .dataset import VisualizationDataset
 from .registry import AnnotationRegistry, PaletteStore, AnnotationDescriptor
@@ -56,10 +61,30 @@ class VisualizationDatasetBuilder:
         node_set = set(nodes)
 
         fitness_layer_obj = self._resolve_fitness_layer(fitness_layer)
-        fitness_values = (
-            fitness_layer_obj.to_scalar()[indices] if fitness_layer_obj is not None else None
-        )
+        fitness_values = None
+        fitness_kind: str | None = None
+        fitness_categories: list[str] | None = None
+        fitness_labels: list[Any] | None = None
+        fitness_probabilities = None
         fitness_name = fitness_layer_obj.name if fitness_layer_obj is not None else None
+
+        if fitness_layer_obj is not None:
+            dtype = getattr(fitness_layer_obj, "dtype", None)
+            if isinstance(fitness_layer_obj, ProbabilisticCategoricalFitness) or (
+                dtype == "categorical" and hasattr(fitness_layer_obj, "probabilities")
+            ):
+                fitness_kind = "probabilistic"
+                fitness_categories = list(fitness_layer_obj.categories)
+                fitness_probabilities = np.asarray(fitness_layer_obj.probabilities)[indices]
+            elif isinstance(fitness_layer_obj, CategoricalFitness) or dtype == "categorical":
+                fitness_kind = "categorical"
+                fitness_categories = list(getattr(fitness_layer_obj, "categories", [])) or None
+                fitness_labels = [
+                    fitness_layer_obj.get_value(int(idx)) for idx in indices.tolist()
+                ]
+            else:
+                fitness_kind = "numeric"
+                fitness_values = fitness_layer_obj.to_scalar()[indices]
 
         annotation_layer, descriptor = self._resolve_annotation_layer(annotation)
         annotation_values = (
@@ -101,6 +126,10 @@ class VisualizationDatasetBuilder:
             edges=edges,
             fitness_name=fitness_name,
             fitness_values=fitness_values,
+            fitness_kind=fitness_kind,
+            fitness_categories=fitness_categories,
+            fitness_labels=fitness_labels,
+            fitness_probabilities=fitness_probabilities,
             annotation_name=annotation_layer.name if annotation_layer else None,
             annotation_values=annotation_values,
             palettes=palettes,

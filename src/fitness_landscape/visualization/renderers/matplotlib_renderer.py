@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence, Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -14,7 +14,10 @@ def plot_landscape_matplotlib(
     *,
     annotation_field: str | None = None,
     palette_key: str | None = None,
+    palette: Mapping[str, Any] | None = None,
     cmap: str = "viridis",
+    categorical_cmap: str = "Set2",
+    color_by: Literal["auto", "annotation", "fitness"] = "auto",
     node_size: int = 120,
     edge_color: str = "#bdbdbd",
     edge_alpha: float = 0.4,
@@ -36,9 +39,17 @@ def plot_landscape_matplotlib(
         Optional key referencing a stored palette within ``dataset.palettes``.
         When provided and the palette contains a ``"categories"`` mapping, the
         associated colours are used for categorical rendering.
+    palette :
+        Direct palette mapping used for categorical colouring. Overrides
+        ``palette_key`` when provided.
     cmap :
         Matplotlib colormap name used for continuous fitness colouring or for
         categorical fallback.
+    categorical_cmap :
+        Colormap to use for categorical colouring when no explicit palette is
+        provided (defaults to ``"Set2"`` for fitness colouring).
+    color_by :
+        Select colouring source: ``"annotation"``, ``"fitness"``, or ``"auto"``.
     node_size :
         Size of node markers passed to ``Axes.scatter``.
     edge_color, edge_alpha, edge_linewidth :
@@ -84,6 +95,9 @@ def plot_landscape_matplotlib(
         annotation_field=annotation_field,
         palette_key=palette_key,
         cmap=cmap,
+        categorical_cmap=categorical_cmap,
+        color_by=color_by,
+        palette=palette,
     )
 
     scatter = ax.scatter(

@@ -10,7 +10,11 @@ import pytest
 import xml.etree.ElementTree as ET
 
 from fitness_landscape.core.sequence import BaseNumpySequence
-from fitness_landscape.core.fitness import NumericFitness
+from fitness_landscape.core.fitness import (
+    NumericFitness,
+    CategoricalFitness,
+    ProbabilisticCategoricalFitness,
+)
 from fitness_landscape.core.annotation import AnnotationLayer
 from fitness_landscape.core.landscape import FitnessLandscape
 from fitness_landscape.visualization import (
@@ -23,7 +27,7 @@ from fitness_landscape.visualization.adapters import (
     import_pct_annotations,
     register_pct_palette,
 )
-from fitness_landscape.visualization.renderers import plot_landscape_matplotlib
+from fitness_landscape.visualization.renderers import plot_landscape_matplotlib, resolve_node_colours
 from fitness_landscape.analysis.graph import resistance_distance_matrix
 
 
@@ -171,6 +175,72 @@ def test_plot_matplotlib_with_numeric_fitness_only():
     scatter = ax.collections[0]
     assert scatter.get_offsets().shape[0] == len(dataset.nodes)
     plt.close(fig)
+
+
+def test_landscape_plot_accepts_categorical_cmap_passthrough():
+    landscape = _build_simple_landscape()
+    fig, ax = landscape.plot(
+        fitness_layer="score",
+        color_by="fitness",
+        categorical_cmap="Pastel1",
+        interactive=False,
+        show=False,
+    )
+    assert len(ax.collections) >= 1
+    plt.close(fig)
+
+
+def test_resolve_node_colours_categorical_fitness_overrides_annotation():
+    landscape = _build_simple_landscape()
+    cat_layer = CategoricalFitness.from_values("cat", ["low", "medium", "high"])
+    landscape.fitness_layers["cat"] = cat_layer
+    builder = VisualizationDatasetBuilder(landscape)
+    dataset = builder.build(layout="graph", fitness_layer="cat", annotation="taxonomy")
+
+    colours, legend, is_continuous = resolve_node_colours(
+        dataset,
+        annotation_field=None,
+        palette_key=None,
+        cmap="viridis",
+        color_by="fitness",
+    )
+
+    assert not is_continuous
+    assert len(colours) == len(dataset.nodes)
+    assert legend is not None
+    labels = {label for label, _ in legend}
+    assert labels == set(cat_layer.categories)
+
+
+def test_probabilistic_fitness_colour_mixing():
+    landscape = _build_simple_landscape()
+    probs = np.array([[0.75, 0.25], [0.0, 1.0], [0.5, 0.5]])
+    prob_layer = ProbabilisticCategoricalFitness.from_probabilities(
+        "prob",
+        probabilities=probs,
+        categories=["A", "B"],
+    )
+    landscape.fitness_layers["prob"] = prob_layer
+
+    builder = VisualizationDatasetBuilder(landscape)
+    dataset = builder.build(layout="graph", fitness_layer="prob")
+    palette = {"A": "#0000ff", "B": "#ff0000"}
+
+    colours, legend, is_continuous = resolve_node_colours(
+        dataset,
+        annotation_field=None,
+        palette_key=None,
+        palette=palette,
+        cmap="viridis",
+        categorical_cmap="Set2",
+        color_by="fitness",
+    )
+
+    assert not is_continuous
+    assert legend is not None
+    assert {label for label, _ in legend} == {"A", "B"}
+    np.testing.assert_allclose(colours[0], np.array([0.25, 0.0, 0.75, 1.0]))
+    np.testing.assert_allclose(colours[1], np.array([1.0, 0.0, 0.0, 1.0]))
 
 
 def test_diffusion_layout_positions():

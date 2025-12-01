@@ -1402,6 +1402,9 @@ class FitnessLandscape:
         interactive: bool = True,
         show: bool = True,
         palette_key: str | None = None,
+        palette: Mapping[str, Any] | None = None,
+        color_by: Literal["auto", "annotation", "fitness"] = "auto",
+        categorical_cmap: str = "Set2",
         annotation_registry=None,
         palette_store=None,
         pct_clusters: "pd.DataFrame" | None = None,
@@ -1444,6 +1447,14 @@ class FitnessLandscape:
         palette_key : str, optional
             Palette identifier for categorical colouring. When omitted and the
             annotation descriptor defines one, it is used automatically.
+        palette : Mapping, optional
+            Direct palette mapping used for colouring (fitness or annotation).
+        color_by : {"auto", "annotation", "fitness"}, default="auto"
+            Select the colouring source. ``"auto"`` prefers annotations when
+            available, otherwise falls back to fitness.
+        categorical_cmap : str, default="Set2"
+            Colormap to use for categorical colouring when an explicit palette
+            is not provided.
         annotation_registry, palette_store : optional
             Registry and palette store instances to reuse between calls. New
             instances are created if not provided.
@@ -1546,16 +1557,28 @@ class FitnessLandscape:
             except KeyError:
                 pass
 
+        if palette is None and palette_key:
+            palette = palettes.get_palette(palette_key)
+
         matplotlib_kwargs = dict(matplotlib_kwargs or {})
         plotly_kwargs = dict(plotly_kwargs or {})
+        matplotlib_kwargs.setdefault("annotation_field", annotation_field)
+        matplotlib_kwargs.setdefault("palette_key", palette_key)
+        matplotlib_kwargs.setdefault("palette", palette)
+        matplotlib_kwargs.setdefault("color_by", color_by)
+        matplotlib_kwargs.setdefault("categorical_cmap", categorical_cmap)
+        matplotlib_kwargs.setdefault("show", show)
+        plotly_kwargs.setdefault("annotation_field", annotation_field)
+        plotly_kwargs.setdefault("palette_key", palette_key)
+        plotly_kwargs.setdefault("palette", palette)
+        plotly_kwargs.setdefault("color_by", color_by)
+        plotly_kwargs.setdefault("categorical_cmap", categorical_cmap)
+        plotly_kwargs.setdefault("show", show)
 
         if interactive:
             try:
                 figure = plot_landscape_plotly(
                     dataset,
-                    annotation_field=annotation_field,
-                    palette_key=palette_key,
-                    show=show,
                     **plotly_kwargs,
                 )
                 return figure
@@ -1567,9 +1590,6 @@ class FitnessLandscape:
 
         figure = plot_landscape_matplotlib(
             dataset,
-            annotation_field=annotation_field,
-            palette_key=palette_key,
-            show=show,
             **matplotlib_kwargs,
         )
         return figure
