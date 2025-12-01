@@ -53,6 +53,9 @@ setup(
             "flake8>=3.8",
             "black>=20.8b1",
         ],
+        "ml": [
+            "landscapy-ml @ git+https://github.com/RSCJacksonLab/landscapy-ml.git@dev"
+        ],
     },
     entry_points={
         "console_scripts": [

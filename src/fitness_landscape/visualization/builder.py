@@ -258,6 +258,14 @@ class VisualizationDatasetBuilder:
             return np.zeros((len(nodes), 2), dtype=float)
         if total < 2:
             coords_full = np.zeros((total, 2), dtype=float)
+        elif total <= 3:
+            # For very small datasets, UMAP's spectral init can fail (k >= N). Fall back
+            # to the first two embedding dimensions padded with zeros if needed.
+            coords_full = np.asarray(embeddings, dtype=float)
+            if coords_full.shape[1] < 2:
+                padding = np.zeros((coords_full.shape[0], 2 - coords_full.shape[1]), dtype=float)
+                coords_full = np.hstack([coords_full, padding])
+            coords_full = coords_full[:, :2]
         else:
             try:
                 import umap  # type: ignore

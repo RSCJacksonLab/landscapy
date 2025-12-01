@@ -383,6 +383,13 @@ def test_to_sequence_tensors_as_batch_with_embeddings():
     assert batch["sequence_tensor"].shape == emb.shape
     assert batch["fitness_tensors"]["fit"].shape[0] == len(seqs)
 
+def test_to_sequence_tensors_auto_prefers_embeddings(basic_landscape):
+    emb = np.arange(len(basic_landscape.sequences) * 2, dtype=float).reshape(len(basic_landscape.sequences), 2)
+    basic_landscape.embeddings = {"plm": emb}
+    basic_landscape._active_embedding_domain = "plm"
+    out = basic_landscape.to_sequence_tensors()
+    assert torch.allclose(out[0]["sequence_tensor"], torch.tensor(emb[0], dtype=torch.float32))
+
 def test_to_sequence_tensors_indexed_export(basic_landscape):
     """
     Tests the export of a single sequence by its index.
@@ -1427,6 +1434,33 @@ def test_to_graph_tensor_without_embeddings_uses_ohe_shape():
 def test_to_sequence_tensors_unknown_sequence_raises(basic_landscape):
     with pytest.raises(ValueError, match="not found"):
         basic_landscape.to_sequence_tensors(sequence="9999")  # invalid for binary L=3
+
+def test_compute_plm_embeddings_records_metadata(monkeypatch, basic_landscape):
+    def fake_embed(seqs, model_name, batch_size, device, embedding_mode):
+        return np.zeros((len(seqs), 3), dtype=float)
+
+    monkeypatch.setattr("fitness_landscape.core.landscape._compute_embeddings_from_sequences", fake_embed)
+    emb = basic_landscape.compute_plm_embeddings(
+        model_name="esm-stub",
+        batch_size=3,
+        device="cpu",
+        embedding_mode="hard",
+        attach_to_graph=False,
+    )
+    assert emb.shape[0] == len(basic_landscape.sequences)
+    meta = basic_landscape.get_embedding_metadata()
+    assert meta is not None
+    assert meta["model_name"] == "esm-stub"
+    assert meta["embedding_mode"] == "hard"
+    assert meta["batch_size"] == 3
+    assert basic_landscape.embedding_model == "esm-stub"
+
+def test_safe_layer_name_generates_unique(basic_landscape):
+    dup = basic_landscape.safe_layer_name("default")
+    assert dup.startswith("default")
+    assert dup != "default"
+    fresh = basic_landscape.safe_layer_name("fresh_layer")
+    assert fresh == "fresh_layer"
 
 def _make_dupe_seqs():
     # Two identical sequences ("000"), plus "001"
