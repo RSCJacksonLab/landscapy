@@ -43,6 +43,10 @@ class VisualizationDataset:
     edges: Iterable[tuple[Hashable, Hashable]] = field(default_factory=list)
     fitness_name: Optional[str] = None
     fitness_values: Optional[np.ndarray] = None
+    fitness_kind: Optional[str] = None
+    fitness_categories: Optional[List[str]] = None
+    fitness_labels: Optional[List[Any]] = None
+    fitness_probabilities: Optional[np.ndarray] = None
     annotation_name: Optional[str] = None
     annotation_values: Mapping[str, List[Any]] = field(default_factory=dict)
     palettes: MutableMapping[str, Any] = field(default_factory=dict)
@@ -58,6 +62,12 @@ class VisualizationDataset:
             "edges": list(self.edges),
             "fitness_name": self.fitness_name,
             "fitness_values": None if self.fitness_values is None else self.fitness_values.tolist(),
+            "fitness_kind": self.fitness_kind,
+            "fitness_categories": list(self.fitness_categories) if self.fitness_categories else None,
+            "fitness_labels": list(self.fitness_labels) if self.fitness_labels else None,
+            "fitness_probabilities": None
+            if self.fitness_probabilities is None
+            else self.fitness_probabilities.tolist(),
             "annotation_name": self.annotation_name,
             "annotation_values": {k: list(v) for k, v in self.annotation_values.items()},
             "palettes": dict(self.palettes),
@@ -79,6 +89,15 @@ class VisualizationDataset:
         else:
             fitness_values = None
 
+        fitness_labels = (
+            [val for val, keep in zip(self.fitness_labels, mask) if keep]
+            if self.fitness_labels is not None
+            else None
+        )
+        fitness_probabilities = (
+            self.fitness_probabilities[mask] if self.fitness_probabilities is not None else None
+        )
+
         ann_values = {
             key: [val for val, keep in zip(values, mask) if keep]
             for key, values in self.annotation_values.items()
@@ -93,6 +112,10 @@ class VisualizationDataset:
             edges=edges,
             fitness_name=self.fitness_name,
             fitness_values=fitness_values,
+            fitness_kind=self.fitness_kind,
+            fitness_categories=list(self.fitness_categories) if self.fitness_categories else None,
+            fitness_labels=fitness_labels,
+            fitness_probabilities=fitness_probabilities,
             annotation_name=self.annotation_name,
             annotation_values=ann_values,
             palettes=dict(self.palettes),

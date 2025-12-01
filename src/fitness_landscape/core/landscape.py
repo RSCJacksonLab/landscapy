@@ -286,7 +286,8 @@ class FitnessLandscape:
                  annotation_layers: Dict[str, AnnotationLayer] | None = None,
                  embeddings: Mapping[str, np.ndarray] | np.ndarray | None = None,
                  emb_arr_key: str = 'emb_arr',
-                 active_embedding_domain: str | None = None):
+                 active_embedding_domain: str | None = None,
+                 embedding_metadata: Mapping[str, Mapping[str, Any]] | None = None):
         
         # Initialize Core Attributes with pre-computed objects
         self.sequences = sequences
@@ -311,6 +312,9 @@ class FitnessLandscape:
             if active_embedding_domain is not None
             else (next(iter(self.embeddings), None))
         )
+        self._embedding_metadata: dict[str, dict[str, Any]] = {
+            str(domain): dict(meta) for domain, meta in (embedding_metadata or {}).items()
+        }
         self._emb_arr_key = emb_arr_key
 
         # Finalize Setup and Annotate Graph
@@ -398,6 +402,8 @@ class FitnessLandscape:
                 self.embeddings = {default_key: np.asarray(self.embeddings)}
         if not hasattr(self, "_active_embedding_domain"):
             self._active_embedding_domain = next(iter(self.embeddings), None)
+        if not hasattr(self, "_embedding_metadata") or not isinstance(self._embedding_metadata, dict):
+            self._embedding_metadata = {}
     
     @property
     def active_embedding_domain(self) -> str | None:
@@ -413,6 +419,32 @@ class FitnessLandscape:
         if domain not in self.embeddings:
             raise KeyError(f"Embedding domain {domain!r} is not available.")
         self._active_embedding_domain = domain
+    
+    @property
+    def embedding_metadata(self) -> dict[str, dict[str, Any]]:
+        """Per-domain metadata describing how embeddings were produced."""
+        self._ensure_embedding_state()
+        return self._embedding_metadata
+    
+    def get_embedding_metadata(self, domain: str | None = None) -> dict[str, Any] | None:
+        """
+        Retrieve embedding provenance for a given domain (or the active domain).
+        """
+        self._ensure_embedding_state()
+        key = domain if domain is not None else self._active_embedding_domain
+        if key is None:
+            return None
+        return self._embedding_metadata.get(key)
+    
+    @property
+    def embedding_model(self) -> str | None:
+        """
+        Convenience property returning the model identifier for the active embeddings.
+        """
+        meta = self.get_embedding_metadata()
+        if meta is None:
+            return None
+        return meta.get("model_name")
     
     def get_embedding(self, domain: str | None = None) -> np.ndarray | None:
         """
@@ -819,6 +851,22 @@ class FitnessLandscape:
         if 'layer' in kwargs and kwargs['layer'] is not None:
             raise ValueError("`.add` builds from values; use `.attach(layer=...)` to attach a ready layer.")
         return self.attach(**kwargs)
+
+    def safe_layer_name(self, name: str, *, ensure_unique: bool = True) -> str:
+        """
+        Return a layer name that will not collide with existing fitness layers.
+        """
+        if not name:
+            raise ValueError("Layer name must be non-empty.")
+        base = str(name)
+        if not ensure_unique or base not in self.fitness_layers:
+            return base
+        suffix = 1
+        candidate = f"{base}_{suffix}"
+        while candidate in self.fitness_layers:
+            suffix += 1
+            candidate = f"{base}_{suffix}"
+        return candidate
 
     def attach(self,
             layer: BaseFitnessLayer | None = None,
@@ -1354,6 +1402,9 @@ class FitnessLandscape:
         interactive: bool = True,
         show: bool = True,
         palette_key: str | None = None,
+        palette: Mapping[str, Any] | None = None,
+        color_by: Literal["auto", "annotation", "fitness"] = "auto",
+        categorical_cmap: str = "Set2",
         annotation_registry=None,
         palette_store=None,
         pct_clusters: "pd.DataFrame" | None = None,
@@ -1396,6 +1447,14 @@ class FitnessLandscape:
         palette_key : str, optional
             Palette identifier for categorical colouring. When omitted and the
             annotation descriptor defines one, it is used automatically.
+        palette : Mapping, optional
+            Direct palette mapping used for colouring (fitness or annotation).
+        color_by : {"auto", "annotation", "fitness"}, default="auto"
+            Select the colouring source. ``"auto"`` prefers annotations when
+            available, otherwise falls back to fitness.
+        categorical_cmap : str, default="Set2"
+            Colormap to use for categorical colouring when an explicit palette
+            is not provided.
         annotation_registry, palette_store : optional
             Registry and palette store instances to reuse between calls. New
             instances are created if not provided.
@@ -1498,16 +1557,28 @@ class FitnessLandscape:
             except KeyError:
                 pass
 
+        if palette is None and palette_key:
+            palette = palettes.get_palette(palette_key)
+
         matplotlib_kwargs = dict(matplotlib_kwargs or {})
         plotly_kwargs = dict(plotly_kwargs or {})
+        matplotlib_kwargs.setdefault("annotation_field", annotation_field)
+        matplotlib_kwargs.setdefault("palette_key", palette_key)
+        matplotlib_kwargs.setdefault("palette", palette)
+        matplotlib_kwargs.setdefault("color_by", color_by)
+        matplotlib_kwargs.setdefault("categorical_cmap", categorical_cmap)
+        matplotlib_kwargs.setdefault("show", show)
+        plotly_kwargs.setdefault("annotation_field", annotation_field)
+        plotly_kwargs.setdefault("palette_key", palette_key)
+        plotly_kwargs.setdefault("palette", palette)
+        plotly_kwargs.setdefault("color_by", color_by)
+        plotly_kwargs.setdefault("categorical_cmap", categorical_cmap)
+        plotly_kwargs.setdefault("show", show)
 
         if interactive:
             try:
                 figure = plot_landscape_plotly(
                     dataset,
-                    annotation_field=annotation_field,
-                    palette_key=palette_key,
-                    show=show,
                     **plotly_kwargs,
                 )
                 return figure
@@ -1519,9 +1590,6 @@ class FitnessLandscape:
 
         figure = plot_landscape_matplotlib(
             dataset,
-            annotation_field=annotation_field,
-            palette_key=palette_key,
-            show=show,
             **matplotlib_kwargs,
         )
         return figure
@@ -1746,7 +1814,7 @@ class FitnessLandscape:
 
         Parameters
         ----------
-        tokenizer : huggingface tokenizer | str | None, default=`"facebook/esm2_t6_8M_UR50D"`
+        tokenizer : huggingface tokenizer | str | None, default=`None`
             - If provided (as instance or model name), adds `token_ids` and `attention_mask`
               tensors to the returned Data, padded to the longest tokenized sequence.
             - If `None` or if tokenization is unavailable, these attributes are omitted.
@@ -1825,7 +1893,7 @@ class FitnessLandscape:
                             *,
                             sequence_idx: Union[List[int], int] = None,
                             sequence: Union[List[str], str] = None,
-                            tokenizer: Any | str | None = "facebook/esm2_t6_8M_UR50D",
+                            tokenizer: Any | str | None = None,
                             feature_view: Literal["auto", "tokens", "embedding", "ohe"] = "auto",
                             include_embeddings: bool = False,
                             as_batch: bool = False) -> List[Dict[str, Any]] | Dict[str, Any]:
@@ -1844,16 +1912,16 @@ class FitnessLandscape:
             Sequence to export as tensors. If `None`, all sequences
             are exported.
         
-        tokenizer : huggingface tokenizer | str | None, default=`"facebook/esm2_t6_8M_UR50D"`
+        tokenizer : huggingface tokenizer | str | None, default=`None`
             - If a tokenizer instance or model name is provided, sequences are tokenized
               using the Hugging Face tokenizer and the returned 'sequence_tensor' is a
               1-D LongTensor of token ids (including special tokens as per the tokenizer).
             - If explicitly set to `None`, behavior matches current defaults: sequences are
-              exported as one-hot tensors per position.
+              exported as embeddings when available, otherwise one-hot tensors per position.
         
         feature_view : {"auto", "tokens", "embedding", "ohe"}, default=`"auto"`
-            Controls what is placed in `sequence_tensor`. `"auto"` prefers tokenized
-            text when a tokenizer is provided, otherwise embeddings when available,
+            Controls what is placed in `sequence_tensor`. `"auto"` prefers embeddings
+            when available, otherwise tokenized text when a tokenizer is provided,
             otherwise one-hot encodings.
 
         include_embeddings : bool, default=`False`
@@ -1902,10 +1970,10 @@ class FitnessLandscape:
         # Decide which feature view to export.
         mode = feature_view
         if feature_view == "auto":
-            if tokenizer is not None:
-                mode = "tokens"
-            elif emb_tensor is not None:
+            if emb_tensor is not None:
                 mode = "embedding"
+            elif tokenizer is not None:
+                mode = "tokens"
             else:
                 mode = "ohe"
         if mode == "tokens" and tokenizer is None:
@@ -2058,6 +2126,14 @@ class FitnessLandscape:
             embedding_mode=mode,
         )
         self.embeddings[domain] = embeddings
+        self._embedding_metadata[domain] = {
+            "model_name": model_name,
+            "embedding_mode": mode,
+            "device": device or ("cuda" if torch.cuda.is_available() else "cpu"),
+            "batch_size": batch_size,
+        }
+        if self._active_embedding_domain is None:
+            self._active_embedding_domain = domain
         if attach_to_graph:
             self._active_embedding_domain = domain
             self._annotate_graph_nodes_with_embeddings()
