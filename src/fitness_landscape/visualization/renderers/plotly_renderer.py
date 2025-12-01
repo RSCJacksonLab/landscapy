@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence, Literal
 
 import numpy as np
 
@@ -13,13 +13,31 @@ def plot_landscape_plotly(
     *,
     annotation_field: str | None = None,
     palette_key: str | None = None,
+    palette: Mapping[str, Any] | None = None,
     cmap: str = "Viridis",
+    categorical_cmap: str = "Set2",
+    color_by: Literal["auto", "annotation", "fitness"] = "auto",
     node_size: int = 10,
     edge_color: str = "rgba(189,189,189,0.4)",
     edge_width: float = 1.0,
     show: bool = False,
 ):
-    """Render a landscape using plotly."""
+    """
+    Render a landscape using plotly.
+
+    Parameters
+    ----------
+    annotation_field :
+        Optional annotation column to use for categorical colouring.
+    palette_key, palette :
+        Palette lookup key in ``dataset.palettes`` or a direct palette mapping.
+    cmap :
+        Colormap used for continuous colouring.
+    categorical_cmap :
+        Colormap used for categorical colouring when no explicit palette is supplied.
+    color_by :
+        Select colouring source: ``"annotation"``, ``"fitness"``, or ``"auto"``.
+    """
 
     try:
         import plotly.graph_objects as go
@@ -34,7 +52,10 @@ def plot_landscape_plotly(
         dataset,
         annotation_field=annotation_field,
         palette_key=palette_key,
+        palette=palette,
         cmap=cmap,
+        categorical_cmap=categorical_cmap,
+        color_by=color_by,
     )
 
     fig = go.Figure()
@@ -80,36 +101,44 @@ def plot_landscape_plotly(
             )
         )
     else:
-        field_name = annotation_field or next(iter(dataset.annotation_values))
-        value_lookup = dataset.annotation_values.get(field_name, [])
-        legend_labels = legend_labels or []
-        known_labels = {label for label, _ in legend_labels if label != "Other"}
+        colour_strings = [rgba_to_plotly(colour) for colour in colours]
+        fig.add_trace(
+            go.Scattergl(
+                x=x,
+                y=y,
+                mode="markers",
+                marker=dict(size=node_size, color=colour_strings, line=dict(color="black", width=0.5)),
+                name="nodes",
+                hoverinfo="text",
+                text=[str(node) for node in dataset.nodes],
+                showlegend=False,
+            )
+        )
 
-        for label, colour in legend_labels:
-            if label == "Other":
-                mask = np.asarray([val not in known_labels for val in value_lookup], dtype=bool)
-            else:
-                mask = np.asarray([val == label for val in value_lookup], dtype=bool)
-            if not np.any(mask):
-                continue
-            colour_str = rgba_to_plotly(colour)
+        for label, colour in legend_labels or []:
             fig.add_trace(
                 go.Scattergl(
-                    x=x[mask],
-                    y=y[mask],
+                    x=[None],
+                    y=[None],
                     mode="markers",
-                    marker=dict(size=node_size, color=colour_str, line=dict(color="black", width=0.5)),
+                    marker=dict(size=node_size, color=rgba_to_plotly(colour), line=dict(color="black", width=0.5)),
                     name=str(label),
-                    hoverinfo="text",
-                    text=[str(dataset.nodes[i]) for i, keep in enumerate(mask) if keep],
+                    hoverinfo="skip",
                 )
             )
+
+    use_fitness_legend = color_by == "fitness" or (
+        not dataset.annotation_values and color_by in {"auto", "annotation", "fitness"}
+    )
+    legend_title = ""
+    if not is_continuous:
+        legend_title = (dataset.fitness_name or "Fitness") if use_fitness_legend else (dataset.annotation_name or "Annotations")
 
     fig.update_layout(
         xaxis=dict(visible=False),
         yaxis=dict(visible=False),
         title=dataset.metadata.get("title", "Fitness Landscape"),
-        legend=dict(title="Annotations" if not is_continuous else ""),
+        legend=dict(title=legend_title),
     )
 
     if show:
