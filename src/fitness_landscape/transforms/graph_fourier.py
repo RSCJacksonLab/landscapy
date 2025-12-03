@@ -33,7 +33,7 @@ def graph_fourier_transform(graph: Union[nx.Graph, FitnessLandscape],
     """
     if isinstance(graph, FitnessLandscape):
         if signal is None:
-            signal = np.array([graph.get_fitness(s) for s in graph.sequences], dtype=float)
+            signal = graph.get_signal()  # single pass over active layer
         graph = graph.graph
 
     w, U = eigenmode_decomposition(graph, k=k, matrix=matrix)
