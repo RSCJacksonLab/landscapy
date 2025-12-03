@@ -27,7 +27,14 @@ from .digraph import (
     create_particle_filter_digraph,
     create_plm_interpolation_digraph,
 )
-from .fitness import NumericFitness, CategoricalFitness, BaseFitnessLayer, ProbabilisticCategoricalFitness
+from .fitness import (
+    NumericFitness,
+    CategoricalFitness,
+    BaseFitnessLayer,
+    ProbabilisticCategoricalFitness,
+    FitnessModifierLike,
+    apply_fitness_modifier,
+)
 from .annotation import AnnotationLayer
 from abc import ABC, abstractmethod
 from ..utils import _compute_embeddings_from_sequences, alignment_to_base_numpy_sequences
@@ -1092,6 +1099,61 @@ class FitnessLandscape:
 
         # Delegate to regular constructor.
         return self.attach(new_layer)
+
+    def apply_fitness_modifier(
+        self,
+        modifier: FitnessModifierLike,
+        *,
+        source_layer: str | BaseFitnessLayer | None = None,
+        output_name: str | None = None,
+        attach: bool = True,
+        ensure_unique_name: bool = True,
+    ) -> BaseFitnessLayer:
+        """
+        Transform an existing fitness layer with a modifier and
+        optionally attach the result to the landscape.
+
+        Parameters
+        ----------
+        modifier :
+            A callable or BaseFitnessModifier that returns a new
+            BaseFitnessLayer when applied to an input layer.
+        source_layer :
+            Name or instance of the source fitness layer. Defaults to
+            the active view if not provided.
+        output_name :
+            Optional name for the new layer. When omitted, the modifier
+            decides the name. If ``ensure_unique_name`` is True, a
+            non-colliding name is generated.
+        attach :
+            When True (default), the resulting layer is attached to the
+            landscape and returned.
+        ensure_unique_name :
+            If True, generated names are made unique with
+            ``safe_layer_name`` when a collision is detected.
+        """
+        if source_layer is None:
+            if self._active_view_name is None:
+                raise ValueError("No source_layer provided and no active view is set.")
+            base_layer = self.view(self._active_view_name)
+        elif isinstance(source_layer, str):
+            base_layer = self.view(source_layer)
+        elif isinstance(source_layer, BaseFitnessLayer):
+            base_layer = source_layer
+            base_layer._validate_length(len(self.sequences), name="source_layer")
+        else:
+            raise TypeError("source_layer must be None, a layer name, or a BaseFitnessLayer instance.")
+
+        transformed = apply_fitness_modifier(base_layer, modifier, name=output_name)
+        transformed._validate_length(len(self.sequences), name="modifier output")
+
+        if not attach:
+            return transformed
+
+        final_name = self.safe_layer_name(transformed.name, ensure_unique=ensure_unique_name)
+        transformed.name = final_name
+        self.attach(layer=transformed)
+        return transformed
 
     def detach(self,
                layer_name: str):
