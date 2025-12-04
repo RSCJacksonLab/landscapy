@@ -439,6 +439,26 @@ def _parallel_analyze_landscapes(landscape_samples: List[FitnessLandscape],
     futures = [_analyze_worker.remote(sl_ref, layer_name, func_ref) for sl_ref in obj_refs]
     return ray.get(futures)
 
+@ray.remote
+def _sample_and_analyze_worker(
+    landscape: FitnessLandscape,
+    seed: int,
+    node_keep: float,
+    edge_keep: float,
+    layer_name: str | None,
+    analysis_func: Callable[[FitnessLandscape], Any],
+) -> Any:
+    subL = sample_observed_induced_connected(
+        landscape,
+        node_keep=node_keep,
+        edge_keep=edge_keep,
+        seed=seed,
+        return_graph=False,
+    )
+    if layer_name is not None:
+        subL.view(layer_name)
+    return analysis_func(subL)
+
 def subsample_analysis(landscape: FitnessLandscape,
                        analysis_func: Callable[FitnessLandscape, Any],
                        n_samples: int = 100,
@@ -484,28 +504,38 @@ def subsample_analysis(landscape: FitnessLandscape,
     """
     rng = np.random.default_rng(seed)
     results: list[Any] = []
-    landscape_samples: list[FitnessLandscape] = []
 
-    # Collect samples.
-    for i in range(n_samples):
-        sub_seed = int(rng.integers(0, 2**63 - 1))
-        subL = sample_observed_induced_connected(
-            landscape,
-            node_keep=subsample_node_prop,
-            edge_keep=subsample_edge_prop,
-            seed=sub_seed,
-            return_graph=False,
-        )
-        landscape_samples.append(subL)
-
-    # Run in parallel.
-    results: list[Any] = _parallel_analyze_landscapes(
-        landscape_samples=landscape_samples,
-        analysis_func=analysis_func,
-        layer_name=layer_name,
-        use_ray=use_ray,
-        num_workers=num_workers,
-)
+    if use_ray:
+        if not ray.is_initialized():
+            ray.init(num_cpus=num_workers, ignore_reinit_error=True)
+        func_ref = ray.put(analysis_func)
+        land_ref = ray.put(landscape)
+        seeds = [int(rng.integers(0, 2**63 - 1)) for _ in range(n_samples)]
+        futures = [
+            _sample_and_analyze_worker.remote(
+                land_ref,
+                s,
+                subsample_node_prop,
+                subsample_edge_prop,
+                layer_name,
+                func_ref,
+            )
+            for s in seeds
+        ]
+        results = ray.get(futures)
+    else:
+        for _ in range(n_samples):
+            sub_seed = int(rng.integers(0, 2**63 - 1))
+            subL = sample_observed_induced_connected(
+                landscape,
+                node_keep=subsample_node_prop,
+                edge_keep=subsample_edge_prop,
+                seed=sub_seed,
+                return_graph=False,
+            )
+            if layer_name is not None:
+                subL.view(layer_name)
+            results.append(analysis_func(subL))
 
     # scalar outputs easiest, summarize directly
     if _is_scalar_list(results):
