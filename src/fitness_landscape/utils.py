@@ -362,17 +362,12 @@ def make_latent_geometric_graph_connected(n_latent: int = 120,
 
     return G
 
-def sample_observed_induced_connected(
-    G_lat: nx.Graph,
-    node_keep: float = 0.6,
-    edge_keep: float = 0.6,
-    seed: int = None,
-    *,
-    return_graph: bool = False,
-    relabel: bool = True,
-    attach_fitness: bool = True,
-    attach_arrays: bool = True,
-) -> Union[nx.Graph, 'FitnessLandscape']:
+def sample_observed_induced_connected(G_lat: nx.Graph,
+                                      node_keep: float = 0.6,
+                                      edge_keep: float = 0.6,
+                                      seed: int = None,
+                                      *, 
+                                      return_graph: bool = False,) -> Union[nx.Graph, 'FitessLandscape']:
     """
     Util function to induce a connected subgraph from a latent graph.
 
@@ -441,43 +436,36 @@ def sample_observed_induced_connected(
     sub_nodes = list(visited)
     G_obs_full = G_lat.subgraph(sub_nodes).copy()
 
-    # Fast-path: if we are keeping all edges and the induced subgraph is connected,
-    # skip MST/thinning work.
-    if edge_keep >= 1.0 and nx.is_connected(G_obs_full):
-        G_obs = G_obs_full
+    # Ensure every sampled edge has a weight if possible
+    for (u, v) in G_obs_full.edges():
+        if 'weight' not in G_obs_full[u][v]:
+            pu = G_lat.nodes[u].get('pos', None)
+            pv = G_lat.nodes[v].get('pos', None)
+            if pu is not None and pv is not None:
+                pu = np.asarray(pu); pv = np.asarray(pv)
+                G_obs_full[u][v]['weight'] = float(np.linalg.norm(pu - pv))
+
+    # Keep MST edges to guarantee connectivity, then thin remnant edges
+    if G_obs_full.number_of_edges() > 0:
+        mst_obs = nx.minimum_spanning_tree(G_obs_full, weight='weight')
     else:
-        # Ensure every sampled edge has a weight if possible
-        for (u, v) in G_obs_full.edges():
-            if 'weight' not in G_obs_full[u][v]:
-                pu = G_lat.nodes[u].get('pos', None)
-                pv = G_lat.nodes[v].get('pos', None)
-                if pu is not None and pv is not None:
-                    pu = np.asarray(pu); pv = np.asarray(pv)
-                    G_obs_full[u][v]['weight'] = float(np.linalg.norm(pu - pv))
+        mst_obs = G_obs_full.copy()
 
-        # Keep MST edges to guarantee connectivity, then thin remnant edges
-        if G_obs_full.number_of_edges() > 0:
-            mst_obs = nx.minimum_spanning_tree(G_obs_full, weight='weight')
-        else:
-            mst_obs = G_obs_full.copy()
+    G_obs = mst_obs.copy()
+    mst_edge_set = set(tuple(sorted(e)) for e in mst_obs.edges())
+    for (u, v) in G_obs_full.edges():
+        key = tuple(sorted((u, v)))
+        if key in mst_edge_set:
+            continue
+        if rng.random() < edge_keep:
+            G_obs.add_edge(u, v, **G_obs_full[u][v])
 
-        G_obs = mst_obs.copy()
-        mst_edge_set = set(tuple(sorted(e)) for e in mst_obs.edges())
-
-        if edge_keep > 0.0:
-            extra_edges = [e for e in G_obs_full.edges() if tuple(sorted(e)) not in mst_edge_set]
-            if extra_edges:
-                mask = rng.random(len(extra_edges)) < edge_keep
-                for keep, (u, v) in zip(mask, extra_edges):
-                    if keep:
-                        G_obs.add_edge(u, v, **G_obs_full[u][v])
-
-        if not nx.is_connected(G_obs):
-            # Fallback: MST is connected by construction
-            G_obs = mst_obs
+    if not nx.is_connected(G_obs):
+        # Fallback: MST is connected by construction
+        G_obs = mst_obs
 
     # If the caller gave us a Landscape, annotate nodes with layer values and
-    if L is not None and attach_fitness:
+    if L is not None:
         seq_to_idx = {tuple(seq.to_array()): i for i, seq in enumerate(L.sequences)}
         numeric_layers = []
         layer_arrays = {}
@@ -488,10 +476,6 @@ def sample_observed_induced_connected(
 
         # Copy/ensure required node attributes
         for node, data in G_obs.nodes(data=True):
-            # Remove any pre-existing fitness_* attributes to avoid stale or non-numeric values
-            for key in list(data.keys()):
-                if key.startswith("fitness_"):
-                    data.pop(key, None)
             # Ensure 'sequence' present (copy from original)
             if 'sequence' not in data:
                 orig_seq = G_lat.nodes[node].get('sequence', None)
@@ -509,22 +493,18 @@ def sample_observed_induced_connected(
                 data[f"fitness_{lname}"] = float(layer_arrays[lname][idx])
 
             # Stub arrays some pipelines expect
-            if attach_arrays:
-                data.setdefault("gapped_arr", np.zeros((1, 21)))
-                data.setdefault("ungapped_arr", np.zeros((1, 20)))
+            data.setdefault("gapped_arr", np.zeros((1, 21)))
+            data.setdefault("ungapped_arr", np.zeros((1, 20)))
 
         if return_graph:
             return G_obs
 
         # Build and return the sub-landscape (edges preserved verbatim)
-        if relabel:
-            G_obs = nx.convert_node_labels_to_integers(G_obs, ordering="sorted")
+        G_obs = nx.convert_node_labels_to_integers(G_obs, ordering="sorted")
         subL = FitnessLandscape.from_graph(G_obs, emb_nodes=False)
         return subL
 
-    # Bare graph path or caller opted out of fitness attachment
-    if relabel:
-        G_obs = nx.convert_node_labels_to_integers(G_obs, ordering="sorted")
+    # Bare graph path
     return G_obs
 
 #TODO: def reorder sequence from one alphabet to new alphabet.
