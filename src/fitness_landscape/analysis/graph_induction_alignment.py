@@ -1093,8 +1093,8 @@ def compare_density_matched_geometry_to_phylogeny(diffusion_graph: Union[Fitness
         diff_equal = _mutual_topk_from_weighted(diff_G, diff_nodes, k_eval, diffusion_weight_key)
         knn_equal = _prune_to_degree_k_unweighted(knn_G, knn_nodes, k_eval, knn_weight_key)
 
-        R_diff = resistance_distance_matrix(diff_equal, diff_nodes, weight_key=resistance_weight_key)
-        R_knn = resistance_distance_matrix(knn_equal, knn_nodes, weight_key=resistance_weight_key)
+        R_diff = resistance_distance_matrix(diff_equal, diff_nodes, weight_key=resistance_weight_key)["resistance_mat"]
+        R_knn = resistance_distance_matrix(knn_equal, knn_nodes, weight_key=resistance_weight_key)["resistance_mat"]
 
         rho_diff = _safe_spearman(tree_upper, _upper_triangular_values(R_diff))
         rho_knn = _safe_spearman(tree_upper, _upper_triangular_values(R_knn))
