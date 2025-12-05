@@ -3,11 +3,14 @@ from networkx.algorithms.community import louvain_communities
 from networkx.algorithms.community.quality import modularity
 import numpy as np
 import networkx as nx
+from functools import lru_cache
 from ..core.annotation import AnnotationLayer
+from ..core.fitness import CategoricalFitness, ProbabilisticCategoricalFitness
 from ..core.landscape import FitnessLandscape
 from ..transforms.eigenmode import eigenmode_decomposition
-from typing import Union, Dict, Literal, Sequence, Optional, Iterable, Hashable
+from typing import Any, Mapping, Union, Dict, Literal, Sequence, Optional, Iterable, Hashable
 import scipy.sparse as sp
+from scipy.optimize import linprog
 from scipy.sparse.linalg import splu
 
 def graph_properties(graph: Union[FitnessLandscape, nx.Graph]) -> Dict:
@@ -314,59 +317,247 @@ def graph_spectral_analysis(landscape: FitnessLandscape,
     return out
 
 
-def resistance_distance_matrix(graph: Union[FitnessLandscape, nx.Graph],
-                               nodes: Optional[Sequence] = None,
+def _canonical_category_label(value: Any) -> Any:
+    """
+    Convert potentially unhashable annotation values into stable labels.
+    """
+    if value is None:
+        return None
+    try:
+        hash(value)
+        return value
+    except TypeError:
+        if isinstance(value, np.ndarray):
+            return tuple(value.tolist())
+        if isinstance(value, (list, tuple)):
+            return tuple(value)
+    return str(value)
+
+
+@lru_cache(maxsize=8)
+def _transport_constraint_matrix(n: int) -> sp.csr_matrix:
+    """
+    Build a sparse constraint matrix enforcing coupling marginals for OT.
+    Cached by n to reuse across layer pairs.
+    """
+    rows: list[int] = []
+    cols: list[int] = []
+    data: list[float] = []
+
+    for i in range(n):
+        base = i * n
+        rows.extend([i] * n)
+        cols.extend(range(base, base + n))
+        data.extend([1.0] * n)
+
+    offset = n
+    for j in range(n):
+        for i in range(n):
+            rows.append(offset + j)
+            cols.append(i * n + j)
+            data.append(1.0)
+
+    return sp.csr_matrix((data, (rows, cols)), shape=(2 * n, n * n))
+
+
+def _wasserstein_distance(cost: np.ndarray,
+                          mu_a: np.ndarray,
+                          mu_b: np.ndarray,
+                          constraint: Optional[sp.csr_matrix] = None) -> float:
+    """
+    Solve the optimal transport problem between distributions mu_a and mu_b
+    with cost matrix `cost`.
+    """
+    n = cost.shape[0]
+    if cost.shape != (n, n):
+        raise ValueError("Cost matrix must be square.")
+    if mu_a.shape[0] != n or mu_b.shape[0] != n:
+        raise ValueError("Distribution lengths must match cost matrix.")
+
+    constraint_mat = constraint if constraint is not None else _transport_constraint_matrix(n)
+    b_eq = np.concatenate([mu_a, mu_b]).astype(float, copy=False)
+    res = linprog(
+        cost.reshape(-1),
+        A_eq=constraint_mat,
+        b_eq=b_eq,
+        bounds=(0.0, None),
+        method="highs",
+    )
+    if not res.success:
+        raise RuntimeError(f"Optimal transport solver failed: {res.message}")
+    return float(res.fun)
+
+
+def _aggregate_distance_matrix(cost: np.ndarray,
+                               probabilities: np.ndarray,
+                               agg: Literal["wasserstein", "ot", "expected_pairwise"]) -> np.ndarray:
+    """
+    Aggregate node-level distances into class-level distances using the
+    selected aggregation strategy.
+    """
+    agg_mode = "wasserstein" if agg == "ot" else agg
+    probs = np.asarray(probabilities, dtype=float)
+    if probs.ndim != 2:
+        raise ValueError("probabilities must be a 2-D array (nodes x categories).")
+    n_nodes, n_classes = probs.shape
+    dist = np.full((n_classes, n_classes), np.nan, dtype=float)
+    if n_classes == 0:
+        return dist
+
+    masses = probs.sum(axis=0)
+    if agg_mode == "expected_pairwise":
+        numer = probs.T @ cost @ probs
+        denom = masses[:, None] * masses[None, :]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            dist = numer / denom
+        dist[denom == 0] = np.nan
+        for i in range(n_classes):
+            if masses[i] > 0:
+                dist[i, i] = 0.0
+        return dist
+
+    # Wasserstein / OT aggregation
+    constraint = _transport_constraint_matrix(n_nodes)
+    for a in range(n_classes):
+        if masses[a] <= 0:
+            continue
+        mu_a = probs[:, a] / masses[a]
+        for b in range(a, n_classes):
+            if masses[b] <= 0:
+                continue
+            if a == b:
+                dist[a, b] = 0.0
+                continue
+            mu_b = probs[:, b] / masses[b]
+            d = _wasserstein_distance(cost, mu_a, mu_b, constraint=constraint)
+            dist[a, b] = dist[b, a] = d
+    return dist
+
+
+def _probability_matrix_from_fitness_layer(landscape: FitnessLandscape,
+                                           node_order: Sequence,
+                                           layer_name: str) -> tuple[list[Any], np.ndarray]:
+    layer = landscape.fitness_layers[layer_name]
+    if not isinstance(layer, (CategoricalFitness, ProbabilisticCategoricalFitness)):
+        raise TypeError(
+            f"Layer '{layer_name}' is not categorical; only categorical layers can be aggregated."
+        )
+
+    categories = list(layer.categories)
+    cat_to_idx = {cat: i for i, cat in enumerate(categories)}
+    P = np.zeros((len(node_order), len(categories)), dtype=float)
+    attr_key = f"fitness_{layer_name}"
+
+    for row, node in enumerate(node_order):
+        node_data = landscape.graph.nodes[node]
+        raw = node_data.get(attr_key)
+        if raw is None:
+            continue
+        if isinstance(raw, Mapping):
+            for cat, prob in raw.items():
+                idx = cat_to_idx.get(cat)
+                if idx is None:
+                    raise KeyError(f"Unknown category '{cat}' encountered in layer '{layer_name}'.")
+                P[row, idx] = float(prob)
+        elif isinstance(raw, (np.ndarray, list, tuple)):
+            arr = np.asarray(raw, dtype=float).ravel()
+            if arr.size != len(categories):
+                raise ValueError(
+                    f"Fitness layer '{layer_name}' provided {arr.size} probs, "
+                    f"expected {len(categories)}."
+                )
+            P[row, :] = arr
+        else:
+            idx = cat_to_idx.get(raw)
+            if idx is None:
+                raise KeyError(f"Unknown category '{raw}' encountered in layer '{layer_name}'.")
+            P[row, idx] = 1.0
+    return categories, P
+
+
+def _probability_matrices_from_annotation_layer(landscape: FitnessLandscape,
+                                                node_order: Sequence,
+                                                layer_name: str) -> dict[str, tuple[list[Any], np.ndarray]]:
+    layer = landscape.annotation_layers[layer_name]
+    columns = list(layer.columns)
+    records: list[dict[str, Any]] = []
+    category_sets: dict[str, set[Any]] = {col: set() for col in columns}
+
+    for node in node_order:
+        node_data = landscape.graph.nodes[node]
+        record = node_data.get("annotations", {}).get(layer_name, {}) or {}
+        if not isinstance(record, Mapping):
+            record = {}
+        records.append(record)
+        for col in columns:
+            val = record.get(col)
+            if val is None:
+                continue
+            if isinstance(val, Mapping):
+                for cat in val.keys():
+                    label = _canonical_category_label(cat)
+                    if label is not None:
+                        category_sets[col].add(label)
+            else:
+                label = _canonical_category_label(val)
+                if label is not None:
+                    category_sets[col].add(label)
+
+    matrices: dict[str, tuple[list[Any], np.ndarray]] = {}
+    for col in columns:
+        cats = sorted(category_sets[col], key=lambda x: str(x))
+        if not cats:
+            continue
+        cat_to_idx = {cat: i for i, cat in enumerate(cats)}
+        P = np.zeros((len(node_order), len(cats)), dtype=float)
+        for row, record in enumerate(records):
+            val = record.get(col)
+            if val is None:
+                continue
+            if isinstance(val, Mapping):
+                for cat, prob in val.items():
+                    label = _canonical_category_label(cat)
+                    if label is None:
+                        continue
+                    idx = cat_to_idx.get(label)
+                    if idx is None:
+                        raise KeyError(
+                            f"Unknown category '{label}' encountered in annotation '{layer_name}:{col}'."
+                        )
+                    P[row, idx] = float(prob)
+            elif isinstance(val, (np.ndarray, list, tuple)):
+                arr = np.asarray(val, dtype=float).ravel()
+                if arr.size != len(cats):
+                    raise ValueError(
+                        f"Annotation '{layer_name}:{col}' provided {arr.size} probs, "
+                        f"expected {len(cats)}."
+                    )
+                P[row, :] = arr
+            else:
+                label = _canonical_category_label(val)
+                if label is None:
+                    continue
+                idx = cat_to_idx.get(label)
+                if idx is None:
+                    raise KeyError(
+                        f"Unknown category '{label}' encountered in annotation '{layer_name}:{col}'."
+                    )
+                P[row, idx] = 1.0
+        matrices[col] = (cats, P)
+    return matrices
+
+
+def _compute_resistance_matrix(G: nx.Graph,
+                               node_order: Sequence,
                                *,
-                               weight_key: Optional[str] = None,
-                               jitter: float = 1e-10,
-                               sparse_threshold: int = 1000,
-                               weight_epsilon: float = 1e-8,
-                               weight_normalisation: bool = True) -> np.ndarray:
+                               weight_key: Optional[str],
+                               jitter: float,
+                               sparse_threshold: int,
+                               weight_epsilon: float,
+                               weight_normalisation: bool) -> np.ndarray:
     """
-    Compute the pairwise effective resistance distances among a subset
-    of nodes in a weighted graph.
-
-    Parameters
-    ----------
-    graph : FitnessLandscape or networkx.Graph
-        Source graph. If a :class:`FitnessLandscape` is provided, its
-        underlying graph is used.
-    nodes : Sequence, optional
-        Optional ordered sequence of nodes to include. Defaults to all
-        nodes present in the graph.
-    weight_key : str, optional
-        Edge attribute representing conductance/weight. When ``None``,
-        edges are treated as unweighted.
-    jitter : float, default=1e-10
-        Diagonal regularisation added when the Laplacian is not full
-        rank to ensure a stable pseudoinverse.
-    weight_epsilon : float, default=1e-8
-        Small positive value added to every edge weight (via an
-        unweighted Laplacian) before factorisation to prevent the sparse
-        solver from encountering zero-weight conductances. This does
-        not modify the underlying graph; it only affects the temporary
-        Laplacian used for resistance calculations.
-    weight_normalisation : bool, default=True
-        If ``True``, rescales the temporary Laplacian so its largest
-        absolute entry is 1.0, improving numerical stability. The final
-        resistance distances are rescaled back so results remain in the
-        original units.
-
-    Returns
-    -------
-    np.ndarray
-        Symmetric matrix ``R`` where ``R[i, j]`` is the effective
-        resistance between ``nodes[i]`` and ``nodes[j]``.
+    Core resistance distance computation for a provided node ordering.
     """
-    G = graph.graph if isinstance(graph, FitnessLandscape) else graph
-    if G is None:
-        raise ValueError("Graph is required to compute resistance distances.")
-
-    if nodes is None:
-        node_order: Iterable = list(G.nodes())
-    else:
-        node_order = list(nodes)
-
     if not node_order:
         return np.zeros((0, 0), dtype=float)
 
@@ -400,7 +591,6 @@ def resistance_distance_matrix(graph: Union[FitnessLandscape, nx.Graph],
         R[R < 0] = 0.0
         return R / norm_factor
 
-    # Sparse path using grounded Laplacian solves
     if n <= 1:
         return np.zeros((n, n), dtype=float)
 
@@ -455,3 +645,165 @@ def resistance_distance_matrix(graph: Union[FitnessLandscape, nx.Graph],
     R[: n - 1, ground] = diag
     R[ground, : n - 1] = diag
     return R / norm_factor
+
+
+def resistance_distance_matrix(graph: Union[FitnessLandscape, nx.Graph],
+                               nodes: Optional[Sequence] = None,
+                               *,
+                               weight_key: Optional[str] = None,
+                               jitter: float = 1e-10,
+                               sparse_threshold: int = 1000,
+                               weight_epsilon: float = 1e-8,
+                               weight_normalisation: bool = True,
+                               layers: Optional[Union[str, Sequence[str]]] = None,
+                               aggregation_function: Literal["wasserstein", "ot", "expected_pairwise"] = "wasserstein") -> Dict[str, Any]:
+    """
+    Compute pairwise effective resistance distances among nodes and,
+    optionally, aggregate them by categorical fitness or annotation
+    layers.
+
+    Parameters
+    ----------
+    graph : FitnessLandscape or networkx.Graph
+        Source graph. If a :class:`FitnessLandscape` is provided, its
+        underlying graph is used.
+    nodes : Sequence, optional
+        Optional ordered sequence of nodes to include. Defaults to all
+        nodes present in the graph.
+    weight_key : str, optional
+        Edge attribute representing conductance/weight. When ``None``,
+        edges are treated as unweighted.
+    jitter : float, default=1e-10
+        Diagonal regularisation added when the Laplacian is not full
+        rank to ensure a stable pseudoinverse.
+    weight_epsilon : float, default=1e-8
+        Small positive value added to every edge weight (via an
+        unweighted Laplacian) before factorisation to prevent the sparse
+        solver from encountering zero-weight conductances. This does
+        not modify the underlying graph; it only affects the temporary
+        Laplacian used for resistance calculations.
+    weight_normalisation : bool, default=True
+        If ``True``, rescales the temporary Laplacian so its largest
+        absolute entry is 1.0, improving numerical stability. The final
+        resistance distances are rescaled back so results remain in the
+        original units.
+    layers : str or Sequence[str], optional
+        Fitness or annotation layer names to aggregate. ``None`` (default)
+        aggregates all categorical fitness layers and all annotation
+        layers when a :class:`FitnessLandscape` is provided. Ignored for
+        plain networkx graphs.
+    aggregation_function : {"wasserstein", "ot", "expected_pairwise"}, default="wasserstein"
+        Aggregation strategy. ``"expected_pairwise"`` computes the
+        expected resistance between two independently sampled nodes from
+        each class. ``"wasserstein"``/``"ot"`` solve an optimal transport
+        problem over the resistance matrix.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Dictionary containing:
+            - ``"resistance_mat"`` : full node-by-node resistance matrix.
+            - One entry per aggregated layer with ``"categories"`` (index
+              to label mapping) and ``"distance_max"``/``"distance_mat"``
+              holding the aggregated class-by-class distances.
+    """
+    G = graph.graph if isinstance(graph, FitnessLandscape) else graph
+    if G is None:
+        raise ValueError("Graph is required to compute resistance distances.")
+
+    node_order = list(G.nodes()) if nodes is None else list(nodes)
+    R = _compute_resistance_matrix(
+        G,
+        node_order,
+        weight_key=weight_key,
+        jitter=jitter,
+        sparse_threshold=sparse_threshold,
+        weight_epsilon=weight_epsilon,
+        weight_normalisation=weight_normalisation,
+    )
+    result: Dict[str, Any] = {"resistance_mat": R}
+
+    agg_mode = aggregation_function.lower()
+    if agg_mode not in {"wasserstein", "ot", "expected_pairwise"}:
+        raise ValueError(
+            f"aggregation_function must be 'wasserstein', 'ot', or 'expected_pairwise', got {aggregation_function!r}"
+        )
+
+    if not isinstance(graph, FitnessLandscape):
+        if layers is not None:
+            raise ValueError("Layer aggregation requires a FitnessLandscape input.")
+        return result
+
+    landscape = graph
+
+    if layers is None:
+        targets: list[tuple[str, str]] = []
+        for name, layer in landscape.fitness_layers.items():
+            if isinstance(layer, (CategoricalFitness, ProbabilisticCategoricalFitness)):
+                targets.append(("fitness", name))
+        for name in landscape.annotation_layers.keys():
+            targets.append(("annotation", name))
+    else:
+        requested = [layers] if isinstance(layers, str) else list(layers)
+        targets = []
+        for name in requested:
+            found = False
+            if name in landscape.fitness_layers:
+                layer = landscape.fitness_layers[name]
+                if not isinstance(layer, (CategoricalFitness, ProbabilisticCategoricalFitness)):
+                    raise TypeError(
+                        f"Fitness layer '{name}' is not categorical and cannot be aggregated."
+                    )
+                targets.append(("fitness", name))
+                found = True
+            if name in landscape.annotation_layers:
+                if found:
+                    raise ValueError(
+                        f"Layer '{name}' is present in both fitness and annotation collections."
+                    )
+                targets.append(("annotation", name))
+                found = True
+            if not found:
+                raise KeyError(
+                    f"Requested layer '{name}' not found among fitness or annotation layers."
+                )
+
+    if not targets:
+        return result
+
+    for layer_type, layer_name in targets:
+        if layer_type == "fitness":
+            categories, P = _probability_matrix_from_fitness_layer(landscape, node_order, layer_name)
+            if P.size == 0 or len(categories) == 0:
+                continue
+            dist = _aggregate_distance_matrix(R, P, agg_mode)
+            result[layer_name] = {
+                "categories": {i: cat for i, cat in enumerate(categories)},
+                "distance_max": dist,
+                "distance_mat": dist,
+            }
+        else:
+            matrices = _probability_matrices_from_annotation_layer(landscape, node_order, layer_name)
+            if not matrices:
+                continue
+            column_entries: dict[str, dict[str, Any]] = {}
+            for col, (cats, P) in matrices.items():
+                if P.size == 0 or len(cats) == 0:
+                    continue
+                dist = _aggregate_distance_matrix(R, P, agg_mode)
+                column_entries[col] = {
+                    "categories": {i: cat for i, cat in enumerate(cats)},
+                    "distance_max": dist,
+                    "distance_mat": dist,
+                }
+            if not column_entries:
+                continue
+            if len(column_entries) == 1:
+                col_name, entry = next(iter(column_entries.items()))
+                merged = dict(entry)
+                merged["column"] = col_name
+                result[layer_name] = merged
+            else:
+                result[layer_name] = {"columns": column_entries}
+
+    return result

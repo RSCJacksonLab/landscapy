@@ -337,8 +337,8 @@ def test_get_components_preserves_layers():
 
 def test_resistance_distance_matrix_sparse_switch():
     G = nx.path_graph(4)
-    dense = resistance_distance_matrix(G, sparse_threshold=1000)
-    sparse = resistance_distance_matrix(G, sparse_threshold=1)
+    dense = resistance_distance_matrix(G, sparse_threshold=1000)["resistance_mat"]
+    sparse = resistance_distance_matrix(G, sparse_threshold=1)["resistance_mat"]
     np.testing.assert_allclose(dense, sparse, atol=1e-8)
 
 
