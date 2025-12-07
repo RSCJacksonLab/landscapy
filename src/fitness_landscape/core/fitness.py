@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Literal, List, Any, Tuple, Union, Mapping, Callable
+from typing import Dict, Literal, List, Any, Tuple, Union, Mapping
 import torch
 import numpy as np
 from scipy import stats
