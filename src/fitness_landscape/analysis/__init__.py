@@ -60,6 +60,7 @@ from .graph import (
     calculate_ruggedness_local_optima,
     graph_spectral_analysis,
     resistance_distance_matrix,
+    category_diffusion_hierarchy,
 )
 
 from .random_walk import (
@@ -88,6 +89,7 @@ __all__ = [
     'graph_properties',
     'calculate_ruggedness_local_optima',
     'resistance_distance_matrix',
+    'category_diffusion_hierarchy',
     'calculate_ruggedness_autocorrelation_analytical',
     'calculate_ruggedness_autocorrelation_stochastic',
     'compute_persistent_homology',
