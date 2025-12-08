@@ -1119,7 +1119,6 @@ class ProbabilitySliceFitnessModifier(BaseFitnessModifier):
         )
         return NumericFitness.from_scalars(name=name, values=probs, metadata=meta)
     
-
 # Batch factory functions
 
 FitnessLike = Union[
