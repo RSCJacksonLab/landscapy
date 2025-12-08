@@ -388,9 +388,41 @@ def _wasserstein_distance(cost: np.ndarray,
     return float(res.fun)
 
 
+def _bilinear_form_with_solver(
+    p: np.ndarray,
+    q: np.ndarray,
+    solver_data: dict[str, Any] | None,
+    laplacian_pinv: np.ndarray | None,
+) -> float:
+    """
+    Compute p^T L^{+} q without materialising the full resistance matrix.
+    """
+    if laplacian_pinv is not None:
+        p0 = p - p.mean()
+        q0 = q - q.mean()
+        return float(p0 @ laplacian_pinv @ q0)
+
+    if not solver_data:
+        raise ValueError("Solver data is required when Laplacian pseudoinverse is unavailable.")
+
+    solver = solver_data["solver"]
+    ground = solver_data["ground"]
+    p0 = p - p.mean()
+    q0 = q - q.mean()
+    p_red = np.delete(p0, ground)
+    q_red = np.delete(q0, ground)
+    y = solver.solve(q_red)
+    return float(np.dot(p_red, y))
+
+
 def _aggregate_distance_matrix(cost: np.ndarray,
                                probabilities: np.ndarray,
-                               agg: Literal["wasserstein", "ot", "expected_pairwise"]) -> np.ndarray:
+                               agg: Literal["wasserstein", "ot", "expected_pairwise"],
+                               *,
+                               diag_scaled: np.ndarray | None = None,
+                               norm_factor: float = 1.0,
+                               solver_data: dict[str, Any] | None = None,
+                               laplacian_pinv: np.ndarray | None = None) -> np.ndarray:
     """
     Aggregate node-level distances into class-level distances using the
     selected aggregation strategy.
@@ -406,14 +438,36 @@ def _aggregate_distance_matrix(cost: np.ndarray,
 
     masses = probs.sum(axis=0)
     if agg_mode == "expected_pairwise":
-        numer = probs.T @ cost @ probs
-        denom = masses[:, None] * masses[None, :]
-        with np.errstate(divide="ignore", invalid="ignore"):
-            dist = numer / denom
-        dist[denom == 0] = np.nan
-        for i in range(n_classes):
-            if masses[i] > 0:
-                dist[i, i] = 0.0
+        if diag_scaled is None:
+            numer = probs.T @ cost @ probs
+            denom = masses[:, None] * masses[None, :]
+            with np.errstate(divide="ignore", invalid="ignore"):
+                dist = numer / denom
+            dist[denom == 0] = np.nan
+            for i in range(n_classes):
+                if masses[i] > 0:
+                    dist[i, i] = 0.0
+            return dist
+
+        diag_true = np.asarray(diag_scaled, dtype=float) / norm_factor
+        accum = probs.T @ diag_true
+        for a in range(n_classes):
+            if masses[a] <= 0:
+                continue
+            for b in range(a, n_classes):
+                if masses[b] <= 0:
+                    continue
+                if a == b:
+                    dist[a, b] = 0.0
+                    continue
+                cross_scaled = _bilinear_form_with_solver(
+                    probs[:, a], probs[:, b], solver_data, laplacian_pinv
+                )
+                cross_true = cross_scaled / norm_factor
+                val = (masses[b] * accum[a] + masses[a] * accum[b] - 2.0 * cross_true) / (
+                    masses[a] * masses[b]
+                )
+                dist[a, b] = dist[b, a] = val
         return dist
 
     # Wasserstein / OT aggregation
@@ -554,12 +608,12 @@ def _compute_resistance_matrix(G: nx.Graph,
                                jitter: float,
                                sparse_threshold: int,
                                weight_epsilon: float,
-                               weight_normalisation: bool) -> np.ndarray:
+                               weight_normalisation: bool) -> tuple[np.ndarray, np.ndarray, float, Optional[dict[str, Any]], Optional[np.ndarray]]:
     """
     Core resistance distance computation for a provided node ordering.
     """
     if not node_order:
-        return np.zeros((0, 0), dtype=float)
+        return np.zeros((0, 0), dtype=float), np.zeros((0,), dtype=float), 1.0, None, None
 
     sub = G.subgraph(node_order)
     L_sparse = nx.laplacian_matrix(sub, nodelist=list(node_order), weight=weight_key).astype(float)
@@ -575,7 +629,7 @@ def _compute_resistance_matrix(G: nx.Graph,
             L_sparse = L_sparse / norm_factor
     n = L_sparse.shape[0]
     if n == 0:
-        return np.zeros((0, 0), dtype=float)
+        return np.zeros((0, 0), dtype=float), np.zeros((0,), dtype=float), norm_factor, None, None
 
     if n <= sparse_threshold:
         L = L_sparse.toarray()
@@ -589,10 +643,10 @@ def _compute_resistance_matrix(G: nx.Graph,
         diag = np.diag(L_pinv)
         R = diag[:, None] + diag[None, :] - 2.0 * L_pinv
         R[R < 0] = 0.0
-        return R / norm_factor
+        return R / norm_factor, diag, norm_factor, None, L_pinv
 
     if n <= 1:
-        return np.zeros((n, n), dtype=float)
+        return np.zeros((n, n), dtype=float), np.zeros((n,), dtype=float), norm_factor, None, None
 
     ground = n - 1
     keep = list(range(n - 1))
@@ -627,7 +681,7 @@ def _compute_resistance_matrix(G: nx.Graph,
         diag = np.diag(L_pinv)
         R = diag[:, None] + diag[None, :] - 2.0 * L_pinv
         R[R < 0] = 0.0
-        return R / norm_factor
+        return R / norm_factor, diag, norm_factor, None, L_pinv
 
     Z = np.zeros((n - 1, n - 1), dtype=float)
     rhs = np.zeros(n - 1, dtype=float)
@@ -644,7 +698,10 @@ def _compute_resistance_matrix(G: nx.Graph,
     R[: n - 1, : n - 1] = R_reduced
     R[: n - 1, ground] = diag
     R[ground, : n - 1] = diag
-    return R / norm_factor
+    diag_full = np.zeros(n, dtype=float)
+    diag_full[: n - 1] = diag
+    solver_data = {"solver": solver, "ground": ground}
+    return R / norm_factor, diag_full, norm_factor, solver_data, None
 
 
 def resistance_distance_matrix(graph: Union[FitnessLandscape, nx.Graph],
@@ -712,7 +769,7 @@ def resistance_distance_matrix(graph: Union[FitnessLandscape, nx.Graph],
         raise ValueError("Graph is required to compute resistance distances.")
 
     node_order = list(G.nodes()) if nodes is None else list(nodes)
-    R = _compute_resistance_matrix(
+    R, diag_scaled, norm_factor, solver_data, laplacian_pinv = _compute_resistance_matrix(
         G,
         node_order,
         weight_key=weight_key,
@@ -776,7 +833,15 @@ def resistance_distance_matrix(graph: Union[FitnessLandscape, nx.Graph],
             categories, P = _probability_matrix_from_fitness_layer(landscape, node_order, layer_name)
             if P.size == 0 or len(categories) == 0:
                 continue
-            dist = _aggregate_distance_matrix(R, P, agg_mode)
+            dist = _aggregate_distance_matrix(
+                R,
+                P,
+                agg_mode,
+                diag_scaled=diag_scaled,
+                norm_factor=norm_factor,
+                solver_data=solver_data,
+                laplacian_pinv=laplacian_pinv,
+            )
             result[layer_name] = {
                 "categories": {i: cat for i, cat in enumerate(categories)},
                 "distance_max": dist,
@@ -790,7 +855,15 @@ def resistance_distance_matrix(graph: Union[FitnessLandscape, nx.Graph],
             for col, (cats, P) in matrices.items():
                 if P.size == 0 or len(cats) == 0:
                     continue
-                dist = _aggregate_distance_matrix(R, P, agg_mode)
+                dist = _aggregate_distance_matrix(
+                    R,
+                    P,
+                    agg_mode,
+                    diag_scaled=diag_scaled,
+                    norm_factor=norm_factor,
+                    solver_data=solver_data,
+                    laplacian_pinv=laplacian_pinv,
+                )
                 column_entries[col] = {
                     "categories": {i: cat for i, cat in enumerate(cats)},
                     "distance_max": dist,
