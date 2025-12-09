@@ -66,6 +66,7 @@ from .graph import (
 from .random_walk import (
     calculate_ruggedness_autocorrelation_analytical,
     calculate_ruggedness_autocorrelation_stochastic,
+    category_boundary_crossing_times,
 
 )
 
@@ -92,6 +93,7 @@ __all__ = [
     'category_diffusion_hierarchy',
     'calculate_ruggedness_autocorrelation_analytical',
     'calculate_ruggedness_autocorrelation_stochastic',
+    'category_boundary_crossing_times',
     'compute_persistent_homology',
     'cross_spectral_coherence',
     'compute_ruggedness_diffusion_scale',

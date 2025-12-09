@@ -8,6 +8,7 @@ from fitness_landscape.analysis.graph import (
     resistance_distance_matrix,
     category_diffusion_hierarchy,
 )
+from fitness_landscape.analysis.random_walk import category_boundary_crossing_times
 from fitness_landscape.core.annotation import AnnotationLayer
 from fitness_landscape.core.fitness import CategoricalFitness, ProbabilisticCategoricalFitness
 from fitness_landscape.core.landscape import FitnessLandscape
@@ -236,3 +237,21 @@ def test_category_diffusion_hierarchy_filters_coordinate_threshold():
     assert out["filtered_node_count"] == 2
     assert len(out["kept_node_indices"]) == 1
     assert out["embedding"].shape[0] == 1
+
+
+def test_category_boundary_crossing_times_simple():
+    landscape = _small_categorical_landscape()
+    out = category_boundary_crossing_times(
+        landscape,
+        layer="cat",
+        n_walks=20,
+        max_steps=5,
+        seed=0,
+    )
+    mat = out["mean_crossing_time"]
+    assert mat.shape == (2, 2)
+    # From A->B should be finite (path_graph with immediate neighbor)
+    assert np.isfinite(mat[0, 1])
+    assert mat[0, 0] == 0.0
+    # B->A also finite in this tiny graph
+    assert np.isfinite(mat[1, 0])
