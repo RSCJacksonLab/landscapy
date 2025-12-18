@@ -1483,9 +1483,9 @@ class FitnessLandscape:
         ----------
         layout : str or LayoutSpec, default="graph"
             Layout strategy passed to :class:`VisualizationDatasetBuilder`.
-            Supported options include ``"graph"``, ``"embedding"``,
-            ``"diffusion"``, ``"umap"``, and ``"external"`` (with
-            ``external_positions``).
+            Supported options include ``"graph"`` (Graphviz ``sfdp`` by
+            default), ``"sfdp"``, ``"embedding"``, ``"diffusion"``,
+            ``"umap"``, and ``"external"`` (with ``external_positions``).
         emb_key : str, optional
             Embedding domain to use when ``layout`` consumes embeddings
             (currently ``"embedding"`` and ``"umap"``). When omitted,

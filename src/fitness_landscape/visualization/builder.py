@@ -55,6 +55,10 @@ class VisualizationDatasetBuilder:
         external_positions: Mapping[Hashable, Sequence[float]] | None = None,
     ) -> VisualizationDataset:
         layout_spec = self._normalise_layout(layout)
+        layout_params = dict(layout_spec.parameters)
+        if layout_spec.name in {"graph", "sfdp"} and "engine" not in layout_params:
+            layout_params["engine"] = "sfdp"
+        layout_spec = LayoutSpec(name=layout_spec.name, parameters=layout_params)
 
         indices = self._resolve_indices(annotation=annotation, query=query)
         nodes = [self._node_for_index(i) for i in indices]
@@ -210,6 +214,10 @@ class VisualizationDatasetBuilder:
 
         if name == "graph":
             return self._graph_layout(nodes, params)
+        if name == "sfdp":
+            merged = {"engine": "sfdp"}
+            merged.update(params)
+            return self._graph_layout(nodes, merged)
         if name == "embedding":
             return self._embedding_layout(nodes, params)
         if name == "diffusion":
@@ -222,15 +230,70 @@ class VisualizationDatasetBuilder:
             return self._umap_layout(nodes, params)
 
         raise ValueError(
-            f"Unknown layout '{name}'. Supported: graph, embedding, diffusion, umap, external."
+            f"Unknown layout '{name}'. Supported: graph, sfdp, embedding, diffusion, umap, external."
         )
 
     def _graph_layout(self, nodes: List[Hashable], params: Mapping[str, Any]) -> np.ndarray:
         subgraph = self.landscape.graph.subgraph(nodes) if self.landscape.graph else nx.Graph()
         layout_params = dict(params)
+        engine = layout_params.pop("engine", layout_params.pop("algorithm", "sfdp"))
+        graphviz_args = layout_params.pop("graphviz_args", "")
         seed = layout_params.pop("seed", 0)
+        if engine == "sfdp":
+            coords = self._graphviz_sfdp_layout(subgraph, nodes, args=graphviz_args)
+            if coords is None:
+                raise RuntimeError("Graphviz 'sfdp' layout failed and fallback is disabled.")
+            return coords
+        elif engine not in {None, "spring"}:
+            raise ValueError(f"Unknown graph layout engine '{engine}'. Use 'sfdp' or 'spring'.")
+
         positions = nx.spring_layout(subgraph, seed=seed, **layout_params)
         return np.array([positions[node] for node in nodes], dtype=float)
+
+    def _graphviz_sfdp_layout(
+        self,
+        subgraph: nx.Graph,
+        nodes: List[Hashable],
+        *,
+        args: str = "",
+    ) -> np.ndarray | None:
+        if not nodes:
+            return np.zeros((0, 2), dtype=float)
+        try:
+            from networkx.drawing.nx_pydot import graphviz_layout
+            import inspect
+        except ImportError as exc:
+            raise RuntimeError(
+                "Graphviz layout requires the 'pydot' package and Graphviz binaries."
+            ) from exc
+
+        try:
+            sig = inspect.signature(graphviz_layout)
+            call_kwargs = {"prog": "sfdp"}
+            if "args" in sig.parameters and args:
+                call_kwargs["args"] = args
+            # Relabel nodes and strip attributes so Graphviz doesn't choke on
+            # complex Python object strings or huge labels.
+            relabel_map = {node: f"n{idx}" for idx, node in enumerate(subgraph.nodes())}
+            bare = nx.Graph() if not subgraph.is_directed() else nx.DiGraph()
+            bare.add_nodes_from(relabel_map.values())
+            bare.add_edges_from(
+                (relabel_map[u], relabel_map[v]) for u, v in subgraph.edges()
+            )
+            positions = graphviz_layout(bare, **call_kwargs)
+            coords = np.array(
+                [positions[relabel_map[node]] for node in nodes],
+                dtype=float,
+            )
+        except (OSError, RuntimeError, KeyError) as exc:
+            raise RuntimeError(f"Graphviz 'sfdp' layout failed: {exc}") from exc
+
+        if coords.ndim == 1:
+            coords = coords.reshape(-1, 1)
+        if coords.shape[1] < 2:
+            padding = np.zeros((coords.shape[0], 2 - coords.shape[1]), dtype=float)
+            coords = np.hstack([coords, padding])
+        return coords[:, :2]
 
     def _embedding_layout(self, nodes: List[Hashable], params: Mapping[str, Any]) -> np.ndarray:
         embeddings, _ = self._get_embedding_matrix(params.get("emb_key"))
