@@ -188,18 +188,21 @@ def test_elementary_landscape_is_eigenfunction():
     
     assert np.allclose(eigenvalues, eigenvalues[0])
 
-def test_nk_landscape_initialization_and_seeding():
+@pytest.mark.parametrize("K", [0, 1, 2, 3, 4])
+def test_nk_landscape_initialization_and_seeding_across_k(K):
     """
-    Tests the basic initialization and reproducibility of the NK model.
+    Tests initialization and seeding for NK landscapes across K values.
     """
-    landscape1 = create_gnk_landscape(N=5, K=1, seed=123, alphabet=['A', 'B'])
-    assert len(landscape1.sequences) == 2**5
-    assert len(landscape1.get_signal()) == 2**5
+    N = 5
+    alphabet = ['A', 'B']
+    landscape1 = create_gnk_landscape(N=N, K=K, seed=123, alphabet=alphabet)
+    assert len(landscape1.sequences) == 2**N
+    assert len(landscape1.get_signal()) == 2**N
 
-    landscape2 = create_gnk_landscape(N=5, K=1, seed=123, alphabet=['A', 'B'])
+    landscape2 = create_gnk_landscape(N=N, K=K, seed=123, alphabet=alphabet)
     assert np.array_equal(landscape1.get_signal(), landscape2.get_signal())
 
-    landscape3 = create_gnk_landscape(N=5, K=1, seed=456, alphabet=['A', 'B'])
+    landscape3 = create_gnk_landscape(N=N, K=K, seed=456, alphabet=alphabet)
     assert not np.array_equal(landscape1.get_signal(), landscape3.get_signal())
 
 def test_nk_landscape_is_additive_for_k0():
@@ -390,7 +393,7 @@ def test_gnk_dict_alphabet_with_adjacency_matrix_changes_signal():
 
 def test_gnk_dict_alphabet_k0_is_additive_per_site():
     """
-    K=0 should be additive with per-site normalization (Ai-1).
+    K=0 should be additive with per-site contributions.
     Check additivity for a pair of single mutations vs the double mutation.
     """
     per_site = {
