@@ -133,35 +133,6 @@ def generate_NK_states(N: int,
     if num_sequences == 0:
         return sequences, np.zeros(0, dtype=float)
 
-    # K == 0 special case (additive)
-    if adj_mat is None and (K is not None and K == 0):
-        # Normalize per-site by its alphabet range (Ai-1).
-        # If Ai==1, contribution is zero for that site.
-        fitness_values = np.zeros(num_sequences, dtype=float)
-
-        if base_sequence is not None:
-            # evaluate at variable_sites only and average over N
-            for r, seq in enumerate(sequences):
-                contrib = 0.0
-                for s in var_order:
-                    Ai = alpha_sizes[s]
-                    if Ai <= 1:
-                        continue
-                    contrib += allele_map[s][seq[s]] / float(Ai - 1)
-                fitness_values[r] = contrib / float(N)
-        else:
-            # sequences are length N in the order var_order == [0..N-1] by default
-            for r, seq_var in enumerate(sequences):
-                contrib = 0.0
-                for j, s in enumerate(var_order):  # s = global index, j = local position
-                    Ai = alpha_sizes[s]
-                    if Ai <= 1:
-                        continue
-                    contrib += allele_map[s][seq_var[j]] / float(Ai - 1)
-                fitness_values[r] = contrib / float(N)
-
-        return sequences, fitness_values
-
     # Build neighbor sets in GLOBAL coordinates (matching full sequence positions) 
     if adj_mat is not None:
         if adj_mat.shape != (N, N):
