@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Literal, List, Any, Tuple, Union, Mapping, Callable
+from functools import reduce
+import operator
+from typing import Dict, Literal, List, Any, Tuple, Union, Mapping, Callable, Sequence
 import torch
 import numpy as np
 from scipy import stats
@@ -1118,6 +1120,304 @@ class ProbabilitySliceFitnessModifier(BaseFitnessModifier):
             }
         )
         return NumericFitness.from_scalars(name=name, values=probs, metadata=meta)
+
+
+def _numeric_to_scalar(layer: BaseFitnessLayer,
+                       aggregate_func: Callable | None = None) -> np.ndarray:
+    if aggregate_func is None:
+        return layer.to_scalar()
+    try:
+        return layer.to_scalar(aggregate_func=aggregate_func)
+    except TypeError:
+        return layer.to_scalar()
+
+
+class GaussianNoiseFitnessModifier(BaseFitnessModifier):
+    """
+    Add Gaussian noise to a numeric fitness layer.
+    """
+
+    modifier_name = "gaussian_noise"
+    input_dtypes = ("numeric",)
+
+    def __init__(self,
+                 *,
+                 scale: float = 1.0,
+                 loc: float = 0.0,
+                 seed: int | None = None,
+                 name: str | None = None):
+        """
+        Parameters
+        ----------
+        scale : float, default=`1.0`
+            Standard deviation of the Gaussian noise.
+        loc : float, default=`0.0`
+            Mean of the Gaussian noise.
+        seed : int, optional
+            Random seed for reproducibility.
+        name : str, optional
+            Optional explicit name for the output layer.
+        """
+        super().__init__(name=name)
+        if scale < 0:
+            raise ValueError("scale must be non-negative.")
+        self.scale = float(scale)
+        self.loc = float(loc)
+        self.seed = seed
+
+    def apply(self, layer: BaseFitnessLayer, *, name: str) -> BaseFitnessLayer:
+        rng = np.random.default_rng(self.seed)
+        meta = dict(layer.metadata) if getattr(layer, "metadata", None) else {}
+        meta.update(
+            {
+                "modifier": "gaussian_noise",
+                "source_layer": layer.name,
+                "loc": self.loc,
+                "scale": self.scale,
+                "seed": self.seed,
+            }
+        )
+
+        if isinstance(layer, NumericFitness):
+            reps: List[List[float]] = []
+            for i in range(len(layer)):
+                r = np.asarray(layer.get_value(i), dtype=float)
+                if r.size == 0:
+                    r = np.array([float("nan")])
+                noise = rng.normal(loc=self.loc, scale=self.scale, size=r.shape)
+                mask = np.isnan(r)
+                r = r + noise
+                if mask.any():
+                    r[mask] = np.nan
+                reps.append(r.tolist())
+            return NumericFitness.from_replicates(name=name, replicates=reps, metadata=meta)
+
+        values = _numeric_to_scalar(layer)
+        noise = rng.normal(loc=self.loc, scale=self.scale, size=len(values))
+        return NumericFitness.from_scalars(name=name, values=values + noise, metadata=meta)
+
+
+class GaussianDistributionFitnessModifier(BaseFitnessModifier):
+    """
+    Convert scalar values into Gaussian replicate distributions.
+    """
+
+    modifier_name = "gaussian_distribution"
+    input_dtypes = ("numeric",)
+
+    def __init__(self,
+                 *,
+                 scale: float,
+                 reps: int = 10,
+                 seed: int | None = None,
+                 aggregate_func: Callable = np.mean,
+                 name: str | None = None):
+        """
+        Parameters
+        ----------
+        scale : float
+            Standard deviation of the Gaussian distribution.
+        reps : int, default=`10`
+            Number of replicates to sample per sequence.
+        seed : int, optional
+            Random seed for reproducibility.
+        aggregate_func : callable, optional
+            Aggregator for input replicates when reducing to scalars.
+        name : str, optional
+            Optional explicit name for the output layer.
+        """
+        super().__init__(name=name)
+        if scale < 0:
+            raise ValueError("scale must be non-negative.")
+        if reps <= 0:
+            raise ValueError("reps must be a positive integer.")
+        if not callable(aggregate_func):
+            raise TypeError("aggregate_func must be callable.")
+        self.scale = float(scale)
+        self.reps = int(reps)
+        self.seed = seed
+        self.aggregate_func = aggregate_func
+
+    def apply(self, layer: BaseFitnessLayer, *, name: str) -> BaseFitnessLayer:
+        values = np.asarray(_numeric_to_scalar(layer, self.aggregate_func), dtype=float).ravel()
+        rng = np.random.default_rng(self.seed)
+        samples = rng.normal(loc=values[:, None], scale=self.scale, size=(len(values), self.reps))
+        meta = dict(layer.metadata) if getattr(layer, "metadata", None) else {}
+        meta.update(
+            {
+                "modifier": "gaussian_distribution",
+                "source_layer": layer.name,
+                "scale": self.scale,
+                "reps": self.reps,
+                "seed": self.seed,
+                "aggregate_func": getattr(self.aggregate_func, "__name__", repr(self.aggregate_func)),
+            }
+        )
+        return NumericFitness.from_tensor(name=name, tensor=samples, metadata=meta)
+
+
+class ResampleFitnessModifier(BaseFitnessModifier):
+    """
+    Resample values from a distribution defined by numeric replicates.
+    """
+
+    modifier_name = "resample"
+    input_dtypes = ("numeric",)
+
+    def __init__(self,
+                 *,
+                 reps: int = 1,
+                 seed: int | None = None,
+                 name: str | None = None):
+        """
+        Parameters
+        ----------
+        reps : int, default=`1`
+            Number of resampled replicates per sequence.
+        seed : int, optional
+            Random seed for reproducibility.
+        name : str, optional
+            Optional explicit name for the output layer.
+        """
+        super().__init__(name=name)
+        if reps <= 0:
+            raise ValueError("reps must be a positive integer.")
+        self.reps = int(reps)
+        self.seed = seed
+
+    def apply(self, layer: BaseFitnessLayer, *, name: str) -> BaseFitnessLayer:
+        if not isinstance(layer, NumericFitness):
+            raise TypeError("ResampleFitnessModifier expects a NumericFitness layer.")
+
+        rng = np.random.default_rng(self.seed)
+        reps: List[List[float]] = []
+        for i in range(len(layer)):
+            r = np.asarray(layer.get_value(i), dtype=float)
+            if r.size == 0:
+                reps.append([float("nan")] * self.reps)
+                continue
+            if len(r) > 1:
+                loc = float(np.mean(r))
+                scale = float(np.std(r))
+            else:
+                loc = float(r[0])
+                scale = 0.0
+            samples = rng.normal(loc=loc, scale=scale, size=self.reps)
+            reps.append(samples.tolist())
+
+        meta = dict(layer.metadata) if getattr(layer, "metadata", None) else {}
+        meta.update(
+            {
+                "modifier": "resample",
+                "source_layer": layer.name,
+                "reps": self.reps,
+                "seed": self.seed,
+            }
+        )
+        return NumericFitness.from_replicates(name=name, replicates=reps, metadata=meta)
+
+
+class ArithmeticFitnessModifier(BaseFitnessModifier):
+    """
+    Perform arithmetic operations between numeric fitness layers.
+    """
+
+    modifier_name = "arithmetic"
+    input_dtypes = ("numeric",)
+
+    def __init__(self,
+                 other_layers: Sequence[BaseFitnessLayer] | BaseFitnessLayer,
+                 *,
+                 op: str | Callable = "add",
+                 aggregate_func: Callable = np.mean,
+                 name: str | None = None):
+        """
+        Parameters
+        ----------
+        other_layers : BaseFitnessLayer or sequence of BaseFitnessLayer
+            Additional layers to combine with the source layer.
+        op : str or callable, default=`"add"`
+            Arithmetic operation to apply. Built-ins: "add", "sub",
+            "mul", "div". If callable, it should accept arrays from each
+            layer as positional arguments and return an array.
+        aggregate_func : callable, optional
+            Aggregator for input replicates when reducing to scalars.
+        name : str, optional
+            Optional explicit name for the output layer.
+        """
+        super().__init__(name=name)
+        if isinstance(other_layers, BaseFitnessLayer):
+            layers = [other_layers]
+        else:
+            layers = list(other_layers)
+        if not layers:
+            raise ValueError("ArithmeticFitnessModifier requires at least one other layer.")
+        if not callable(aggregate_func):
+            raise TypeError("aggregate_func must be callable.")
+
+        self.other_layers = layers
+        self.op = op
+        self.aggregate_func = aggregate_func
+
+    def _resolve_operation(self) -> Callable:
+        if callable(self.op):
+            return self.op
+        ops = {
+            "add": operator.add,
+            "sub": operator.sub,
+            "subtract": operator.sub,
+            "mul": operator.mul,
+            "multiply": operator.mul,
+            "div": operator.truediv,
+            "divide": operator.truediv,
+        }
+        if isinstance(self.op, str) and self.op in ops:
+            return ops[self.op]
+        raise ValueError(f"Unsupported operation: {self.op!r}")
+
+    def apply(self, layer: BaseFitnessLayer, *, name: str) -> BaseFitnessLayer:
+        for other in self.other_layers:
+            if other.dtype not in self.input_dtypes:
+                raise TypeError(
+                    f"ArithmeticFitnessModifier only accepts layers with dtype in {self.input_dtypes}, "
+                    f"got '{other.dtype}'."
+                )
+            other._validate_length(len(layer), name="arithmetic modifier")
+
+        base_values = np.asarray(_numeric_to_scalar(layer, self.aggregate_func), dtype=float).ravel()
+        other_values = [
+            np.asarray(_numeric_to_scalar(other, self.aggregate_func), dtype=float).ravel()
+            for other in self.other_layers
+        ]
+
+        op = self._resolve_operation()
+        if callable(self.op) and not isinstance(self.op, str):
+            result = op(base_values, *other_values)
+        else:
+            result = reduce(op, other_values, base_values)
+
+        result = np.asarray(result, dtype=float).ravel()
+        if result.shape[0] != len(layer):
+            raise ValueError(
+                "ArithmeticFitnessModifier expects operation output length "
+                f"{len(layer)}, got {result.shape[0]}."
+            )
+
+        meta = dict(layer.metadata) if getattr(layer, "metadata", None) else {}
+        if isinstance(self.op, str):
+            op_label: str | None = self.op
+        else:
+            op_label = getattr(self.op, "__name__", repr(self.op))
+        meta.update(
+            {
+                "modifier": "arithmetic",
+                "source_layer": layer.name,
+                "other_layers": [l.name for l in self.other_layers],
+                "operation": op_label,
+                "aggregate_func": getattr(self.aggregate_func, "__name__", repr(self.aggregate_func)),
+            }
+        )
+        return NumericFitness.from_scalars(name=name, values=result, metadata=meta)
     
 # Batch factory functions
 
