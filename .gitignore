@@ -188,3 +188,5 @@ docs/
 
 # Remove paper figures
 paper_figures/
+
+.vscode
