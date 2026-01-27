@@ -94,13 +94,28 @@ def eigenmode_decomposition(graph: Union[nx.Graph, FitnessLandscape],
     if symmetric_psd and matrix in ('laplacian', 'norm_laplacian'):
         # Use shift–invert at sigma=0 to get smallest eigenpairs efficiently
         try:
-            w, U = spla.eigsh(M, k=k, which='LM', sigma=0.0)
+            
+            # Collect k is None type errors
+            if k is not None:
+                w, U = spla.eigsh(M, k=k, which='LM', sigma=0.0)
+            else:
+                w, U = spla.eigsh(M, which='LM', sigma=0.0)
+        
         except Exception:
+
             # Fallback to plain SM (no shift) if factorization fails
-            w, U = spla.eigsh(M, k=k, which='SM')
+            # Collect k is None type errors
+            if k is not None:
+                w, U = spla.eigsh(M, k=k, which='SM')
+            else:
+                w, U = spla.eigsh(M, which='SM')
     else:
         # Adjacency or others: get largest magnitude by default
-        w, U = spla.eigsh(M, k=k, which='LM')
+        # Collect k is None type errors
+        if k is not None:
+            w, U = spla.eigsh(M, k=k, which='LM')
+        else:
+            w, U = spla.eigsh(M, which='LM')
 
     # Sort by eigenvalues
     idx = np.argsort(w)
