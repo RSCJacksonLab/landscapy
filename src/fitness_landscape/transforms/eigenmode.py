@@ -83,11 +83,12 @@ def eigenmode_decomposition(graph: Union[nx.Graph, FitnessLandscape],
     if n <= dense_threshold and (k is None or k >= n):
         return _dense_full(M)
 
-    k = int(k)
-    if k <= 0 or k >= n:
-
-        # Degenerate asks fall back to dense
-        return _dense_full(M)
+    # Collect Nonetype error
+    if k is not None:
+        k = int(k)
+        if k <= 0 or k >= n:
+            # Degenerate asks fall back to dense
+            return _dense_full(M)
 
     # Sparse path
     if symmetric_psd and matrix in ('laplacian', 'norm_laplacian'):
