@@ -26,7 +26,7 @@ setup(
     packages=find_packages(where="src"),
     python_requires=">=3.12",
     install_requires=[
-        "softalign @ git+https://github.com/RSCJacksonLab/softalign.git",
+        "softalign>=1.0.0",
         "numpy>=1.19.0",
         "scipy>=1.5.0",
         "networkx>=2.5",
