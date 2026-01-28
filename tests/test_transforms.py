@@ -7,6 +7,7 @@ from fitness_landscape.models.nk import create_nk_binary_landscape
 from fitness_landscape.core.landscape import FitnessLandscape
 from fitness_landscape.transforms.walsh_hadamard import *
 from fitness_landscape.transforms.graph_fourier import *
+from fitness_landscape.transforms.eigenmode import eigenmode_decomposition
 from fitness_landscape.core.fitness import NumericFitness
 
 
@@ -83,3 +84,31 @@ def test_graph_fourier_transform_norm_laplacian():
     assert eigenvectors is not None
     assert coefficients is not None
 
+
+def test_eigenmode_decomposition_full_when_k_none():
+    graph = nx.path_graph(10)
+    for i, node in enumerate(graph.nodes()):
+        graph.nodes[node]['sequence'] = BaseNumpySequence([i])
+    # Force dense path even though n may exceed a tiny threshold.
+    w, U = eigenmode_decomposition(graph, k=None, matrix="laplacian", dense_threshold=0)
+    assert w.shape[0] == graph.number_of_nodes()
+    assert U.shape == (graph.number_of_nodes(), graph.number_of_nodes())
+
+
+def test_graph_fourier_transform_accepts_precomputed_eigenpairs():
+    graph = nx.cycle_graph(6)
+    signal = np.cos(np.linspace(0, 2 * np.pi, 6, endpoint=False))
+    for i, node in enumerate(graph.nodes()):
+        graph.nodes[node]['sequence'] = BaseNumpySequence([i])
+        graph.nodes[node]['fitness_default'] = signal[i]
+
+    landscape = FitnessLandscape.from_graph(graph, emb_nodes=False)
+    w, U = eigenmode_decomposition(landscape, k=None, matrix="laplacian")
+
+    U1, w1, coeffs1 = graph_fourier_transform(landscape, signal=signal)
+    U2, w2, coeffs2 = graph_fourier_transform(
+        landscape, signal=signal, _eigenvectors=U, _eigenvalues=w
+    )
+
+    np.testing.assert_allclose(w1, w2, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(coeffs1, coeffs2, rtol=1e-6, atol=1e-6)

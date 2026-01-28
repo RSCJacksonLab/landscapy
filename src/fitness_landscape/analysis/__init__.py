@@ -45,7 +45,11 @@ from .statistics import (
 
 from .diffusion_scale import (
     compute_ruggedness_diffusion_scale,
-    compute_ruggedness_variance_energy
+    compute_ruggedness_variance_energy,
+    fit_t_bayesian_laplace,
+    fit_t_grid_posterior,
+    fit_t_profile_likelihood,
+    fit_t_bootstrap,
 )
 
 from .epistasis import (
@@ -98,6 +102,10 @@ __all__ = [
     'cross_spectral_coherence',
     'compute_ruggedness_diffusion_scale',
     'compute_ruggedness_variance_energy',
+    'fit_t_bayesian_laplace',
+    'fit_t_grid_posterior',
+    'fit_t_profile_likelihood',
+    'fit_t_bootstrap',
     'local_cheeger_sweep',
     'calculate_local_bottleneck',
     'first_dirichlet_eigenpair',

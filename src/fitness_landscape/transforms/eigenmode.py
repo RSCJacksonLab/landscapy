@@ -3,6 +3,7 @@ import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 import torch
 import networkx as nx
+import warnings
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
 from ..core.landscape import FitnessLandscape
 
@@ -23,7 +24,8 @@ def eigenmode_decomposition(graph: Union[nx.Graph, FitnessLandscape],
         The graph matrix to decompose. Either Laplacian matrix or the
         adjacency matrix. 
     k : int or None, optional
-        Number of eigenmodes to compute.
+        Number of eigenmodes to compute. If None, compute all eigenpairs
+        using a dense decomposition (may be expensive for large graphs).
     dense_threshold : int, default=5000
         The node threshold count to compute sparse / dense matrices.
         
@@ -79,16 +81,24 @@ def eigenmode_decomposition(graph: Union[nx.Graph, FitnessLandscape],
         # Convert to CSR
         M = sp.csr_matrix(M)
     
-    # If small graph use dense.
-    if n <= dense_threshold and (k is None or k >= n):
+    # If k is None, compute the full eigendecomposition (dense).
+    if k is None:
+        if n > dense_threshold:
+            warnings.warn(
+                "Computing all eigenpairs for a large graph; this may be slow or memory-intensive. "
+                "Pass k to compute a truncated basis instead.",
+                RuntimeWarning,
+            )
         return _dense_full(M)
 
-    # Collect Nonetype error
-    if k is not None:
-        k = int(k)
-        if k <= 0 or k >= n:
-            # Degenerate asks fall back to dense
-            return _dense_full(M)
+    # If small graph use dense.
+    if n <= dense_threshold and k >= n:
+        return _dense_full(M)
+
+    k = int(k)
+    if k <= 0 or k >= n:
+        # Degenerate asks fall back to dense
+        return _dense_full(M)
 
     # Sparse path
     if symmetric_psd and matrix in ('laplacian', 'norm_laplacian'):
@@ -96,26 +106,15 @@ def eigenmode_decomposition(graph: Union[nx.Graph, FitnessLandscape],
         try:
             
             # Collect k is None type errors
-            if k is not None:
-                w, U = spla.eigsh(M, k=k, which='LM', sigma=0.0)
-            else:
-                w, U = spla.eigsh(M, which='LM', sigma=0.0)
+            w, U = spla.eigsh(M, k=k, which='LM', sigma=0.0)
         
         except Exception:
 
             # Fallback to plain SM (no shift) if factorization fails
-            # Collect k is None type errors
-            if k is not None:
-                w, U = spla.eigsh(M, k=k, which='SM')
-            else:
-                w, U = spla.eigsh(M, which='SM')
+            w, U = spla.eigsh(M, k=k, which='SM')
     else:
         # Adjacency or others: get largest magnitude by default
-        # Collect k is None type errors
-        if k is not None:
-            w, U = spla.eigsh(M, k=k, which='LM')
-        else:
-            w, U = spla.eigsh(M, which='LM')
+        w, U = spla.eigsh(M, k=k, which='LM')
 
     # Sort by eigenvalues
     idx = np.argsort(w)

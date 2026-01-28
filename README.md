@@ -86,6 +86,50 @@ walsh_hadamard.py: Perform Walsh-Hadamard transforms for epistasis analysis.
 
 - graph_fourier.py: Analyze fitness signals in the frequency domain using Graph Fourier transforms.
 
+#### Performance tip: cache eigenpairs for large graphs
+For large landscapes, computing eigenpairs can dominate runtime. You can cache them once
+and pass the precomputed arrays into GFT-based analyses via the private `_eigenvalues`
+and `_eigenvectors` parameters.
+
+```python
+from fitness_landscape.transforms.eigenmode import eigenmode_decomposition
+from fitness_landscape.transforms.graph_fourier import graph_fourier_transform
+from fitness_landscape.analysis.diffusion_scale import compute_ruggedness_diffusion_scale
+from fitness_landscape.analysis.random_walk import calculate_ruggedness_autocorrelation_analytical
+
+# Example: normalized Laplacian eigenpairs (used by diffusion scale).
+evals_norm, evecs_norm = eigenmode_decomposition(landscape.graph, matrix="norm_laplacian", k=None)
+
+# Cache on the landscape if you want (private convention).
+landscape._cached_eigs = {"norm_laplacian": (evals_norm, evecs_norm)}
+
+# Reuse in diffusion scale:
+fit = compute_ruggedness_diffusion_scale(
+    landscape,
+    method="grid",
+    _eigenvalues=evals_norm,
+    _eigenvectors=evecs_norm,
+)
+
+# Example: standard Laplacian eigenpairs (used by analytical autocorrelation).
+evals_lap, evecs_lap = eigenmode_decomposition(landscape.graph, matrix="laplacian", k=None)
+autocorr = calculate_ruggedness_autocorrelation_analytical(
+    landscape,
+    _eigenvalues=evals_lap,
+    _eigenvectors=evecs_lap,
+)
+
+# GFT with cached eigenpairs:
+U, w, coeffs = graph_fourier_transform(
+    landscape,
+    _eigenvalues=evals_lap,
+    _eigenvectors=evecs_lap,
+)
+```
+
+Note: the cached eigenpairs must match the matrix type expected by the analysis
+(e.g., normalized Laplacian vs Laplacian).
+
 ## Authors
 Matthew A Spence
 
