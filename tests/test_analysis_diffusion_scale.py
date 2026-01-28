@@ -6,6 +6,7 @@ from fitness_landscape.analysis.diffusion_scale import compute_ruggedness_diffus
 from fitness_landscape.core.fitness import NumericFitness
 from fitness_landscape.core.landscape import FitnessLandscape
 from fitness_landscape.core.sequence import BaseNumpySequence
+from fitness_landscape.transforms.eigenmode import eigenmode_decomposition
 
 
 def _toy_landscape():
@@ -72,3 +73,21 @@ def test_bootstrap_reproducible_with_seed():
     assert out1["t_map"] == pytest.approx(out2["t_map"], rel=1e-6, abs=1e-6)
     assert out1["t_lower_confidence_interval"] == pytest.approx(out2["t_lower_confidence_interval"], rel=1e-6, abs=1e-6)
     assert out1["t_upper_confidence_interval"] == pytest.approx(out2["t_upper_confidence_interval"], rel=1e-6, abs=1e-6)
+
+
+def test_diffusion_scale_with_precomputed_eigenpairs_matches():
+    landscape = _toy_landscape()
+    evals, evecs = eigenmode_decomposition(landscape.graph, matrix="norm_laplacian", k=None)
+    out_default = compute_ruggedness_diffusion_scale(
+        landscape, t_min=0.01, t_max=5.0, grid_size=64, method="grid"
+    )
+    out_pre = compute_ruggedness_diffusion_scale(
+        landscape,
+        t_min=0.01,
+        t_max=5.0,
+        grid_size=64,
+        method="grid",
+        _eigenvalues=evals,
+        _eigenvectors=evecs,
+    )
+    assert out_default["t_map"] == pytest.approx(out_pre["t_map"], rel=1e-6, abs=1e-6)

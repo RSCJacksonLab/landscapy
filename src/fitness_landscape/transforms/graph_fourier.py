@@ -9,7 +9,10 @@ from .eigenmode import eigenmode_decomposition
 def graph_fourier_transform(graph: Union[nx.Graph, FitnessLandscape],
                             signal: np.ndarray = None,
                             matrix: Literal['laplacian', 'norm_laplacian'] = 'laplacian',
-                            k: int = None) -> Union[torch.Tensor, np.ndarray]:
+                            k: int = None,
+                            _eigenvectors: Optional[np.ndarray] = None,
+                            _eigenvalues: Optional[np.ndarray] = None
+                            ) -> Union[torch.Tensor, np.ndarray]:
     """
     Compute graph Fourier transform of a signal on the graph.
     
@@ -37,7 +40,18 @@ def graph_fourier_transform(graph: Union[nx.Graph, FitnessLandscape],
             signal = graph.get_signal()  # single pass over active layer
         graph = graph.graph
 
-    w, U = eigenmode_decomposition(graph, k=k, matrix=matrix)
+    if (_eigenvectors is None) != (_eigenvalues is None):
+        raise ValueError("Provide both _eigenvectors and _eigenvalues or neither.")
+
+    if _eigenvectors is not None:
+        U = np.asarray(_eigenvectors, dtype=float)
+        w = np.asarray(_eigenvalues, dtype=float)
+        if U.ndim != 2:
+            raise ValueError("_eigenvectors must be a 2D array.")
+        if w.ndim != 1 or w.shape[0] != U.shape[1]:
+            raise ValueError("_eigenvalues must be 1D with length matching eigenvector columns.")
+    else:
+        w, U = eigenmode_decomposition(graph, k=k, matrix=matrix)
 
     coeffs = None
     if signal is not None:

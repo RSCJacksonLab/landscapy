@@ -8,7 +8,9 @@ from ..core.sequence import sequence_distance
 from ..transforms import graph_fourier_transform, eigenmode_decomposition
 
 def calculate_ruggedness_autocorrelation_analytical(landscape: FitnessLandscape,
-                                                      lag_max: int = None) -> Dict:
+                                                      lag_max: int = None,
+                                                      _eigenvectors: Optional[np.ndarray] = None,
+                                                      _eigenvalues: Optional[np.ndarray] = None) -> Dict:
     """
     Function to determine the analytical autocorrelation of a fitness
     landscape.
@@ -32,7 +34,12 @@ def calculate_ruggedness_autocorrelation_analytical(landscape: FitnessLandscape,
     mean_centered_signal = raw_signal - np.mean(raw_signal)
 
     # Perform computation in fourier basis
-    eigenvectors, _, gft_coefficients = graph_fourier_transform(landscape, signal=mean_centered_signal)
+    eigenvectors, _, gft_coefficients = graph_fourier_transform(
+        landscape,
+        signal=mean_centered_signal,
+        _eigenvectors=_eigenvectors,
+        _eigenvalues=_eigenvalues,
+    )
     power_spectrum = np.abs(gft_coefficients)**2
     autocov_matrix = eigenvectors @ np.diag(power_spectrum) @ eigenvectors.T
     

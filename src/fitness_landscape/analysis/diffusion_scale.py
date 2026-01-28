@@ -9,7 +9,9 @@ from ..transforms.graph_fourier import graph_fourier_transform
 from ..core.landscape import FitnessLandscape
 
 def _precompute_GMRF_stats(G: nx.Graph,
-                           signal: np.ndarray) -> Tuple:
+                           signal: np.ndarray,
+                           _eigenvalues: Optional[np.ndarray] = None,
+                           _eigenvectors: Optional[np.ndarray] = None) -> Tuple:
     """
     Function to precompute GMRF spectral and statistical quantities.
 
@@ -29,8 +31,14 @@ def _precompute_GMRF_stats(G: nx.Graph,
     sigma_squared : float
         The empirical variance in the signal. 
     """
-    eigenvalues, eigenvectors = eigenmode_decomposition(G,
-                                                        matrix = 'norm_laplacian')
+    if (_eigenvalues is None) != (_eigenvectors is None):
+        raise ValueError("Provide both _eigenvalues and _eigenvectors or neither.")
+    if _eigenvalues is not None:
+        eigenvalues = np.asarray(_eigenvalues, dtype=float)
+        eigenvectors = np.asarray(_eigenvectors, dtype=float)
+    else:
+        eigenvalues, eigenvectors = eigenmode_decomposition(G,
+                                                            matrix = 'norm_laplacian')
 
     mu = np.mean(signal)
     
@@ -45,11 +53,19 @@ def _precompute_GMRF_stats(G: nx.Graph,
 
 
 def _precompute_GMRF_stats_with_evecs(G: nx.Graph,
-                                      signal: np.ndarray) -> Tuple:
+                                      signal: np.ndarray,
+                                      _eigenvalues: Optional[np.ndarray] = None,
+                                      _eigenvectors: Optional[np.ndarray] = None) -> Tuple:
     """
     Variant of _precompute_GMRF_stats that also returns eigenvectors.
     """
-    eigenvalues, eigenvectors = eigenmode_decomposition(G, matrix='norm_laplacian')
+    if (_eigenvalues is None) != (_eigenvectors is None):
+        raise ValueError("Provide both _eigenvalues and _eigenvectors or neither.")
+    if _eigenvalues is not None:
+        eigenvalues = np.asarray(_eigenvalues, dtype=float)
+        eigenvectors = np.asarray(_eigenvectors, dtype=float)
+    else:
+        eigenvalues, eigenvectors = eigenmode_decomposition(G, matrix='norm_laplacian')
     mu = np.mean(signal)
     signal_centered = signal - mu
     f_hat = eigenvectors.T @ signal_centered
@@ -189,7 +205,9 @@ def fit_t_bayesian_laplace(G: nx.Graph,
                            signal: float,
                            t_min: float = 0.01,
                            t_max: float = 1000.0,
-                           epsilon: float = 1e-8) -> Tuple:
+                           epsilon: float = 1e-8,
+                           _eigenvalues: Optional[np.ndarray] = None,
+                           _eigenvectors: Optional[np.ndarray] = None) -> Tuple:
     """
     Function to estimate the Posterior probability distribution of t
     using the Laplace approximation.
@@ -230,7 +248,12 @@ def fit_t_bayesian_laplace(G: nx.Graph,
         the negative log posterior with respect to t. 
     """
 
-    f_hat, eigenvalues, sigma_squared = _precompute_GMRF_stats(G, signal)
+    f_hat, eigenvalues, sigma_squared = _precompute_GMRF_stats(
+        G,
+        signal,
+        _eigenvalues=_eigenvalues,
+        _eigenvectors=_eigenvectors,
+    )
 
     # Build a closure that has access to the above variables
     def neg_log_post(t: float) -> float:
@@ -304,12 +327,19 @@ def fit_t_grid_posterior(G: nx.Graph,
                          epsilon: float = 1e-8,
                          grid_size: int = 512,
                          prior: Literal["uniform", "log_uniform"] = "log_uniform",
+                         _eigenvalues: Optional[np.ndarray] = None,
+                         _eigenvectors: Optional[np.ndarray] = None,
                          ) -> Tuple:
     """
     Estimate t using a grid posterior approximation in log-space.
     Returns MAP, 95% credible interval, log-posterior at MAP, and posterior variance.
     """
-    f_hat, eigenvalues, sigma_squared = _precompute_GMRF_stats(G, signal)
+    f_hat, eigenvalues, sigma_squared = _precompute_GMRF_stats(
+        G,
+        signal,
+        _eigenvalues=_eigenvalues,
+        _eigenvectors=_eigenvectors,
+    )
 
     if grid_size < 10:
         raise ValueError("grid_size must be >= 10 for a stable posterior estimate.")
@@ -332,11 +362,18 @@ def fit_t_profile_likelihood(G: nx.Graph,
                              epsilon: float = 1e-8,
                              grid_size: int = 512,
                              alpha: float = 0.05,
+                             _eigenvalues: Optional[np.ndarray] = None,
+                             _eigenvectors: Optional[np.ndarray] = None,
                              ) -> Tuple:
     """
     Estimate t using a profile likelihood interval on a grid.
     """
-    f_hat, eigenvalues, sigma_squared = _precompute_GMRF_stats(G, signal)
+    f_hat, eigenvalues, sigma_squared = _precompute_GMRF_stats(
+        G,
+        signal,
+        _eigenvalues=_eigenvalues,
+        _eigenvectors=_eigenvectors,
+    )
 
     if grid_size < 10:
         raise ValueError("grid_size must be >= 10 for a stable likelihood profile.")
@@ -399,6 +436,8 @@ def fit_t_bootstrap(G: nx.Graph,
                     n_bootstrap: int = 200,
                     random_state: Optional[int] = None,
                     prior: Literal["uniform", "log_uniform"] = "log_uniform",
+                    _eigenvalues: Optional[np.ndarray] = None,
+                    _eigenvectors: Optional[np.ndarray] = None,
                     ) -> Tuple:
     """
     Estimate t using a parametric bootstrap under the fitted GMRF.
@@ -406,7 +445,12 @@ def fit_t_bootstrap(G: nx.Graph,
     if n_bootstrap < 10:
         raise ValueError("n_bootstrap must be >= 10 for a stable bootstrap estimate.")
 
-    f_hat, eigenvalues, eigenvectors, sigma_squared, mu = _precompute_GMRF_stats_with_evecs(G, signal)
+    f_hat, eigenvalues, eigenvectors, sigma_squared, mu = _precompute_GMRF_stats_with_evecs(
+        G,
+        signal,
+        _eigenvalues=_eigenvalues,
+        _eigenvectors=_eigenvectors,
+    )
     n = len(eigenvalues)
 
     t_grid = np.logspace(np.log10(t_min), np.log10(t_max), grid_size)
@@ -505,6 +549,8 @@ def compute_ruggedness_diffusion_scale(landscape: FitnessLandscape,
                                        prior: Literal["uniform", "log_uniform"] = "log_uniform",
                                        bootstrap_samples: int = 200,
                                        random_state: Optional[int] = None,
+                                       _eigenvalues: Optional[np.ndarray] = None,
+                                       _eigenvectors: Optional[np.ndarray] = None,
                                        ) -> float:
     """
     Function to compute the diffusion scale (T_map) of a single fitness
@@ -539,6 +585,18 @@ def compute_ruggedness_diffusion_scale(landscape: FitnessLandscape,
 
     random_state : int, optional
         RNG seed for method="bootstrap".
+
+    _eigenvalues : np.ndarray, optional
+        Precomputed eigenvalues of the normalized Laplacian (private override).
+
+    _eigenvectors : np.ndarray, optional
+        Precomputed eigenvectors of the normalized Laplacian (private override).
+
+    _eigenvalues : np.ndarray, optional
+        Precomputed eigenvalues of the normalized Laplacian (private override).
+
+    _eigenvectors : np.ndarray, optional
+        Precomputed eigenvectors of the normalized Laplacian (private override).
     
     Returns
     -------
@@ -572,6 +630,8 @@ def compute_ruggedness_diffusion_scale(landscape: FitnessLandscape,
             t_min=t_min,
             t_max=t_max,
             epsilon=epsilon,
+            _eigenvalues=_eigenvalues,
+            _eigenvectors=_eigenvectors,
         )
     elif method == "grid":
         t_map, ci_lower, ci_upper, logpost_map, var_approx = fit_t_grid_posterior(
@@ -582,6 +642,8 @@ def compute_ruggedness_diffusion_scale(landscape: FitnessLandscape,
             epsilon=epsilon,
             grid_size=grid_size,
             prior=prior,
+            _eigenvalues=_eigenvalues,
+            _eigenvectors=_eigenvectors,
         )
     elif method == "profile":
         t_map, ci_lower, ci_upper, logpost_map, var_approx = fit_t_profile_likelihood(
@@ -591,6 +653,8 @@ def compute_ruggedness_diffusion_scale(landscape: FitnessLandscape,
             t_max=t_max,
             epsilon=epsilon,
             grid_size=grid_size,
+            _eigenvalues=_eigenvalues,
+            _eigenvectors=_eigenvectors,
         )
     elif method == "bootstrap":
         t_map, ci_lower, ci_upper, logpost_map, var_approx = fit_t_bootstrap(
@@ -603,6 +667,8 @@ def compute_ruggedness_diffusion_scale(landscape: FitnessLandscape,
             n_bootstrap=bootstrap_samples,
             random_state=random_state,
             prior=prior,
+            _eigenvalues=_eigenvalues,
+            _eigenvectors=_eigenvectors,
         )
     else:
         raise ValueError(
@@ -736,6 +802,8 @@ def compute_ruggedness_variance_energy(landscape: FitnessLandscape,
                                        prior: Literal["uniform", "log_uniform"] = "log_uniform",
                                        bootstrap_samples: int = 200,
                                        random_state: Optional[int] = None,
+                                       _eigenvalues: Optional[np.ndarray] = None,
+                                       _eigenvectors: Optional[np.ndarray] = None,
                                        ) -> dict:
     """
     Function to compute the expected local and global Dirichlet energy
@@ -803,12 +871,20 @@ def compute_ruggedness_variance_energy(landscape: FitnessLandscape,
                                                  grid_size=grid_size,
                                                  prior=prior,
                                                  bootstrap_samples=bootstrap_samples,
-                                                 random_state=random_state)
+                                                 random_state=random_state,
+                                                 _eigenvalues=_eigenvalues,
+                                                 _eigenvectors=_eigenvectors)
         t_value = float(fit['t_map'])
     else:
         t_value = float(t)
 
-    eigenvalues, eigenvectors = eigenmode_decomposition(G, matrix='norm_laplacian')
+    if (_eigenvalues is None) != (_eigenvectors is None):
+        raise ValueError("Provide both _eigenvalues and _eigenvectors or neither.")
+    if _eigenvalues is not None:
+        eigenvalues = np.asarray(_eigenvalues, dtype=float)
+        eigenvectors = np.asarray(_eigenvectors, dtype=float)
+    else:
+        eigenvalues, eigenvectors = eigenmode_decomposition(G, matrix='norm_laplacian')
 
     # Centered mean used in the likelihood is zero-mean; keep both:
     mu_emp = float(np.mean(signal))
