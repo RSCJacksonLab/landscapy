@@ -7,6 +7,7 @@ from fitness_landscape.models.nk import create_nk_binary_landscape
 from fitness_landscape.core.landscape import FitnessLandscape
 from fitness_landscape.transforms.walsh_hadamard import *
 from fitness_landscape.transforms.graph_fourier import *
+from fitness_landscape.transforms.eigenmode import eigenmode_decomposition
 from fitness_landscape.core.fitness import NumericFitness
 
 
@@ -83,3 +84,12 @@ def test_graph_fourier_transform_norm_laplacian():
     assert eigenvectors is not None
     assert coefficients is not None
 
+
+def test_eigenmode_decomposition_full_when_k_none():
+    graph = nx.path_graph(10)
+    for i, node in enumerate(graph.nodes()):
+        graph.nodes[node]['sequence'] = BaseNumpySequence([i])
+    # Force dense path even though n may exceed a tiny threshold.
+    w, U = eigenmode_decomposition(graph, k=None, matrix="laplacian", dense_threshold=0)
+    assert w.shape[0] == graph.number_of_nodes()
+    assert U.shape == (graph.number_of_nodes(), graph.number_of_nodes())

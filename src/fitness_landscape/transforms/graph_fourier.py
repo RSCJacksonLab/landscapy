@@ -24,7 +24,8 @@ def graph_fourier_transform(graph: Union[nx.Graph, FitnessLandscape],
         The matrix eigenbasis to use. Options are `laplacian` or
         `norm_laplacian`.
     k : int, default=`None`
-        Number of eigenvectors to use. If None, use all eigenvectors.
+        Number of eigenvectors to use. If None, compute all eigenvectors
+        (dense; may be expensive for large graphs).
         
     Returns
     -------
