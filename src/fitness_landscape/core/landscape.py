@@ -3232,6 +3232,64 @@ class FitnessLandscape:
         """
         return cls.from_graph(graph, **kwargs)
 
+    def save_bundle_dir(
+        self,
+        path: str | Path,
+        *,
+        metadata: Mapping[str, Any] | None = None,
+        include_embeddings: bool = True,
+        include_legacy_pickle: bool = False,
+        overwrite: bool = False,
+    ) -> Path:
+        """
+        Save the landscape in the canonical portable directory bundle format.
+        """
+        from ..io import save_bundle_dir as _save_bundle_dir
+
+        return _save_bundle_dir(
+            self,
+            path,
+            metadata=metadata,
+            include_embeddings=include_embeddings,
+            include_legacy_pickle=include_legacy_pickle,
+            overwrite=overwrite,
+        )
+
+    @classmethod
+    def load_bundle_dir(cls, path: str | Path) -> "FitnessLandscape":
+        """
+        Load a landscape from a canonical portable directory bundle.
+        """
+        from ..io import load_bundle_dir as _load_bundle_dir
+
+        landscape = _load_bundle_dir(path)
+        if not isinstance(landscape, cls):
+            raise TypeError(
+                f"Bundle contains {type(landscape).__name__}, which cannot be loaded as {cls.__name__}."
+            )
+        return landscape
+
+    def export_lsbundle(
+        self,
+        path: str | Path,
+        *,
+        metadata: Mapping[str, Any] | None = None,
+        backend: str = "portable",
+        overwrite: bool = False,
+    ) -> Path:
+        """
+        Export the landscape as an `.lsbundle` archive.
+        """
+        from ..io import export_lsbundle as _export_lsbundle
+
+        return _export_lsbundle(
+            self,
+            path,
+            metadata=metadata,
+            backend=backend,
+            overwrite=overwrite,
+        )
+
     def save(self, filepath: Path):
         """Saves the FitnessLandscape object to a file."""
         with open(filepath, 'wb') as f:

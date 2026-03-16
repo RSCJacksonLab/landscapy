@@ -44,6 +44,7 @@ setup(
         "ray>=2.48",
         "gudhi>=3.11",
         "pandas>=2.3",
+        "pyarrow>=17",
         "torch_geometric>=2.6",
         "umap-learn>=0.5"],
     extras_require={

@@ -3,6 +3,7 @@ from . import transforms
 from . import analysis
 from . import models
 from . import phylo
+from . import io
 
 from .core import (
     FitnessLandscape,
@@ -17,6 +18,7 @@ from .core import (
     CategoricalFitness,
     ProbabilisticCategoricalFitness,
 )
+from .io import export_lsbundle, load_bundle_dir, save_bundle_dir
 
 __version__ = '0.9.0'
 
@@ -25,6 +27,7 @@ __all__ = [
     'transforms',
     'analysis',
     'models',
+    'io',
     'BaseNumpySequence',
     'BinarySequence',
     'MultialleleSequence',
@@ -35,7 +38,10 @@ __all__ = [
     'create_knn_graph',
     'NumericFitness',
     'CategoricalFitness',
-    'ProbabilisticCategoricalFitness'
+    'ProbabilisticCategoricalFitness',
+    'save_bundle_dir',
+    'load_bundle_dir',
+    'export_lsbundle',
 ]
 
 # Compatibility patch for cogent3 MolType.make_seq positional API changes
