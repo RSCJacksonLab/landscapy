@@ -81,28 +81,82 @@ class NumericFitness(BaseFitnessLayer):
     ----------
     name : str
         The name of the fitness layer.
-    values : List[List[float]]
-        A list of lists where each inner list contains replicate
-        fitness values for a sequence.
+    values : Sequence[float] | Sequence[Sequence[float]]
+        Either a 1-D sequence of scalar fitness values, or a sequence
+        where each inner sequence contains replicate fitness values for
+        a sequence.
     metadata : Dict, optional
         Additional metadata associated with the fitness layer.
     """
     def __init__(self,
                  name: str,
-                 values: List[List[float]],
+                 values: Union[Sequence[float], Sequence[Sequence[float]], np.ndarray, torch.Tensor],
                  metadata: Dict = None) -> None:
         
         super().__init__(name=name, metadata=metadata)
-        
-        if not all(isinstance(r, list) for r in values):
-            raise TypeError("Input 'values' must be a list of lists.")
-        
-        self._replicates = values
+
+        self._replicates = self._normalize_values(values)
         # For each sequence, create a normal distribution based on its replicates
         self._distributions = [
             stats.norm(loc=np.mean(r), scale=np.std(r)) if len(r) > 1 else stats.norm(loc=r[0], scale=0)
             for r in self._replicates
         ]
+
+    @staticmethod
+    def _normalize_values(
+        values: Union[Sequence[float], Sequence[Sequence[float]], np.ndarray, torch.Tensor]
+    ) -> List[List[float]]:
+        err = (
+            "Input 'values' must be a 1-D sequence of scalars or a 2-D "
+            "sequence of per-sequence replicate values."
+        )
+
+        if isinstance(values, torch.Tensor):
+            raw_values = values.detach().cpu().numpy().tolist()
+        elif isinstance(values, np.ndarray):
+            if values.ndim == 0 or values.ndim > 2:
+                raise TypeError(err)
+            raw_values = values.tolist()
+        else:
+            try:
+                raw_values = list(values)
+            except TypeError as exc:
+                raise TypeError(err) from exc
+
+        if not raw_values:
+            return []
+
+        normalized: List[List[float]] = []
+        for row in raw_values:
+            if isinstance(row, torch.Tensor):
+                row = row.detach().cpu().numpy()
+
+            if isinstance(row, np.ndarray):
+                arr = np.asarray(row, dtype=float)
+                if arr.ndim == 0:
+                    normalized.append([float(arr.item())])
+                    continue
+                if arr.ndim > 1:
+                    raise TypeError(err)
+                row_values = arr.tolist()
+            elif isinstance(row, (list, tuple)):
+                arr = np.asarray(row, dtype=float)
+                if arr.ndim > 1:
+                    raise TypeError(err)
+                row_values = arr.tolist()
+            else:
+                try:
+                    normalized.append([float(row)])
+                except (TypeError, ValueError) as exc:
+                    raise TypeError(err) from exc
+                continue
+
+            if len(row_values) == 0:
+                row_values = [float("nan")]
+
+            normalized.append([float(x) for x in row_values])
+
+        return normalized
 
     @property
     def dtype(self) -> Literal['numeric']:

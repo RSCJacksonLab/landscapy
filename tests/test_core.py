@@ -1858,6 +1858,16 @@ def test_numeric_from_scalars_and_tensor_roundtrip():
         means.append(np.nanmean(row[: last + 1]))
     np.testing.assert_allclose(nf2.to_scalar(), np.array(means))
 
+def test_numeric_constructor_normalizes_scalars_and_empty_replicates():
+    nf = NumericFitness("fit", [0.1, 0.2, 0.3])
+    np.testing.assert_allclose(nf.to_scalar(), np.array([0.1, 0.2, 0.3]))
+    assert nf.get_tensor().shape == (3, 1)
+
+    nf2 = NumericFitness("fit2", [[1.0, 2.0], []])
+    tensor = nf2.get_tensor().numpy()
+    assert tensor.shape == (2, 2)
+    assert np.isnan(tensor[1, 0])
+
 def test_numeric_from_replicates_and_index_map_and_random():
     reps = [[1.0, 2.0], [], [5.0]]
     nf = NumericFitness.from_replicates("r", reps)
