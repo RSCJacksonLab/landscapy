@@ -1,9 +1,9 @@
+import numpy as np
 import networkx as nx
 import pandas as pd
-import numpy as np
 import pytest
 
-from fitness_landscape.core.annotation import AnnotationLayer
+from fitness_landscape.core.annotation import AnnotationLayer, register_auto_annotation
 from fitness_landscape.core.landscape import FitnessLandscape
 from fitness_landscape.core.sequence import BaseNumpySequence
 from fitness_landscape.core.fitness import CategoricalFitness
@@ -30,6 +30,61 @@ def test_annotation_layer_query_supports_membership():
         layer.query({"phylum": "Chordata"})
 
     assert layer.matching_indices({"kingdom": ["K2"]}) == [2]
+
+
+def test_annotation_layer_validates_inputs_and_supports_helpers():
+    with pytest.raises(ValueError):
+        AnnotationLayer("empty_df", pd.DataFrame())
+
+    with pytest.raises(TypeError):
+        AnnotationLayer("bad", 123)
+
+    with pytest.raises(ValueError):
+        AnnotationLayer("empty_map", {})
+
+    with pytest.raises(ValueError):
+        AnnotationLayer("empty_cols", {"a": []})
+
+    with pytest.raises(ValueError):
+        AnnotationLayer("mismatch", {"a": [1], "b": [1, 2]})
+
+    layer = AnnotationLayer(
+        "anno",
+        {"row1": {"group": "A", "score": 1}, "row2": {"group": "B", "score": 2}},
+        metadata={"source": "test"},
+    )
+    assert layer.metadata["source"] == "test"
+    assert layer.get_record(1) == {"group": "B", "score": 2}
+
+    with pytest.raises(IndexError):
+        layer.get_record(2)
+
+    with pytest.raises(ValueError, match="ctx"):
+        layer.validate_length(3, context="ctx")
+
+    frame = layer.to_dataframe(copy=False)
+    assert frame is layer.to_dataframe(copy=False)
+    assert layer.query(None).equals(layer.to_dataframe())
+    assert layer.matching_indices({"group": np.array(["A"])}) == [0]
+
+    with pytest.raises(KeyError):
+        layer.query({"missing": "value"})
+
+
+def test_register_auto_annotation_normalizes_records_and_metadata():
+    graph = nx.Graph()
+
+    register_auto_annotation(
+        graph,
+        "kind",
+        {0: {"class": "A"}, 1: "B"},
+        metadata={"origin": "unit"},
+    )
+
+    payload = graph.graph["_auto_annotations"]["kind"]
+    assert payload["records"][0] == {"class": "A"}
+    assert payload["records"][1] == {"kind": "B"}
+    assert payload["metadata"] == {"origin": "unit"}
 
 
 def test_fitness_landscape_annotation_query_and_detach():

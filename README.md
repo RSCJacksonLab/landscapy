@@ -53,6 +53,83 @@ from fitness_landscape.analysis.dirichlet_energy import calculate_ruggedness_dir
 energy = calculate_ruggedness_dirichlet_energy(landscape)
 print(f"\nTotal Dirichlet Energy: {energy['total_dirichlet_energy']:.4f}")
 ```
+
+## Portable Landscape Bundles
+`FitnessLandscape` now supports a first-class portable on-disk bundle format for deterministic, DVC-friendly I/O.
+
+Recommended workflow:
+
+```python
+from fitness_landscape.core.landscape import FitnessLandscape
+
+# Save the canonical portable directory bundle.
+landscape.save_bundle_dir(
+    "artifacts/example_landscape",
+    metadata={
+        "dataset_name": "example-dataset",
+        "source_name": "synthetic-benchmark",
+        "protein_gene": "P53",
+        "assay_type": "DMS",
+        "organism": "human",
+        "version": "v1",
+        "tags": ["benchmark", "portable"],
+        "provenance": {"pipeline": "pytest"},
+        "metadata": {"lab": "unit-test"},
+    },
+    include_embeddings=True,
+)
+
+# Load it back without using pickle.
+reloaded = FitnessLandscape.load_bundle_dir("artifacts/example_landscape")
+
+# Export the portable bundle as a deterministic .lsbundle archive.
+landscape.export_lsbundle("artifacts/example_landscape.lsbundle", backend="portable")
+```
+
+Canonical bundle layout:
+
+```text
+bundle_dir/
+  manifest.json
+  metadata.json
+  nodes.json
+  sequences.npy
+  graph_edges.parquet
+  layers/
+    <layer_name>.parquet
+  annotations/
+    <annotation_name>.parquet
+  embeddings.npy
+  embedding_domains/
+    <domain>.npy
+  legacy/
+    landscape.pkl
+```
+
+Notes:
+- The directory bundle is the canonical format and the recommended artifact to track with `dvc add`.
+- `manifest.json` is versioned, deterministic, and records file checksums plus the information needed to rebuild the landscape without pickle.
+- `metadata.json` stores scientific/user metadata separately from structural payloads.
+- `graph_edges.parquet` stores edges in canonical integer node order, while `nodes.json` preserves original node labels and sequence identifiers.
+- The manifest records the physical tabular storage backend. When a parquet engine is installed, these payloads are written as native parquet; otherwise landscapy falls back to a deterministic JSON table encoding under the same paths so save/load still works.
+- `legacy/landscape.pkl` is optional and only written when `include_legacy_pickle=True`.
+
+Compatibility `.lsbundle` export for current `landscape-store` v1 ingestion is also available, but it remains pickle-backed and should be treated as a compatibility mode rather than the primary storage format:
+
+```python
+landscape.export_lsbundle(
+    "artifacts/example_landscape_v1.lsbundle",
+    backend="pickle",
+    metadata={
+        "landscape_id": "example-landscape-v1",
+        "protein_gene": "P53",
+        "assay_type": "DMS",
+        "version": "v1",
+    },
+)
+```
+
+Use the portable directory bundle for long-term storage, DVC tracking, and inspection. Use `backend="pickle"` only when you need to interoperate with the current `landscape-store` v1 ingestion path.
 ## Main Components
 ### Core (fitness_landscape.core)
 - landscape.py: The central FitnessLandscape class that integrates sequences, fitness data, and a graph representation.

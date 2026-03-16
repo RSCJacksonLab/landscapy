@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass, field
 from typing import Any, Dict, Hashable, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -56,7 +57,7 @@ class VisualizationDatasetBuilder:
     ) -> VisualizationDataset:
         layout_spec = self._normalise_layout(layout)
         layout_params = dict(layout_spec.parameters)
-        if layout_spec.name in {"graph", "sfdp"} and "engine" not in layout_params:
+        if layout_spec.name == "sfdp" and "engine" not in layout_params:
             layout_params["engine"] = "sfdp"
         layout_spec = LayoutSpec(name=layout_spec.name, parameters=layout_params)
 
@@ -236,19 +237,38 @@ class VisualizationDatasetBuilder:
     def _graph_layout(self, nodes: List[Hashable], params: Mapping[str, Any]) -> np.ndarray:
         subgraph = self.landscape.graph.subgraph(nodes) if self.landscape.graph else nx.Graph()
         layout_params = dict(params)
-        engine = layout_params.pop("engine", layout_params.pop("algorithm", "sfdp"))
+        engine = layout_params.pop("engine", layout_params.pop("algorithm", None))
         graphviz_args = layout_params.pop("graphviz_args", "")
         seed = layout_params.pop("seed", 0)
+        if engine in {None, "auto"}:
+            if self._graphviz_sfdp_available():
+                try:
+                    coords = self._graphviz_sfdp_layout(subgraph, nodes, args=graphviz_args)
+                except RuntimeError:
+                    coords = None
+                if coords is not None:
+                    return coords
+            engine = "spring"
         if engine == "sfdp":
             coords = self._graphviz_sfdp_layout(subgraph, nodes, args=graphviz_args)
             if coords is None:
                 raise RuntimeError("Graphviz 'sfdp' layout failed and fallback is disabled.")
             return coords
-        elif engine not in {None, "spring"}:
+        elif engine != "spring":
             raise ValueError(f"Unknown graph layout engine '{engine}'. Use 'sfdp' or 'spring'.")
 
         positions = nx.spring_layout(subgraph, seed=seed, **layout_params)
         return np.array([positions[node] for node in nodes], dtype=float)
+
+    def _graphviz_sfdp_available(self) -> bool:
+        if shutil.which("sfdp") is None:
+            return False
+        try:
+            import pydot  # noqa: F401
+            from networkx.drawing.nx_pydot import graphviz_layout  # noqa: F401
+        except ImportError:
+            return False
+        return True
 
     def _graphviz_sfdp_layout(
         self,
