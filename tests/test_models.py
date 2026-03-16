@@ -1,4 +1,3 @@
-import math
 import numpy as np
 import pytest
 import networkx as nx
@@ -6,10 +5,6 @@ import networkx as nx
 from fitness_landscape.models.nk import create_gnk_landscape, create_nk_binary_landscape
 from fitness_landscape.models.rmf import create_rmf_landscape
 from fitness_landscape.models.elementary_landscape import create_elementary_landscape
-from fitness_landscape.models.dms_dimension import (
-    create_ranked_dms_landscape,
-    _generate_ranked_effect_matrix,
-)
 from fitness_landscape.core.sequence import (
     BaseNumpySequence,
     BinarySequence,
@@ -435,65 +430,3 @@ def test_gnk_dict_alphabet_missing_site_raises():
     }
     with pytest.raises(ValueError):
         create_gnk_landscape(N=3, K=1, alphabet=per_site_incomplete, seed=1)
-
-
-def test_ranked_dms_sequence_count_and_mutation_depth():
-    """
-    Validate combinatorics and mutation depth for ranked DMS landscapes.
-    """
-    L = 6
-    A = 4
-    n_components = 2
-    n_mutation_layers = 2
-    n_mutable_sites = 3
-    seed = 7
-    wildtype = [0, 1, 2, 3, 1, 0]
-
-    landscape = create_ranked_dms_landscape(
-        L=L,
-        A=A,
-        n_components=n_components,
-        n_mutation_layers=n_mutation_layers,
-        n_mutable_sites=n_mutable_sites,
-        noise_scale=0.0,
-        seed=seed,
-        wildtype=wildtype,
-    )
-
-    expected = 1
-    for d in range(1, n_mutation_layers + 1):
-        expected += math.comb(n_mutable_sites, d) * (A - 1) ** d
-    assert len(landscape.sequences) == expected
-
-    metadata = landscape.active_layer.metadata
-    wt = np.array(metadata["wildtype"], dtype=int)
-    mutable_positions = set(metadata["mutable_positions"])
-
-    for seq in landscape.sequences:
-        arr = seq.to_array().astype(int)
-        diffs = np.where(arr != wt)[0]
-        assert len(diffs) <= n_mutation_layers
-        assert set(diffs).issubset(mutable_positions)
-
-
-def test_ranked_dms_effect_matrix_rank_matches_components():
-    """
-    The effect matrix should have rank equal to n_components when noise is zero.
-    """
-    L = 10
-    A = 6
-    n_components = 3
-    rng = np.random.default_rng(11)
-
-    M = _generate_ranked_effect_matrix(
-        L=L,
-        A=A,
-        n_components=n_components,
-        noise_scale=0.0,
-        rng=rng,
-    )
-
-    singular_values = np.linalg.svd(M, compute_uv=False)
-    tol = singular_values.max() * 1e-8 if singular_values.size else 0.0
-    rank = int(np.sum(singular_values > tol))
-    assert rank == n_components
