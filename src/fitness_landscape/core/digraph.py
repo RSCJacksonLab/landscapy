@@ -28,6 +28,7 @@ from .graph import (
     _find_knn_balltree,
     _find_knn_faiss,
     _encode_multiallele,
+    _force_disable_hamming_edge_computation,
     create_knn_graph,
     attach_expected_hamming_to_edges,
     compute_edge_mutations_star,
@@ -57,7 +58,7 @@ def create_phylo_digraph(sequences: Union[Path, Alignment],
                          _nested_parallel: bool = False,
                          reconstruct_ancestral_states: bool = True,
                          *,
-                         _compute_hamming_edges: bool = True,
+                         _compute_hamming_edges: bool = False,
                          _lightweight_nodes: bool = False,
                          _hard_ancestors: bool = False,
                          **kwargs) -> nx.DiGraph:
@@ -91,6 +92,8 @@ def create_phylo_digraph(sequences: Union[Path, Alignment],
     """
     if not all('NQ' in model for model in replacement_matrix):
         raise ValueError('Expected non-equilibrium model for digraph construction, found equilibrium model.')
+
+    _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
 
     constructor = ASRConstructor(sequences,
                                  replacement_matrix = replacement_matrix,
@@ -158,7 +161,7 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
                                              connectivity_threshold: float = 1e-4,
                                              cpus: int = 1,
                                              *,
-                                             _compute_hamming_edges: bool = True,
+                                             _compute_hamming_edges: bool = False,
                                              **kwargs) -> nx.DiGraph:
     """
     Constructs a diffusion graph by scoring standard alignments with an
@@ -224,6 +227,8 @@ def create_evol_diffusion_digraph(sequences: List[BaseNumpySequence],
     nx.Graph or nx.DiGraph
         The constructed graph.
     """
+    _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
+
     # Type check alphabet first
     for seq in sequences:
         if seq.alphabet != PROT_20:
@@ -374,7 +379,7 @@ def create_particle_filter_digraph(sequences: List[BaseNumpySequence],
                                    temperature: float = 1.0,
                                    top_p: float = 0.9,
                                    *,
-                                   _compute_hamming_edges: bool = True,
+                                   _compute_hamming_edges: bool = False,
                                    **kwargs) -> nx.DiGraph:
     """
     Factory function to create a directed graph using a Gibbs sampling
@@ -406,6 +411,8 @@ def create_particle_filter_digraph(sequences: List[BaseNumpySequence],
     DirectedFitnessLandscape
         The constructed directed fitness landscape.
     """
+    _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
+
     selector = ParentSelector(max_state_size=max_state_size)
     embedder = SoftSamplerESMEmbedder(model_name=kwargs.get('model_name', "facebook/esm2_t6_8M_UR50D"))
     sampler = TopPSampler(temperature=temperature, top_p=top_p)
@@ -457,7 +464,7 @@ def create_plm_interpolation_digraph(
     batch_size: int = 16,
     device: str | None = None,
     embeddings: np.ndarray | None = None,
-    _compute_hamming_edges: bool = True,
+    _compute_hamming_edges: bool = False,
     **_,
 ) -> nx.DiGraph:
     """
@@ -465,6 +472,8 @@ def create_plm_interpolation_digraph(
     log-likelihood gradient implied by an ESM model, with optional
     Steiner nodes discovered via beam-search interpolation.
     """
+
+    _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
 
     if not sequences:
         return nx.DiGraph()

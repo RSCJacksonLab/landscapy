@@ -29,6 +29,19 @@ import ray
 _BaseSequence = [BaseNumpySequence, BinarySequence, SoftSequence]
 
 
+def _force_disable_hamming_edge_computation(_requested: bool) -> bool:
+    """
+    Force Hamming edge annotation off for graph constructors.
+
+    The ingestion pipeline can hit prohibitive memory use when the
+    soft-alignment path is triggered on large landscapes, so the
+    annotation pass is disabled globally while keeping the legacy
+    keyword for API compatibility.
+    """
+
+    return False
+
+
 def _should_use_stationary_power(t: Optional[Union[int, float]]) -> bool:
     """Return ``True`` when ``t`` indicates the stationary regime."""
 
@@ -176,7 +189,7 @@ def _build_hamming_csr_binary(sequences: list[BinarySequence]) -> csr_matrix:
     A = csr_matrix((data, (rows, cols)), shape=(n, n))
     return A
 
-def create_hamming_graph_binary(sequences: list[BinarySequence], *, _compute_hamming_edges: bool = True) -> nx.Graph:
+def create_hamming_graph_binary(sequences: list[BinarySequence], *, _compute_hamming_edges: bool = False) -> nx.Graph:
     """
     Function to build a undirected Hamming graph using efficiency bit
     wise (XOR) operations. 
@@ -193,6 +206,8 @@ def create_hamming_graph_binary(sequences: list[BinarySequence], *, _compute_ham
         The undirected graph that can construct the `FitnessLandscape`
         class. 
     """
+    _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
+
     A = _build_hamming_csr_binary(sequences)
     G = nx.from_scipy_sparse_array(A) 
     
@@ -318,7 +333,7 @@ def _build_hamming_csr_multiallele_masked(sequences: list[BaseNumpySequence]) ->
     
     return A
 
-def create_hamming_graph_multiallele(sequences: list[BaseNumpySequence], *, _compute_hamming_edges: bool = True) -> nx.Graph:
+def create_hamming_graph_multiallele(sequences: list[BaseNumpySequence], *, _compute_hamming_edges: bool = False) -> nx.Graph:
     """
     Function to create a Hamming graph using B-radix encoded sequence
     masking to identify Hamming neighbors. 
@@ -334,6 +349,8 @@ def create_hamming_graph_multiallele(sequences: list[BaseNumpySequence], *, _com
         The undirected graph with edge and node features accepted by
         the `FitnessLandscape` from graph constructor.
     """
+
+    _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
 
     A = _build_hamming_csr_multiallele_masked(sequences)
     G = nx.from_scipy_sparse_array(A)
@@ -353,7 +370,7 @@ def create_hamming_graph_multiallele(sequences: list[BaseNumpySequence], *, _com
 def create_hamming_graph(sequences: List[BaseNumpySequence],
                          _backend: Literal['auto', 'binary_xor', 'masked'] = 'auto',
                          *,
-                         _compute_hamming_edges: bool = True) -> nx.Graph:
+                         _compute_hamming_edges: bool = False) -> nx.Graph:
     """
     Create a Hamming graph from sequences and fitness values. In a
     Hamming graph, nodes represent sequences and edges connect
@@ -382,6 +399,8 @@ def create_hamming_graph(sequences: List[BaseNumpySequence],
         Hamming graph.
     """
     
+    _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
+
     # Safety check all sequences are binary classes.
     is_binary = all(isinstance(s, BinarySequence) for s in sequences)
 
@@ -877,7 +896,7 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
                      tiebuffer: int = 128,
                      tie_policy: Literal['all', 'min_index', 'random'] = 'all',
                      seed : int = None,
-                     _compute_hamming_edges: bool = True) -> nx.Graph:
+                     _compute_hamming_edges: bool = False) -> nx.Graph:
     """
     Function to create a k-nearest neighbor network graph from
     sequences, using an efficient backend algorithm. 
@@ -938,6 +957,8 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
     nx.Graph    
         The constructed KNN graph.
     """
+    _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
+
     n = len(sequences)
 
     if backend == 'auto':
@@ -1106,7 +1127,7 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
                                t: Optional[Union[int, float]] = 5,
                                connectivity_threshold: float = 1e-4,
                                *,
-                               _compute_hamming_edges: bool = True,
+                               _compute_hamming_edges: bool = False,
                                **kwargs) -> nx.Graph:
     """
     Function to construct a graph based on expected diffusion
@@ -1171,6 +1192,8 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         The constructed graph with `BaseNumpySequence` features stored
         under `sequence`.
     """
+    _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
+
     if len(sequences) == 0:
         return nx.Graph()
     if embeddings is None:
@@ -1307,6 +1330,8 @@ def create_phylo_graph(sequences: Union[Path, Alignment],
     G : nx.Graph
         The undirected graph output.
     """
+    _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
+
     constructor = ASRConstructor(sequences,
                                   replacement_matrix = replacement_matrix,
                                   model_fitting = model_fitting,
@@ -1405,7 +1430,7 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                                              connectivity_threshold: float = 1e-4,
                                              cpus: int = 1,
                                              *,
-                                             _compute_hamming_edges: bool = True,
+                                             _compute_hamming_edges: bool = False,
                                              **kwargs) -> nx.Graph:
     """
     Constructs a diffusion graph by scoring standard alignments with an
@@ -1476,6 +1501,8 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     nx.Graph
         The constructed graph.
     """
+    _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
+
     if embeddings is None:
         embeddings, _ = _encode_multiallele(sequences)
         
