@@ -1,7 +1,7 @@
 import networkx as nx
 import numpy as np
 
-from fitness_landscape.core.sequence import BinarySequence
+from fitness_landscape.core.sequence import BaseNumpySequence, BinarySequence
 from fitness_landscape.core.graph import (
     create_hamming_graph,
     create_hamming_graph_binary,
@@ -11,6 +11,17 @@ from fitness_landscape.core.graph import (
 
 def _edges_as_set(G: nx.Graph):
     return {tuple(sorted(e)) for e in G.edges()}
+
+def _brute_hamming_edges(seqs):
+    X = np.stack([s.to_array() for s in seqs])
+    edges = set()
+
+    for i in range(len(seqs)):
+        dists = (X[i + 1:] != X[i]).sum(axis=1)
+        for offset in np.flatnonzero(dists == 1):
+            edges.add((i, i + 1 + int(offset)))
+
+    return edges
 
 
 def test_hamming_binary_xor_equals_masked_on_binary_with_duplicates():
@@ -47,3 +58,23 @@ def test_hamming_dispatch_backend_equivalence_on_binary():
 
     assert _edges_as_set(G_auto) == _edges_as_set(G_xor)
 
+
+def test_hamming_multiallele_matches_bruteforce_for_long_sequences():
+    alphabet = list("ABCDEFGHIJKLMNOPQRST")
+    wt = "".join(alphabet[i % len(alphabet)] for i in range(174))
+    seqs = [wt]
+
+    # This shape used to trigger dense false-positive graphs via int64 overflow
+    # in the radix-key masked backend.
+    for pos in range(33):
+        wt_aa = wt[pos]
+        for aa in [sym for sym in alphabet if sym != wt_aa][:3]:
+            mutant = list(wt)
+            mutant[pos] = aa
+            seqs.append("".join(mutant))
+
+    sequences = [BaseNumpySequence(seq) for seq in seqs]
+
+    G = create_hamming_graph_multiallele(sequences, _compute_hamming_edges=False)
+
+    assert _edges_as_set(G) == _brute_hamming_edges(sequences)

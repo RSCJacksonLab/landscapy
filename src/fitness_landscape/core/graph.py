@@ -242,6 +242,137 @@ def _encode_multiallele(seqs: list[BaseNumpySequence]) -> tuple[np.ndarray, dict
     int_mat = np.stack([[mapping[str(x)] for x in s.to_array()] for s in seqs], axis=0).astype(np.int32)
     return int_mat, mapping  # (n,L)
 
+def _radix_keyspace_fits_int64(base: int, length: int) -> bool:
+    """
+    Return ``True`` when a base-``base`` radix key of ``length`` digits
+    can be represented exactly in signed int64.
+    """
+
+    limit = int(np.iinfo(np.int64).max)
+    keyspace = 1
+    for _ in range(length):
+        keyspace *= int(base)
+        if keyspace - 1 > limit:
+            return False
+    return True
+
+def _append_cross_allele_edges(
+    rows: list[np.ndarray],
+    cols: list[np.ndarray],
+    block_idx: np.ndarray,
+    block_allele: np.ndarray,
+) -> None:
+    """Append all cross-allele edges for a masked-sequence equivalence block."""
+
+    unique_alleles, inverse = np.unique(block_allele, return_inverse=True)
+    groups = [block_idx[inverse == allele_idx] for allele_idx in range(len(unique_alleles))]
+
+    for left_idx, src in enumerate(groups):
+        if src.size == 0:
+            continue
+        for dst in groups[left_idx + 1:]:
+            if dst.size == 0:
+                continue
+            src_rep = np.repeat(src, dst.size)
+            dst_tile = np.tile(dst, src.size)
+            rows.append(src_rep)
+            cols.append(dst_tile)
+            rows.append(dst_tile)
+            cols.append(src_rep)
+
+def _csr_from_symmetric_edge_lists(
+    rows: list[np.ndarray],
+    cols: list[np.ndarray],
+    *,
+    n: int,
+) -> csr_matrix:
+    """Materialise a deduplicated symmetric CSR adjacency matrix."""
+
+    if not rows:
+        empty = np.zeros(0, dtype=np.int32)
+        return csr_matrix((np.zeros(0, dtype=np.float32), (empty, empty)), shape=(n, n))
+
+    row_arr = np.concatenate(rows).astype(np.int32, copy=False)
+    col_arr = np.concatenate(cols).astype(np.int32, copy=False)
+
+    order = np.lexsort((col_arr, row_arr))
+    row_arr, col_arr = row_arr[order], col_arr[order]
+
+    keep = np.ones_like(row_arr, dtype=bool)
+    keep[1:] = (row_arr[1:] != row_arr[:-1]) | (col_arr[1:] != col_arr[:-1])
+    row_arr, col_arr = row_arr[keep], col_arr[keep]
+
+    data = np.ones(row_arr.size, dtype=np.float32)
+    return csr_matrix((data, (row_arr, col_arr)), shape=(n, n))
+
+def _build_hamming_csr_multiallele_masked_radix(X: np.ndarray, *, base: int) -> csr_matrix:
+    """Fast radix-key implementation for multiallelic Hamming graphs."""
+
+    n, L = X.shape
+    powers = (base ** np.arange(L, dtype=np.int64))
+    key_full = (X * powers).sum(axis=1, dtype=np.int64)
+
+    rows: list[np.ndarray] = []
+    cols: list[np.ndarray] = []
+
+    for p in range(L):
+        masked = key_full - (X[:, p].astype(np.int64) * powers[p])
+        order = np.argsort(masked, kind='stable')
+        masked_sorted = masked[order]
+        xp = X[:, p][order]
+
+        start = 0
+        while start < n:
+            end = start + 1
+            while end < n and masked_sorted[end] == masked_sorted[start]:
+                end += 1
+            if end - start >= 2:
+                block_idx = order[start:end]
+                block_allele = xp[start:end]
+                _append_cross_allele_edges(rows, cols, block_idx, block_allele)
+            start = end
+
+    return _csr_from_symmetric_edge_lists(rows, cols, n=n)
+
+def _build_hamming_csr_multiallele_masked_exact(X: np.ndarray) -> csr_matrix:
+    """
+    Exact overflow-safe multiallelic Hamming builder.
+
+    Long protein sequences can overflow the int64 radix keys used by
+    the fast path. In those cases, group rows by their masked sequence
+    bytes instead of numeric radix encodings.
+    """
+
+    n, L = X.shape
+    rows: list[np.ndarray] = []
+    cols: list[np.ndarray] = []
+
+    for p in range(L):
+        if L == 1:
+            order = np.arange(n, dtype=np.int32)
+            masked_sorted = np.zeros(n, dtype=np.int8)
+        else:
+            masked = np.ascontiguousarray(np.concatenate((X[:, :p], X[:, p + 1:]), axis=1))
+            key_dtype = np.dtype((np.void, masked.dtype.itemsize * masked.shape[1]))
+            masked_keys = masked.view(key_dtype).reshape(-1)
+            order = np.argsort(masked_keys, kind='stable')
+            masked_sorted = masked_keys[order]
+
+        xp = X[:, p][order]
+
+        start = 0
+        while start < n:
+            end = start + 1
+            while end < n and masked_sorted[end] == masked_sorted[start]:
+                end += 1
+            if end - start >= 2:
+                block_idx = order[start:end]
+                block_allele = xp[start:end]
+                _append_cross_allele_edges(rows, cols, block_idx, block_allele)
+            start = end
+
+    return _csr_from_symmetric_edge_lists(rows, cols, n=n)
+
 def _build_hamming_csr_multiallele_masked(sequences: list[BaseNumpySequence]) -> csr_matrix:
     """
     Function to build a sparse Hamming adjacency matrix using a
@@ -266,72 +397,10 @@ def _build_hamming_csr_multiallele_masked(sequences: list[BaseNumpySequence]) ->
     n, L = X.shape
     base = int(X.max()) + 1
 
-    # base powers for radix encoding
-    powers = (base ** np.arange(L, dtype=np.int64))  # [B^0, B^1, ..., B^(L-1)]
-    
-    # encode full keys
-    key_full = (X * powers).sum(axis=1, dtype=np.int64)
+    if _radix_keyspace_fits_int64(base, L):
+        return _build_hamming_csr_multiallele_masked_radix(X, base=base)
 
-    # storage (rough upper bound): ~ n*L*avg_degree/2*2 ~ n*L for sparse datasets
-    rows = []
-    cols = []
-
-    for p in range(L):
-
-        # masked key: remove digit at p
-        masked = key_full - (X[:, p].astype(np.int64) * powers[p])
-        order = np.argsort(masked, kind='stable')
-        masked_sorted = masked[order]
-        xp = X[:, p][order]
-        # walk runs of identical masked key
-        start = 0
-        while start < n:
-            end = start + 1
-            while end < n and masked_sorted[end] == masked_sorted[start]:
-                end += 1
-            if end - start >= 2:
-                block_idx = order[start:end]
-                block_allele = xp[start:end]
-
-                # group by allele value within the block
-                # unique + inverse index
-                ua, inv = np.unique(block_allele, return_inverse=True)
-                
-                for a_i in range(len(ua)):
-                    src = block_idx[inv == a_i]
-                    for a_j in range(a_i + 1, len(ua)):
-                        dst = block_idx[inv == a_j]
-                        if src.size and dst.size:
-                            s_rep = np.repeat(src, dst.size)
-                            d_tile = np.tile(dst, src.size)
-                            rows.append(s_rep)
-                            cols.append(d_tile)
-                            rows.append(d_tile)   # symmetric
-                            cols.append(s_rep)
-
-            start = end
-
-    if not rows:
-        A = csr_matrix((np.zeros(0, dtype=np.float32), (np.zeros(0, dtype=np.int32), np.zeros(0, dtype=np.int32))),
-                       shape=(n, n))
-        return A
-
-    rows = np.concatenate(rows).astype(np.int32)
-    cols = np.concatenate(cols).astype(np.int32)
-
-    order = np.lexsort((cols, rows))
-    rows, cols = rows[order], cols[order]
-    
-    # remove exact duplicates
-    keep = np.ones_like(rows, dtype=bool)
-    keep[1:] = (rows[1:] != rows[:-1]) | (cols[1:] != cols[:-1])
-    rows, cols = rows[keep], cols[keep]
-    
-    # 1 for unweighted.
-    data = np.ones(rows.size, dtype=np.float32)
-    A = csr_matrix((data, (rows, cols)), shape=(n, n))
-    
-    return A
+    return _build_hamming_csr_multiallele_masked_exact(X)
 
 def create_hamming_graph_multiallele(sequences: list[BaseNumpySequence], *, _compute_hamming_edges: bool = False) -> nx.Graph:
     """
