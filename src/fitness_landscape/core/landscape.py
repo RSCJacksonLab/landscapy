@@ -2495,6 +2495,10 @@ class FitnessLandscape:
             raise ValueError("feature_view='tokens' requires a tokenizer.")
         if mode not in {"tokens", "embedding", "ohe"}:
             raise ValueError(f"Unsupported feature_view: {feature_view!r}")
+        if mode == "embedding" and emb_tensor is None:
+            raise ValueError(
+                "feature_view='embedding' requires embeddings to be attached to the landscape."
+            )
 
         fitness_dict = {
             name: layer.get_tensor()[target_indices] for name, layer in self.fitness_layers.items()

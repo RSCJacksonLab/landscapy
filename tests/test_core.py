@@ -1435,6 +1435,12 @@ def test_to_sequence_tensors_unknown_sequence_raises(basic_landscape):
     with pytest.raises(ValueError, match="not found"):
         basic_landscape.to_sequence_tensors(sequence="9999")  # invalid for binary L=3
 
+def test_to_sequence_tensors_embedding_requires_attached_embeddings(basic_landscape):
+    basic_landscape.embeddings = {}
+    basic_landscape._active_embedding_domain = None
+    with pytest.raises(ValueError, match="requires embeddings"):
+        basic_landscape.to_sequence_tensors(feature_view="embedding")
+
 def test_compute_plm_embeddings_records_metadata(monkeypatch, basic_landscape):
     def fake_embed(seqs, model_name, batch_size, device, embedding_mode):
         return np.zeros((len(seqs), 3), dtype=float)
