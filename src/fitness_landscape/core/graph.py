@@ -42,6 +42,28 @@ def _force_disable_hamming_edge_computation(_requested: bool) -> bool:
     return False
 
 
+def _attach_unit_hamming_edge_attributes(
+    G: nx.Graph,
+    sequences: Sequence[BaseNumpySequence],
+) -> None:
+    """
+    Attach exact edge attributes for graphs whose edges are guaranteed
+    to connect sequences at Hamming count 1.
+    """
+
+    if not sequences or G.number_of_edges() == 0:
+        return
+
+    seq_len = len(sequences[0])
+    norm_distance = float(1.0 / seq_len) if seq_len > 0 else 0.0
+
+    edge_attrs = {
+        (u, v): {"weight": 1.0, "distance": norm_distance}
+        for u, v in G.edges()
+    }
+    nx.set_edge_attributes(G, edge_attrs)
+
+
 def _should_use_stationary_power(t: Optional[Union[int, float]]) -> bool:
     """Return ``True`` when ``t`` indicates the stationary regime."""
 
@@ -214,6 +236,8 @@ def create_hamming_graph_binary(sequences: list[BinarySequence], *, _compute_ham
     # attach node attributes for `FitnessLandscape` constructor.s
     for i, seq in enumerate(sequences):
         G.nodes[i]['sequence'] = seq
+
+    _attach_unit_hamming_edge_attributes(G, sequences)
         
     # Optionally attach standardised Hamming edge attributes
     if _compute_hamming_edges:
@@ -425,6 +449,8 @@ def create_hamming_graph_multiallele(sequences: list[BaseNumpySequence], *, _com
     G = nx.from_scipy_sparse_array(A)
     for i, seq in enumerate(sequences):
         G.nodes[i]['sequence'] = seq
+
+    _attach_unit_hamming_edge_attributes(G, sequences)
 
     if len(sequences) == 0 or G.number_of_nodes() == 0 or G.number_of_edges() == 0:
         return G
