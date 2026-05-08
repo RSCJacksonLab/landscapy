@@ -7,6 +7,7 @@ from . import io
 
 from .core import (
     FitnessLandscape,
+    DirectedFitnessLandscape,
     BaseNumpySequence,
     BinarySequence,
     MultialleleSequence,
@@ -14,6 +15,7 @@ from .core import (
     sequence_distance,
     create_hamming_graph,
     create_knn_graph,
+    create_trajectory_digraph,
     NumericFitness,
     CategoricalFitness,
     ProbabilisticCategoricalFitness,
@@ -34,8 +36,10 @@ __all__ = [
     'generate_sequences',
     'sequence_distance',
     'FitnessLandscape',
+    'DirectedFitnessLandscape',
     'create_hamming_graph',
     'create_knn_graph',
+    'create_trajectory_digraph',
     'NumericFitness',
     'CategoricalFitness',
     'ProbabilisticCategoricalFitness',

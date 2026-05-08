@@ -26,6 +26,7 @@ from .digraph import (
     create_evol_diffusion_digraph,
     create_particle_filter_digraph,
     create_plm_interpolation_digraph,
+    create_trajectory_digraph,
 )
 from .fitness import (
     NumericFitness,
@@ -3347,7 +3348,7 @@ class DirectedFitnessLandscape(FitnessLandscape):
 
     @classmethod
     def build(cls,
-              sequences: list[BaseNumpySequence] | Alignment | Path,
+              sequences: list[BaseNumpySequence] | Alignment | Path | pd.DataFrame | Sequence[Mapping[str, Any]],
               *,
               digraph: str | nx.DiGraph = "phylogenetic",
               fitness_layers: dict[str, BaseFitnessLayer] | None = None,
@@ -3367,8 +3368,11 @@ class DirectedFitnessLandscape(FitnessLandscape):
 
         Parameters
         ----------
-        sequences : list[BaseNumpySequence] | Alignment | Path
-            List of sequences or an alignment to build the landscape from.
+        sequences : list[BaseNumpySequence] | Alignment | Path | pandas.DataFrame | sequence of mappings
+            Sequence payload used to build the landscape. For most digraph
+            modes this is a list of sequences or an alignment. When
+            ``digraph="trajectory"``, provide a trajectory table containing
+            at least ordered current/next state columns.
 
         digraph : str or nx.DiGraph, default=`"phylogenetic"`
             The directed graph type or an existing networkx directed graph.
@@ -3436,6 +3440,24 @@ class DirectedFitnessLandscape(FitnessLandscape):
             )
 
         dtype = str(digraph)
+        if dtype == "trajectory":
+            DG = create_trajectory_digraph(sequences, **kwargs)
+            seqs = [data["sequence"] for _, data in DG.nodes(data=True)]
+            _, embedding_store = _prepare_embedding_store(embeddings, embedding_domain)
+            auto_layers = _collect_auto_annotation_layers(DG)
+            annotation_layers = _merge_annotation_layers(annotation_layers, auto_layers)
+            return cls(
+                sequences=seqs,
+                graph=DG,
+                fitness_layers=fitness_layers,
+                annotation_layers=annotation_layers,
+                embeddings=(embedding_store or None),
+                emb_arr_key=emb_arr_key,
+                active_embedding_domain=_choose_active_embedding_domain(
+                    embedding_store, embedding_domain, attach_embeddings
+                ),
+            )
+
         if dtype == "phylogenetic":
             aln = load_aligned_seqs(sequences) if isinstance(sequences, Path) else sequences
             DG = create_phylo_digraph(aln, **kwargs)
