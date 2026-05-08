@@ -4,6 +4,7 @@ from itertools import count
 import numpy as np
 import networkx as nx
 import logging
+import pandas as pd
 from cogent3 import load_aligned_seqs, load_tree, get_app
 from cogent3.core.alignment import Alignment
 try:
@@ -126,6 +127,288 @@ def create_phylo_digraph(sequences: Union[Path, Alignment],
         "node_role",
         role_records,
         metadata={"description": "Phylogenetic node roles (ancestral vs extant)."},
+    )
+    return digraph
+
+
+def _coerce_trajectory_frame(
+    trajectories: pd.DataFrame | Sequence[Mapping[str, Any]],
+) -> pd.DataFrame:
+    """
+    Normalize trajectory records into a pandas DataFrame.
+    """
+
+    if isinstance(trajectories, pd.DataFrame):
+        return trajectories.copy(deep=True)
+
+    frame = pd.DataFrame(trajectories)
+    if frame.empty:
+        raise ValueError("Trajectory digraph construction requires at least one trajectory record.")
+    return frame
+
+
+def _infer_trajectory_alphabet(
+    sequence_values: Sequence[Any],
+) -> list[str] | None:
+    """
+    Infer an ordered alphabet from trajectory sequence values when no
+    explicit alphabet is provided.
+    """
+
+    alphabet: list[str] = []
+    seen: set[str] = set()
+
+    for value in sequence_values:
+        if value is None or (isinstance(value, float) and np.isnan(value)):
+            continue
+        if isinstance(value, BaseNumpySequence):
+            symbols = list(map(str, value.alphabet))
+        elif isinstance(value, str):
+            symbols = list(value)
+        else:
+            arr = np.asarray(value).ravel()
+            symbols = list(map(str, arr))
+
+        for symbol in symbols:
+            if symbol not in seen:
+                seen.add(symbol)
+                alphabet.append(symbol)
+
+    return alphabet or None
+
+
+def _coerce_trajectory_sequence(
+    value: Any,
+    *,
+    node_id: Hashable,
+    alphabet: Sequence[str] | None,
+    moltype: str | None,
+) -> BaseNumpySequence:
+    """
+    Convert a node-associated trajectory sequence into a sequence object.
+    """
+
+    if isinstance(value, BaseNumpySequence):
+        return value
+
+    if isinstance(value, str):
+        return BaseNumpySequence.from_string(
+            value,
+            alphabet=alphabet,
+            moltype=moltype,
+            sequence_id=str(node_id),
+        )
+
+    arr = np.asarray(value).ravel()
+    return BaseNumpySequence.from_iterable(
+        arr,
+        alphabet=alphabet,
+        moltype=moltype,
+        sequence_id=str(node_id),
+    )
+
+
+def create_trajectory_digraph(
+    trajectories: pd.DataFrame | Sequence[Mapping[str, Any]],
+    *,
+    current_node_col: str = "current_node",
+    next_node_col: str = "next_node",
+    sequence_current_col: str = "sequence_current",
+    sequence_next_col: str = "sequence_next",
+    trajectory_id_col: str = "trajectory_id",
+    step_col: str = "step",
+    node_sequences: Mapping[Hashable, Any] | None = None,
+    alphabet: Sequence[str] | None = None,
+    moltype: str | None = None,
+) -> nx.DiGraph:
+    """
+    Construct a directed graph from ordered state trajectory records.
+
+    Parameters
+    ----------
+    trajectories : pandas.DataFrame or sequence of mappings
+        Tabular trajectory records. At minimum, the data must provide
+        ``current_node`` and ``next_node`` columns (or the columns named by
+        ``current_node_col`` and ``next_node_col``). Optional sequence columns
+        can carry the explicit sequence associated with each node.
+
+    current_node_col, next_node_col : str
+        Column names defining the directed transition observed at each step.
+
+    sequence_current_col, sequence_next_col : str
+        Optional column names containing sequence/state payloads for the
+        current and next nodes. When omitted, node identifiers themselves are
+        treated as the sequence representation when they are strings.
+
+    trajectory_id_col, step_col : str
+        Optional columns used to aggregate trajectory-aware metadata and to
+        preserve deterministic temporal ordering when present.
+
+    node_sequences : mapping, optional
+        Explicit mapping from node identifier to sequence payload. This
+        overrides any tabular sequence values for matching nodes.
+
+    alphabet : sequence, optional
+        Alphabet forwarded to the sequence constructor. When ``None``, an
+        ordered alphabet is inferred from the observed sequence payloads.
+
+    moltype : str, optional
+        Optional cogent3 moltype forwarded to ``BaseNumpySequence`` when
+        constructing node sequences.
+
+    Returns
+    -------
+    nx.DiGraph
+        Directed graph whose nodes are trajectory states and whose edges
+        aggregate the observed ordered transitions between those states.
+    """
+
+    frame = _coerce_trajectory_frame(trajectories)
+    required = [current_node_col, next_node_col]
+    missing = [col for col in required if col not in frame.columns]
+    if missing:
+        raise KeyError(f"Trajectory digraph construction requires columns {missing}.")
+
+    sort_cols = [col for col in (trajectory_id_col, step_col) if col in frame.columns]
+    if sort_cols:
+        frame = frame.sort_values(sort_cols, kind="mergesort").reset_index(drop=True)
+    else:
+        frame = frame.reset_index(drop=True)
+
+    sequence_lookup: dict[Hashable, Any] = dict(node_sequences or {})
+    for node_col, seq_col in (
+        (current_node_col, sequence_current_col),
+        (next_node_col, sequence_next_col),
+    ):
+        if seq_col not in frame.columns:
+            continue
+        for node_id, seq_value in zip(frame[node_col], frame[seq_col]):
+            if node_id in sequence_lookup:
+                continue
+            if pd.isna(seq_value):
+                continue
+            sequence_lookup[node_id] = seq_value
+
+    node_order: list[Hashable] = []
+    seen_nodes: set[Hashable] = set()
+    for node_id in pd.concat([frame[current_node_col], frame[next_node_col]], ignore_index=True):
+        if node_id not in seen_nodes:
+            seen_nodes.add(node_id)
+            node_order.append(node_id)
+        if node_id not in sequence_lookup and isinstance(node_id, str):
+            sequence_lookup[node_id] = node_id
+
+    unresolved = [node_id for node_id in node_order if node_id not in sequence_lookup]
+    if unresolved:
+        raise ValueError(
+            "Could not resolve sequences for trajectory nodes. "
+            "Provide sequence columns or a `node_sequences` mapping."
+        )
+
+    inferred_alphabet = list(alphabet) if alphabet is not None else _infer_trajectory_alphabet(
+        [sequence_lookup[node_id] for node_id in node_order]
+    )
+
+    digraph = nx.DiGraph()
+    node_records: dict[Hashable, dict[str, Any]] = {}
+    edge_records: dict[tuple[Hashable, Hashable], dict[str, Any]] = {}
+
+    for node_id in node_order:
+        sequence_obj = _coerce_trajectory_sequence(
+            sequence_lookup[node_id],
+            node_id=node_id,
+            alphabet=inferred_alphabet,
+            moltype=moltype,
+        )
+        digraph.add_node(node_id, sequence=sequence_obj)
+        node_records[node_id] = {
+            "current_count": 0,
+            "next_count": 0,
+            "visit_count": 0,
+            "trajectory_count": 0,
+            "first_step": None,
+            "last_step": None,
+        }
+
+    node_trajectory_ids: dict[Hashable, set[Any]] = {node_id: set() for node_id in node_order}
+    edge_trajectory_ids: dict[tuple[Hashable, Hashable], set[Any]] = {}
+
+    for row in frame.itertuples(index=False):
+        src = getattr(row, current_node_col)
+        dst = getattr(row, next_node_col)
+        step_value = getattr(row, step_col) if step_col in frame.columns else None
+        trajectory_value = getattr(row, trajectory_id_col) if trajectory_id_col in frame.columns else None
+
+        src_stats = node_records[src]
+        dst_stats = node_records[dst]
+        src_stats["current_count"] += 1
+        src_stats["visit_count"] += 1
+        dst_stats["next_count"] += 1
+        dst_stats["visit_count"] += 1
+
+        if trajectory_value is not None:
+            node_trajectory_ids[src].add(trajectory_value)
+            node_trajectory_ids[dst].add(trajectory_value)
+
+        if step_value is not None and not pd.isna(step_value):
+            for stats in (src_stats, dst_stats):
+                if stats["first_step"] is None or step_value < stats["first_step"]:
+                    stats["first_step"] = step_value
+                if stats["last_step"] is None or step_value > stats["last_step"]:
+                    stats["last_step"] = step_value
+
+        edge_key = (src, dst)
+        if edge_key not in edge_records:
+            edge_records[edge_key] = {
+                "observed_count": 0,
+                "trajectory_count": 0,
+                "first_step": None,
+                "last_step": None,
+            }
+            edge_trajectory_ids[edge_key] = set()
+        edge_stats = edge_records[edge_key]
+        edge_stats["observed_count"] += 1
+        if trajectory_value is not None:
+            edge_trajectory_ids[edge_key].add(trajectory_value)
+        if step_value is not None and not pd.isna(step_value):
+            if edge_stats["first_step"] is None or step_value < edge_stats["first_step"]:
+                edge_stats["first_step"] = step_value
+            if edge_stats["last_step"] is None or step_value > edge_stats["last_step"]:
+                edge_stats["last_step"] = step_value
+
+    for node_id, stats in node_records.items():
+        stats["trajectory_count"] = len(node_trajectory_ids[node_id])
+        digraph.nodes[node_id].update(stats)
+
+    for (src, dst), stats in edge_records.items():
+        stats["trajectory_count"] = len(edge_trajectory_ids[(src, dst)])
+        digraph.add_edge(src, dst, **stats)
+
+    role_records = {}
+    for node_id in digraph.nodes():
+        indeg = digraph.in_degree(node_id)
+        outdeg = digraph.out_degree(node_id)
+        if indeg == 0 and outdeg == 0:
+            role = "isolated"
+        elif indeg == 0:
+            role = "source"
+        elif outdeg == 0:
+            role = "sink"
+        else:
+            role = "intermediate"
+        role_records[node_id] = {"trajectory_role": role}
+
+    register_auto_annotation(
+        digraph,
+        "trajectory_stats",
+        node_records,
+        metadata={"description": "Per-node aggregated statistics from ordered trajectory observations."},
+    )
+    register_auto_annotation(
+        digraph,
+        "trajectory_role",
+        role_records,
+        metadata={"description": "Topological role of each node in the observed trajectory digraph."},
     )
     return digraph
 

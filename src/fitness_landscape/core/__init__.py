@@ -34,6 +34,7 @@ from .digraph import (
     create_evol_diffusion_digraph,
     create_particle_filter_digraph,
     create_phylo_digraph,
+    create_trajectory_digraph,
 )
 
 __all__ = [
@@ -58,4 +59,5 @@ __all__ = [
     'create_evol_diffusion_digraph',
     'create_particle_filter_digraph',
     'create_phylo_digraph',
+    'create_trajectory_digraph',
 ]
