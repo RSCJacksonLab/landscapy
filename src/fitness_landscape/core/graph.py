@@ -18,6 +18,7 @@ from ..utils import calculate_gapped_soft_score
 from .annotation import register_auto_annotation
 from softalign.soft_alignment import align_soft_sequences
 from scipy import sparse
+from scipy.linalg import expm
 from scipy.sparse import csr_matrix
 from scipy.sparse import coo_matrix
 from scipy.sparse import triu as sp_triu
@@ -1463,9 +1464,142 @@ def create_phylo_graph(sequences: Union[Path, Alignment],
     )
     return graph
 
-# Remote ray function for evol alignment.
+def _stationary_frequencies_from_rate_matrix(rate_matrix: np.ndarray) -> np.ndarray:
+    """Return the normalized stationary frequencies of a rate generator."""
+    Q = np.asarray(rate_matrix, dtype=np.float64)
+    if Q.shape != (len(PROT_20), len(PROT_20)):
+        raise ValueError(
+            "`replacement_matrix` must be a square rate matrix matching PROT_20."
+        )
+    if not np.all(np.isfinite(Q)):
+        raise ValueError("`replacement_matrix` must contain only finite values.")
+    if not np.allclose(Q.sum(axis=1), 0.0, atol=1e-10, rtol=1e-8):
+        raise ValueError("`replacement_matrix` must have rows that sum to zero.")
+    if np.any(np.diag(Q) > 1e-12):
+        raise ValueError("`replacement_matrix` must have non-positive diagonal entries.")
+    off_diagonal = Q.copy()
+    np.fill_diagonal(off_diagonal, 0.0)
+    if np.any(off_diagonal < -1e-12):
+        raise ValueError("`replacement_matrix` must have non-negative off-diagonal entries.")
+
+    # Solve pi @ Q = 0 subject to sum(pi) = 1. Replacing one redundant
+    # stationarity equation avoids selecting an arbitrary eigenvector sign.
+    system = Q.T.copy()
+    system[-1, :] = 1.0
+    rhs = np.zeros(Q.shape[0], dtype=np.float64)
+    rhs[-1] = 1.0
+    try:
+        frequencies = np.linalg.solve(system, rhs)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError(
+            "`replacement_matrix` must define a unique stationary distribution."
+        ) from exc
+
+    if np.any(frequencies <= 0.0) or not np.all(np.isfinite(frequencies)):
+        raise ValueError(
+            "`replacement_matrix` must define strictly positive stationary frequencies."
+        )
+    frequencies /= frequencies.sum()
+    return frequencies
+
+
+def _evolutionary_log_odds_matrix(
+    rate_matrix: np.ndarray,
+    evolutionary_time: float,
+    equilibrium_frequencies: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Convert a reversible rate generator into symmetric transition log-odds."""
+    Q = np.asarray(rate_matrix, dtype=np.float64)
+    inferred_frequencies = _stationary_frequencies_from_rate_matrix(Q)
+
+    if equilibrium_frequencies is None:
+        frequencies = inferred_frequencies
+    else:
+        frequencies = np.asarray(equilibrium_frequencies, dtype=np.float64)
+        if frequencies.shape != (Q.shape[0],):
+            raise ValueError(
+                "`equilibrium_frequencies` must have one value per PROT_20 residue."
+            )
+        if np.any(frequencies <= 0.0) or not np.all(np.isfinite(frequencies)):
+            raise ValueError(
+                "`equilibrium_frequencies` must contain finite positive values."
+            )
+        frequencies = frequencies / frequencies.sum()
+        if not np.allclose(frequencies @ Q, 0.0, atol=1e-10, rtol=1e-8):
+            raise ValueError(
+                "`equilibrium_frequencies` must be stationary for `replacement_matrix`."
+            )
+
+    if not np.isfinite(evolutionary_time) or evolutionary_time <= 0.0:
+        raise ValueError("`evolutionary_time` must be finite and greater than zero.")
+
+    equilibrium_flux = frequencies[:, None] * Q
+    if not np.allclose(equilibrium_flux, equilibrium_flux.T, atol=1e-10, rtol=1e-8):
+        raise ValueError(
+            "`replacement_matrix` must be reversible for an undirected "
+            "evolutionary-diffusion graph."
+        )
+
+    transition = expm(float(evolutionary_time) * Q)
+    if np.any(transition < -1e-12) or not np.all(np.isfinite(transition)):
+        raise ValueError("Failed to obtain a valid transition probability matrix.")
+    transition = np.maximum(transition, np.finfo(np.float64).tiny)
+    transition /= transition.sum(axis=1, keepdims=True)
+
+    log_odds = np.log(transition) - np.log(frequencies)[None, :]
+    # Detailed balance makes this symmetric analytically. Average the two
+    # orientations to remove only floating-point asymmetry.
+    return 0.5 * (log_odds + log_odds.T)
+
+
+def _length_normalized_gapped_soft_score(
+    aligned_seq1: np.ndarray,
+    aligned_seq2: np.ndarray,
+    score_matrix: np.ndarray,
+) -> float:
+    """Return a mean per-column score, including single-gap penalties."""
+    total_score = calculate_gapped_soft_score(
+        aligned_seq1=aligned_seq1,
+        aligned_seq2=aligned_seq2,
+        q=score_matrix,
+    )
+    gap_index = score_matrix.shape[0]
+    p1_gap = np.asarray(aligned_seq1, dtype=np.float64)[:, gap_index]
+    p2_gap = np.asarray(aligned_seq2, dtype=np.float64)[:, gap_index]
+    effective_length = float(np.sum(1.0 - (p1_gap * p2_gap)))
+    if not np.isfinite(effective_length) or effective_length <= 0.0:
+        raise ValueError("Aligned sequences must contain at least one effective column.")
+    return float(total_score / effective_length)
+
+
+def _row_softmax_csr(scores: csr_matrix, tau: float) -> csr_matrix:
+    """Convert sparse edge scores to row-stochastic weights without underflow."""
+    if not np.isfinite(tau) or tau <= 0.0:
+        raise ValueError("`tau` must be finite and greater than zero.")
+
+    transition = scores.astype(np.float64, copy=True).tocsr()
+    for row in range(transition.shape[0]):
+        start, end = transition.indptr[row], transition.indptr[row + 1]
+        if start == end:
+            continue
+        row_scores = transition.data[start:end]
+        if not np.all(np.isfinite(row_scores)):
+            raise ValueError("Evolutionary edge scores must be finite.")
+        shifted = (row_scores - np.max(row_scores)) / float(tau)
+        row_weights = np.exp(shifted)
+        normalizer = float(row_weights.sum())
+        if not np.isfinite(normalizer) or normalizer <= 0.0:
+            raise ValueError("Failed to normalize evolutionary edge scores.")
+        transition.data[start:end] = row_weights / normalizer
+
+    transition.eliminate_zeros()
+    return transition
+
+
+# Remote Ray function for evolutionary alignment. Alignment and scoring remain
+# distributed one candidate pair per Ray task.
 @ray.remote
-def _score_pair(i, j, seq_i, seq_j, tau, Q):
+def _score_pair(i, j, seq_i, seq_j, score_matrix):
 
     Ai = seq_i.posterior if isinstance(seq_i, SoftSequence) else seq_i.to_one_hot()
     Aj = seq_j.posterior if isinstance(seq_j, SoftSequence) else seq_j.to_one_hot()
@@ -1474,9 +1608,13 @@ def _score_pair(i, j, seq_i, seq_j, tau, Q):
     Aj = np.ascontiguousarray(np.asarray(Aj, dtype=np.float64))
     _res = align_soft_sequences(sequences=[Ai, Aj], alphabet=PROT_20)
     aligned = _res[0] if isinstance(_res, tuple) else _res
-    score = calculate_gapped_soft_score(aligned_seq1=aligned[0], aligned_seq2=aligned[1], q=Q)
-    
-    return i, j, float(np.exp(score / tau))
+    score = _length_normalized_gapped_soft_score(
+        aligned_seq1=aligned[0],
+        aligned_seq2=aligned[1],
+        score_matrix=score_matrix,
+    )
+
+    return i, j, score
 
 
 def _ensure_ray_initialized(num_cpus: int, *, logger: logging.Logger | None = None) -> None:
@@ -1525,12 +1663,18 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                                              connectivity_threshold: float = 1e-4,
                                              cpus: int = 1,
                                              *,
+                                             evolutionary_time: float = 1.0,
+                                             equilibrium_frequencies: Optional[np.ndarray] = None,
                                              _compute_hamming_edges: bool = False,
                                              **kwargs) -> nx.Graph:
     """
-    Constructs a diffusion graph by scoring standard alignments with an
-    symmetric equilibrium replacement matrix. Runs in parallel with ray
-    orechestration.
+    Construct an evolutionary-diffusion graph from pairwise alignments.
+
+    Candidate pairs are selected in embedding space, then aligned and scored
+    in distributed Ray tasks. The supplied reversible rate generator is
+    converted to transition log-odds at ``evolutionary_time``. Pair scores are
+    averaged over effective alignment length and converted to transition
+    probabilities with a numerically stable row-wise softmax.
 
     Parameters
     ----------
@@ -1538,8 +1682,7 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         The list of sequence in the landscape. 
 
     replacement_matrix : np.ndarray, default=lg
-        The symmetric replacememnt matrix used to score symmetric
-        distances.
+        Reversible instantaneous amino-acid rate generator in PROT_20 order.
     
     embeddings : np.ndarray
         Sequence embeddings indexed by the entry in `sequences`.
@@ -1585,7 +1728,17 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         explicitly computing ``T^t``.
     
     tau : float, default=1.0
-        The temperature parameter used to smooth the distance kernel.
+        Temperature applied to length-normalized evolutionary log-odds before
+        row-wise softmax normalization.
+
+    evolutionary_time : float, default=1.0
+        Evolutionary time used to obtain transition probabilities from the
+        instantaneous rate generator. This is distinct from the graph
+        diffusion power ``t``.
+
+    equilibrium_frequencies : np.ndarray, optional
+        Stationary amino-acid frequencies in PROT_20 order. When omitted they
+        are inferred from ``replacement_matrix``.
 
     cpus : int, default=1
         Target number of worker CPUs for Ray alignment tasks. Each task
@@ -1609,6 +1762,14 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     n_sequences = len(sequences)
     if n_sequences == 0:
         return nx.Graph()
+
+    evolutionary_score_matrix = _evolutionary_log_odds_matrix(
+        replacement_matrix,
+        evolutionary_time=evolutionary_time,
+        equilibrium_frequencies=equilibrium_frequencies,
+    )
+    if not np.isfinite(tau) or tau <= 0.0:
+        raise ValueError("`tau` must be finite and greater than zero.")
 
     if k > n_sequences - 1:
         k = n_sequences - 1
@@ -1674,7 +1835,7 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     _ensure_ray_initialized(num_cpus, logger=_logger)
     
     # Compute in parallel.
-    refs = [_score_pair.options(num_cpus=1).remote(i, j, sequences[i], sequences[j], tau, replacement_matrix)
+    refs = [_score_pair.options(num_cpus=1).remote(i, j, sequences[i], sequences[j], evolutionary_score_matrix)
             for (i, j) in pairs_to_align]
     total_tasks = len(refs)
     _logger.info('Submitted alignment tasks: %d', total_tasks)
@@ -1686,31 +1847,34 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
             num_returns = min(32, len(pending))
             ready, pending = ray.wait(pending, num_returns=num_returns)
             results = ray.get(ready)
-            for i, j, kv in results:
-                rows_list.append(i); cols_list.append(j); data_list.append(float(kv))
-                rows_list.append(j); cols_list.append(i); data_list.append(float(kv))
+            for i, j, score in results:
+                rows_list.append(i); cols_list.append(j); data_list.append(float(score))
+                rows_list.append(j); cols_list.append(i); data_list.append(float(score))
             completed += len(results)
             if completed == total_tasks or completed % log_every == 0:
                 _logger.info('Alignments progress: %d/%d (%.1f%%)', completed, total_tasks, (completed / total_tasks) * 100.0)
     _logger.info('Alignments complete: wall=%.2fs cpu=%.2fs', time.perf_counter()-_t_align0, time.process_time()-_c_align0)
 
     if rows_list:
-        K = coo_matrix((np.asarray(data_list, dtype=np.float32),
-                        (np.asarray(rows_list, dtype=np.int32), np.asarray(cols_list, dtype=np.int32))),
-                       shape=(n_sequences, n_sequences)).tocsr()
+        edge_scores = coo_matrix(
+            (
+                np.asarray(data_list, dtype=np.float64),
+                (
+                    np.asarray(rows_list, dtype=np.int32),
+                    np.asarray(cols_list, dtype=np.int32),
+                ),
+            ),
+            shape=(n_sequences, n_sequences),
+        ).tocsr()
     else:
-        K = csr_matrix((n_sequences, n_sequences), dtype=np.float32)
+        edge_scores = csr_matrix((n_sequences, n_sequences), dtype=np.float64)
 
-    # Row-normalize to get transition matrix
+    # Convert length-normalized log-odds to a row-stochastic transition
+    # matrix without ever exponentiating the large negative full-length
+    # scores that caused the original float32 collapse.
     _t_norm0 = time.perf_counter(); _c_norm0 = time.process_time()
-    row_sums = np.asarray(K.sum(axis=1)).ravel().astype(np.float32)
-    row_sums[row_sums == 0.0] = 1.0
-    # scale rows in-place
-    inv = 1.0 / row_sums
-    K = K.tocsr()
-    K.data *= np.repeat(inv, np.diff(K.indptr))
-    Tmat = K  # transition matrix (CSR)
-    _logger.info('Row-normalized transition matrix: nnz=%d wall=%.2fs cpu=%.2fs', Tmat.nnz, time.perf_counter()-_t_norm0, time.process_time()-_c_norm0)
+    Tmat = _row_softmax_csr(edge_scores, tau=tau)
+    _logger.info('Row-softmax transition matrix: nnz=%d wall=%.2fs cpu=%.2fs', Tmat.nnz, time.perf_counter()-_t_norm0, time.process_time()-_c_norm0)
 
     use_stationary = _should_use_stationary_power(t)
 
