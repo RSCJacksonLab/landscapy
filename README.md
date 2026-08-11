@@ -68,7 +68,14 @@ from fitness_landscape.models import create_nk_binary_landscape
 
 landscape = create_nk_binary_landscape(N=4, K=1, seed=42)
 result = calculate_ruggedness_dirichlet_energy(landscape)
-print(result["total_dirichlet_energy"])
+print(result["global_dirichlet_energy"])
+print(result["total_dirichlet_energy"])  # Per-node normalization.
+
+# Weighting is opt-in and requires an explicit conductance key.
+weighted = calculate_ruggedness_dirichlet_energy(
+    landscape,
+    weight_key="weight",
+)
 ```
 
 ## Portable landscape export

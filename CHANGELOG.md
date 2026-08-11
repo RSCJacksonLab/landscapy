@@ -47,6 +47,8 @@ All notable changes to Landscapy are documented here.
   operator, including explicit stationary modes for isolated nodes.
 - Made diffusion-scale layer selection non-mutating, node-aligned, and strict
   about scalar shape and finite numeric values.
+- Corrected Dirichlet edge-bin and local conservation, made weighting
+  explicitly opt-in by edge key, and documented global versus per-node energy.
 
 ### Removed
 
