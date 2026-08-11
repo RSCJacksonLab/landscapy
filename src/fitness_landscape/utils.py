@@ -1,21 +1,32 @@
+from __future__ import annotations
+
 import math
 import numpy as np
 import networkx as nx
-from typing import TYPE_CHECKING, List, Union, Optional, Tuple, Dict, Sequence, Callable, Literal
-import torch
+from typing import TYPE_CHECKING, Any, List, Union, Optional, Tuple, Dict, Sequence, Callable, Literal
 from scipy import sparse as sp
 from scipy.spatial import cKDTree, distance_matrix
 from scipy.sparse.csgraph import minimum_spanning_tree
 from .core.sequence import BaseNumpySequence, SoftSequence
 from dataclasses import dataclass
-from softalign.soft_alignment import align_soft_sequences
 from ._const import ALPHABET_21, PROT_20
-from cogent3.core.alignment import Alignment, make_aligned_seqs
-from cogent3 import load_aligned_seqs
+from ._optional import require_optional
 from pathlib import Path
 
 if TYPE_CHECKING:
+    import torch
+    from cogent3.core.alignment import Alignment
+
     from .core.landscape import FitnessLandscape
+
+
+def _make_aligned_seqs(*args, **kwargs):
+    cogent3 = require_optional(
+        "cogent3",
+        extra="phylogeny",
+        purpose="alignment utilities",
+    )
+    return cogent3.make_aligned_seqs(*args, **kwargs)
 
 def sanitize_alignment(aln: Alignment,
                        *,
@@ -77,7 +88,7 @@ def sanitize_alignment(aln: Alignment,
         unique = _unique_name(name)
         cleaned[unique] = ''.join(_clean_char(c) for c in s)
 
-    return make_aligned_seqs(cleaned, moltype='protein')
+    return _make_aligned_seqs(cleaned, moltype='protein')
 
 def cosine_similarity_matrix(A, B):
     """
@@ -258,6 +269,11 @@ def _compute_embeddings_from_sequences(
     """
 
     if device is None:
+        torch = require_optional(
+            "torch",
+            extra="ml",
+            purpose="protein language-model embeddings",
+        )
         device = "cuda" if torch.cuda.is_available() else "cpu"
     
     embedding_mode = embedding_mode.lower()
@@ -635,7 +651,14 @@ def get_ohe_seq(sequence: Union[str, np.ndarray, torch.Tensor],
         if sequence.ndim == 1:
             sequence = sequence[np.newaxis, :]
         return ''.join([alphabet[np.argmax(aa)] for aa in sequence])
-    elif isinstance(sequence, torch.Tensor):
+    elif type(sequence).__module__.split(".", 1)[0] == "torch":
+        torch = require_optional(
+            "torch",
+            extra="ml",
+            purpose="PyTorch tensor conversion",
+        )
+        if not isinstance(sequence, torch.Tensor):
+            raise ValueError("Input must be a string, numpy array, or torch tensor.")
         if sequence.dim() == 1:
             sequence = sequence.unsqueeze(0)
         return "".join([alphabet[aa.argmax().item()] for aa in sequence])
@@ -794,6 +817,11 @@ def fasta_to_prot20_sequences(filepath: str | Path,
         parsed as an alignment. Contains the sanitised gapped
         sequences (all of equal length). Otherwise ``None``.
     """
+    cogent3 = require_optional(
+        "cogent3",
+        extra="phylogeny",
+        purpose="FASTA alignment loading",
+    )
     p = Path(filepath)
     gap_alphabet = PROT_20 + ["-"]
 
@@ -828,7 +856,7 @@ def fasta_to_prot20_sequences(filepath: str | Path,
         record_count = None
     # Try alignment path first
     try:
-        aln_loaded = load_aligned_seqs(str(p), moltype='protein')
+        aln_loaded = cogent3.load_aligned_seqs(str(p), moltype='protein')
     except Exception:
         aln_loaded = None
     if aln_loaded is not None:
@@ -930,7 +958,7 @@ def fasta_to_prot20_sequences(filepath: str | Path,
 
             if seq_dict:
                 try:
-                    aln = make_aligned_seqs(seq_dict, moltype='protein')
+                    aln = cogent3.make_aligned_seqs(seq_dict, moltype='protein')
                     aln = sanitize_alignment(aln)
                     aligned_sequences = _aligned_sequences_from(aln) if return_gapped else None
                     try:
@@ -1010,7 +1038,7 @@ def moving_window_alignment(alignment: Alignment,
         sub = items[start:end]
         if not sub:
             continue
-        windows.append(make_aligned_seqs({k: v for k, v in sub}, moltype='protein'))
+        windows.append(_make_aligned_seqs({k: v for k, v in sub}, moltype='protein'))
 
     # Ensure tail coverage if not exactly divisible and not already included
     if windows:
@@ -1018,7 +1046,7 @@ def moving_window_alignment(alignment: Alignment,
         if n_tips > window_size and len(last_names) < window_size:
             tail = items[-window_size:]
             if set(k for k, _ in tail) != last_names:
-                windows.append(make_aligned_seqs({k: v for k, v in tail}, moltype='protein'))
+                windows.append(_make_aligned_seqs({k: v for k, v in tail}, moltype='protein'))
 
     return windows
 
@@ -1057,7 +1085,7 @@ def iter_moving_window_alignment(alignment: Alignment,
         sub = items[start:end]
         if not sub:
             break
-        yield make_aligned_seqs({k: v for k, v in sub}, moltype='protein')
+        yield _make_aligned_seqs({k: v for k, v in sub}, moltype='protein')
         if end == n_tips:
             break
         start += step
@@ -1148,7 +1176,7 @@ def iter_random_subalignment(alignment: Alignment,
                 else:
                     chosen = rng.choice(names, size=sample_size, replace=False)
         sub = {name: seq_map[name] for name in chosen}
-        yield make_aligned_seqs(sub, moltype='protein')
+        yield _make_aligned_seqs(sub, moltype='protein')
 
 @dataclass
 class HammingCheckResult:

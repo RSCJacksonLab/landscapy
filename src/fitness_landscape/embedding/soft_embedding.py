@@ -1,12 +1,26 @@
 import numpy as np
-import torch
+from .._optional import require_optional
+
+torch = require_optional("torch", extra="embeddings", purpose="protein language-model embeddings")
+torch_data = require_optional(
+    "torch.utils.data",
+    extra="embeddings",
+    purpose="protein language-model embeddings",
+)
+transformers = require_optional(
+    "transformers",
+    extra="embeddings",
+    purpose="protein language-model embeddings",
+)
 
 from numpy.typing import ArrayLike
 from pathlib import Path
-from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import EsmForMaskedLM, AutoTokenizer
 from typing import List, Optional, Union
+
+DataLoader = torch_data.DataLoader
+EsmForMaskedLM = transformers.EsmForMaskedLM
+AutoTokenizer = transformers.AutoTokenizer
 
 
 class ESMEmbedder:

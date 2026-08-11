@@ -9,6 +9,10 @@ from typing import (
 )
 import numpy as np
 import networkx as nx
+from .._optional import require_optional
+
+require_optional("cogent3", extra="phylogeny", purpose="phylogenetic reconstruction")
+require_optional("piqtree", extra="phylogeny", purpose="phylogenetic reconstruction")
 from cogent3 import (
     load_aligned_seqs,
     load_tree,

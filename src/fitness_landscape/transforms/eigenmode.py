@@ -1,7 +1,8 @@
+from __future__ import annotations
+
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
-import torch
 import networkx as nx
 import warnings
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal

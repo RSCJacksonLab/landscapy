@@ -11,7 +11,15 @@ from scipy.cluster.vq import kmeans2
 from scipy.stats import spearmanr
 from numpy.linalg import svd
 from typing import List, Union, Tuple, Dict, Optional, Sequence, Any
-from sklearn.metrics import average_precision_score, roc_auc_score
+from .._optional import require_optional
+
+sklearn_metrics = require_optional(
+    "sklearn.metrics",
+    extra="analysis",
+    purpose="graph-induction alignment analysis",
+)
+average_precision_score = sklearn_metrics.average_precision_score
+roc_auc_score = sklearn_metrics.roc_auc_score
 from ..transforms.eigenmode import eigenmode_decomposition
 from ..core.landscape import FitnessLandscape
 import statistics as stats

@@ -1,21 +1,16 @@
+from __future__ import annotations
+
 import math
 import warnings
 import numpy as np
 import networkx as nx
-from typing import List, Union, Literal, Tuple, Optional, Sequence, Mapping, Hashable, Any
+from typing import TYPE_CHECKING, List, Union, Literal, Tuple, Optional, Sequence, Mapping, Hashable, Any
 from .sequence import BaseNumpySequence, BinarySequence, sequence_distance, SoftSequence
-from ..phylo.phylogenetic_asr import ASRConstructor
-from ..phylo._sub_matrices import lg
-import gudhi
-from sklearn.decomposition import PCA
-from sklearn.metrics.pairwise import euclidean_distances, rbf_kernel
-from sklearn.neighbors import NearestNeighbors
 from pathlib import Path
-from cogent3.core.alignment import Alignment
 from .._const import PROT_20
+from .._optional import ray_runtime, require_optional
 from ..utils import calculate_gapped_soft_score
 from .annotation import register_auto_annotation
-from softalign.soft_alignment import align_soft_sequences
 from scipy import sparse
 from scipy.linalg import expm
 from scipy.sparse import csr_matrix
@@ -23,8 +18,9 @@ from scipy.sparse import coo_matrix
 from scipy.sparse import triu as sp_triu
 import logging
 import time
-import faiss
-import ray
+
+if TYPE_CHECKING:
+    from cogent3.core.alignment import Alignment
 
 _BaseSequence = [BaseNumpySequence, BinarySequence, SoftSequence]
 
@@ -597,9 +593,14 @@ def _find_knn_balltree(X : np.ndarray,
     dists, inds : np.ndarray
         Tuple of distances and indices.
     """
+    sklearn_neighbors = require_optional(
+        "sklearn.neighbors",
+        extra="knn",
+        purpose="BallTree nearest-neighbour graph construction",
+    )
     n = X.shape[0]
     metric = _resolve_balltree_metric(X, metric)
-    nn = NearestNeighbors(algorithm='auto', metric=metric)
+    nn = sklearn_neighbors.NearestNeighbors(algorithm='auto', metric=metric)
     nn.fit(X)
     kq = min(k + 1 + tiebuffer, n)
     dists, inds = nn.kneighbors(X, n_neighbors=kq, return_distance=True)
@@ -657,6 +658,11 @@ def _find_knn_faiss(X: np.ndarray,
         Tuple of distances and indices.
 
     """
+    faiss = require_optional(
+        "faiss",
+        extra="faiss",
+        purpose="FAISS nearest-neighbour graph construction",
+    )
     n, d = X.shape
 
     # Set the FAISS metric so easy conversion back to hamming distance.
@@ -703,7 +709,7 @@ def _find_knn_faiss(X: np.ndarray,
     index.add(X)
     
     # Include consideration for self edges and a tiebuffer.
-    kq = k + (0 if include_self else 1) + tiebuffer
+    kq = min(k + (0 if include_self else 1) + tiebuffer, n)
     dists, inds = index.search(X, kq)
     return dists, inds
 
@@ -1112,6 +1118,16 @@ def create_tda_graph(sequences: List[BaseNumpySequence],
         The constructed graph with `BaseNumpySequence` features stored
         under `sequence`.
     """
+    gudhi = require_optional(
+        "gudhi",
+        extra="tda",
+        purpose="topological graph construction",
+    )
+    sklearn_decomposition = require_optional(
+        "sklearn.decomposition",
+        extra="tda",
+        purpose="topological graph construction",
+    )
     if len(sequences) != embeddings.shape[0]:
         raise ValueError("Number of sequences must match the number of embeddings.")
 
@@ -1120,7 +1136,7 @@ def create_tda_graph(sequences: List[BaseNumpySequence],
 
     # Reduce dimensionality with PCA.
     # Alpha complex scales with dimension.
-    pca = PCA(n_components=n_components)
+    pca = sklearn_decomposition.PCA(n_components=n_components)
     low_dim_data = pca.fit_transform(embeddings)
     alpha_complex = gudhi.AlphaComplex(points=low_dim_data)
     simplex_tree = alpha_complex.create_simplex_tree()
@@ -1281,6 +1297,11 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         The constructed graph with `BaseNumpySequence` features stored
         under `sequence`.
     """
+    sklearn_pairwise = require_optional(
+        "sklearn.metrics.pairwise",
+        extra="knn",
+        purpose="diffusion embedding graph construction",
+    )
     _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
 
     if len(sequences) == 0:
@@ -1336,7 +1357,7 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
             median_sigma_sq = 1.0
 
     gamma = 1.0 / (2 * median_sigma_sq)
-    kernel_matrix = rbf_kernel(embeddings, gamma=gamma)
+    kernel_matrix = sklearn_pairwise.rbf_kernel(embeddings, gamma=gamma)
     
     # Create the Markov transition matrix.
     row_sums = kernel_matrix.sum(axis=1, keepdims=True)
@@ -1420,6 +1441,13 @@ def create_phylo_graph(sequences: Union[Path, Alignment],
         The undirected graph output.
     """
     _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
+
+    require_optional(
+        "cogent3",
+        extra="phylogeny",
+        purpose="phylogenetic graph construction",
+    )
+    from ..phylo.phylogenetic_asr import ASRConstructor
 
     constructor = ASRConstructor(sequences,
                                   replacement_matrix = replacement_matrix,
@@ -1589,17 +1617,18 @@ def _row_softmax_csr(scores: csr_matrix, tau: float) -> csr_matrix:
     return transition
 
 
-# Remote Ray function for evolutionary alignment. Alignment and scoring remain
-# distributed one candidate pair per Ray task.
-@ray.remote
 def _score_pair(i, j, seq_i, seq_j, score_matrix):
-
+    soft_alignment = require_optional(
+        "softalign.soft_alignment",
+        extra="alignment",
+        purpose="evolutionary sequence alignment",
+    )
     Ai = seq_i.posterior if isinstance(seq_i, SoftSequence) else seq_i.to_one_hot()
     Aj = seq_j.posterior if isinstance(seq_j, SoftSequence) else seq_j.to_one_hot()
     # Ensure float inputs for stability in softalign
     Ai = np.ascontiguousarray(np.asarray(Ai, dtype=np.float64))
     Aj = np.ascontiguousarray(np.asarray(Aj, dtype=np.float64))
-    _res = align_soft_sequences(sequences=[Ai, Aj], alphabet=PROT_20)
+    _res = soft_alignment.align_soft_sequences(sequences=[Ai, Aj], alphabet=PROT_20)
     aligned = _res[0] if isinstance(_res, tuple) else _res
     score = _length_normalized_gapped_soft_score(
         aligned_seq1=aligned[0],
@@ -1610,39 +1639,9 @@ def _score_pair(i, j, seq_i, seq_j, score_matrix):
     return i, j, score
 
 
-def _ensure_ray_initialized(num_cpus: int, *, logger: logging.Logger | None = None) -> None:
-    """
-    Ensure a Ray runtime exists with at least ``num_cpus`` CPU slots.
-
-    Parameters
-    ----------
-    num_cpus : int
-        Desired CPU concurrency (>=1). Each alignment task uses a single CPU.
-    logger : logging.Logger, optional
-        Logger for informational or warning messages.
-    """
-    if num_cpus < 1:
-        raise ValueError("`cpus` must be at least 1.")
-
-    if not ray.is_initialized():
-        ray.init(num_cpus=num_cpus, ignore_reinit_error=True)
-        if logger is not None:
-            logger.info("Ray initialised with num_cpus=%d", num_cpus)
-        return
-
-    if logger is not None:
-        total_cpus = ray.cluster_resources().get("CPU", 0.0)
-        if total_cpus and total_cpus + 1e-6 < num_cpus:
-            logger.warning(
-                "Ray runtime already initialised with %.2f CPU resources; "
-                "requested cpus=%d may not be fully available.",
-                total_cpus,
-                num_cpus,
-            )
-
 def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                                              embeddings: np.ndarray,
-                                             replacement_matrix: np.ndarray = lg,
+                                             replacement_matrix: np.ndarray | None = None,
                                              tiebuffer: int = 0,
                                              backend: Literal['auto', 'faiss', 'balltree'] = 'auto',
                                              index_type: Literal['hnsw', 'flat', 'ivf'] = 'hnsw',
@@ -1674,8 +1673,9 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     sequences : List[BaseNumpySequence]
         The list of sequence in the landscape. 
 
-    replacement_matrix : np.ndarray, default=lg
+    replacement_matrix : np.ndarray, optional
         Reversible instantaneous amino-acid rate generator in PROT_20 order.
+        Defaults to the bundled LG matrix.
     
     embeddings : np.ndarray
         Sequence embeddings indexed by the entry in `sequences`.
@@ -1756,6 +1756,11 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     if n_sequences == 0:
         return nx.Graph()
 
+    if replacement_matrix is None:
+        from ..phylo._sub_matrices import lg
+
+        replacement_matrix = lg
+
     evolutionary_score_matrix = _evolutionary_log_odds_matrix(
         replacement_matrix,
         evolutionary_time=evolutionary_time,
@@ -1823,29 +1828,37 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     cols_list = []
     data_list = []
 
-    # Init ray for parallel computing.
+    # Use an existing Ray runtime without assuming ownership. A runtime started
+    # here is always shut down when the alignment work finishes.
     _t_align0 = time.perf_counter(); _c_align0 = time.process_time()
-    _ensure_ray_initialized(num_cpus, logger=_logger)
-    
-    # Compute in parallel.
-    refs = [_score_pair.options(num_cpus=1).remote(i, j, sequences[i], sequences[j], evolutionary_score_matrix)
-            for (i, j) in pairs_to_align]
-    total_tasks = len(refs)
+    total_tasks = len(pairs_to_align)
     _logger.info('Submitted alignment tasks: %d', total_tasks)
     if total_tasks:
-        pending = list(refs)
-        completed = 0
-        log_every = max(1, total_tasks // 20)
-        while pending:
-            num_returns = min(32, len(pending))
-            ready, pending = ray.wait(pending, num_returns=num_returns)
-            results = ray.get(ready)
-            for i, j, score in results:
-                rows_list.append(i); cols_list.append(j); data_list.append(float(score))
-                rows_list.append(j); cols_list.append(i); data_list.append(float(score))
-            completed += len(results)
-            if completed == total_tasks or completed % log_every == 0:
-                _logger.info('Alignments progress: %d/%d (%.1f%%)', completed, total_tasks, (completed / total_tasks) * 100.0)
+        with ray_runtime(num_cpus, purpose="parallel evolutionary sequence alignment") as ray:
+            score_pair_remote = ray.remote(_score_pair)
+            refs = [
+                score_pair_remote.options(num_cpus=1).remote(
+                    i,
+                    j,
+                    sequences[i],
+                    sequences[j],
+                    evolutionary_score_matrix,
+                )
+                for (i, j) in pairs_to_align
+            ]
+            pending = list(refs)
+            completed = 0
+            log_every = max(1, total_tasks // 20)
+            while pending:
+                num_returns = min(32, len(pending))
+                ready, pending = ray.wait(pending, num_returns=num_returns)
+                results = ray.get(ready)
+                for i, j, score in results:
+                    rows_list.append(i); cols_list.append(j); data_list.append(float(score))
+                    rows_list.append(j); cols_list.append(i); data_list.append(float(score))
+                completed += len(results)
+                if completed == total_tasks or completed % log_every == 0:
+                    _logger.info('Alignments progress: %d/%d (%.1f%%)', completed, total_tasks, (completed / total_tasks) * 100.0)
     _logger.info('Alignments complete: wall=%.2fs cpu=%.2fs', time.perf_counter()-_t_align0, time.process_time()-_c_align0)
 
     if rows_list:
@@ -2104,8 +2117,6 @@ def _ensure_gapped_last(arr: np.ndarray) -> np.ndarray:
     return np.concatenate([arr, gap], axis=1)
 
 
-# Ray parallel workes
-@ray.remote(num_cpus=1)
 def _star_block(u, neighbors, seq_u, seqs_v, alphabet, chunk_size, eps):
     # Limit thread usage inside each Ray worker to avoid oversubscription
     import os as _os
@@ -2114,6 +2125,11 @@ def _star_block(u, neighbors, seq_u, seqs_v, alphabet, chunk_size, eps):
     _os.environ.setdefault('MKL_NUM_THREADS', '1')
     _os.environ.setdefault('NUMEXPR_NUM_THREADS', '1')
 
+    soft_alignment = require_optional(
+        "softalign.soft_alignment",
+        extra="alignment",
+        purpose="edge mutation alignment",
+    )
     A = len(alphabet)
     def _sanitize(arr: np.ndarray) -> np.ndarray:
         x = np.ascontiguousarray(np.asarray(arr, dtype=np.float64))
@@ -2142,7 +2158,7 @@ def _star_block(u, neighbors, seq_u, seqs_v, alphabet, chunk_size, eps):
         seqs = [Pu] + [_sanitize(seqs_v[i].ungapped_arr) for i in chunk_ids]
         # Cast to float64 contiguous to avoid dtype issues in softalign
         seqs = [np.ascontiguousarray(np.asarray(s, dtype=np.float64)) for s in seqs]
-        _res = align_soft_sequences(sequences=seqs, alphabet=alphabet)
+        _res = soft_alignment.align_soft_sequences(sequences=seqs, alphabet=alphabet)
         aligned = _res[0] if isinstance(_res, tuple) else _res
         Au = np.asarray(aligned[0])
         for off, idx in enumerate(chunk_ids, start=1):
@@ -2210,7 +2226,15 @@ def compute_edge_mutations_star(G: nx.Graph | nx.DiGraph,
         _logger.info('compute_edge_mutations_star: start (nodes=%d, edges=%d, chunk=%s)', G.number_of_nodes(), G.number_of_edges(), chunk_size)
     set_w, set_d, set_s = {}, {}, {}
 
+    if G.number_of_edges() == 0:
+        return
+
     if not _nested_parallel:
+        soft_alignment = require_optional(
+            "softalign.soft_alignment",
+            extra="alignment",
+            purpose="edge mutation alignment",
+        )
         for u in G.nodes():
             # Avoid duplicate pairs in undirected graphs
             nbrs = [v for v in G.neighbors(u) if (u < v) or G.is_directed()]
@@ -2219,7 +2243,7 @@ def compute_edge_mutations_star(G: nx.Graph | nx.DiGraph,
             Pu = _sanitize(G.nodes[u]['sequence'].ungapped_arr)
             for chunk_ids in _chunks(list(range(len(nbrs))), chunk_size):
                 seqs = [Pu] + [_sanitize(G.nodes[nbrs[i]]['sequence'].ungapped_arr) for i in chunk_ids]
-                _res = align_soft_sequences(sequences=seqs, alphabet=alphabet)
+                _res = soft_alignment.align_soft_sequences(sequences=seqs, alphabet=alphabet)
                 aligned = _res[0] if isinstance(_res, tuple) else _res
                 Au = np.asarray(aligned[0])
                 for off, idx in enumerate(chunk_ids, start=1):
@@ -2231,32 +2255,43 @@ def compute_edge_mutations_star(G: nx.Graph | nx.DiGraph,
                     set_s[(u, v)] = float(-np.log(max(dist, eps)))
     else:
         # Ray-parallel star computation per node
-        tasks = []
-        node_list = list(G.nodes())
-        for u in node_list:
-            nbrs = [v for v in G.neighbors(u) if (u < v) or G.is_directed()]
-            if not nbrs:
-                continue
-            seqs_v = [G.nodes[v]['sequence'] for v in nbrs]
-            tasks.append(_star_block.remote(u, nbrs, G.nodes[u]['sequence'], seqs_v, alphabet, chunk_size, eps))
-        if tasks:
-            pending = set(tasks)
-            try:
-                import psutil as _psutil
-            except Exception:
-                _psutil = None
-            done_count = 0
-            total = len(tasks)
-            while pending:
-                done, pending = ray.wait(list(pending), num_returns=1, timeout=30.0)
-                if done:
-                    W, D, S = ray.get(done[0])
-                    set_w.update(W); set_d.update(D); set_s.update(S)
-                    done_count += 1
-                    if _log_progress:
-                        _logger.info('compute_edge_mutations_star (nested): %d/%d completed', done_count, total)
-                else:
-                    if _log_progress:
+        with ray_runtime(1, purpose="parallel edge mutation alignment") as ray:
+            star_block_remote = ray.remote(num_cpus=1)(_star_block)
+            tasks = []
+            node_list = list(G.nodes())
+            for u in node_list:
+                nbrs = [v for v in G.neighbors(u) if (u < v) or G.is_directed()]
+                if not nbrs:
+                    continue
+                seqs_v = [G.nodes[v]['sequence'] for v in nbrs]
+                tasks.append(
+                    star_block_remote.remote(
+                        u,
+                        nbrs,
+                        G.nodes[u]['sequence'],
+                        seqs_v,
+                        alphabet,
+                        chunk_size,
+                        eps,
+                    )
+                )
+            if tasks:
+                pending = set(tasks)
+                try:
+                    import psutil as _psutil
+                except Exception:
+                    _psutil = None
+                done_count = 0
+                total = len(tasks)
+                while pending:
+                    done, pending = ray.wait(list(pending), num_returns=1, timeout=30.0)
+                    if done:
+                        W, D, S = ray.get(done[0])
+                        set_w.update(W); set_d.update(D); set_s.update(S)
+                        done_count += 1
+                        if _log_progress:
+                            _logger.info('compute_edge_mutations_star (nested): %d/%d completed', done_count, total)
+                    elif _log_progress:
                         rss = ''
                         if _psutil is not None:
                             p = _psutil.Process()

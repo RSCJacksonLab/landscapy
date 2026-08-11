@@ -1,10 +1,29 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from functools import reduce
 import operator
-from typing import Dict, Literal, List, Any, Tuple, Union, Mapping, Callable, Sequence
-import torch
+from typing import TYPE_CHECKING, Dict, Literal, List, Any, Tuple, Union, Mapping, Callable, Sequence
 import numpy as np
 from scipy import stats
+from .._optional import require_optional
+
+if TYPE_CHECKING:
+    import torch
+
+
+def _torch_module():
+    return require_optional(
+        "torch",
+        extra="ml",
+        purpose="PyTorch fitness tensors",
+    )
+
+
+def _is_torch_tensor(value: object) -> bool:
+    if not type(value).__module__.startswith("torch"):
+        return False
+    return isinstance(value, _torch_module().Tensor)
 
 
 # Fitness oeprates as a `layer` over the fitness landscape object.
@@ -111,7 +130,7 @@ class NumericFitness(BaseFitnessLayer):
             "sequence of per-sequence replicate values."
         )
 
-        if isinstance(values, torch.Tensor):
+        if _is_torch_tensor(values):
             raw_values = values.detach().cpu().numpy().tolist()
         elif isinstance(values, np.ndarray):
             if values.ndim == 0 or values.ndim > 2:
@@ -128,7 +147,7 @@ class NumericFitness(BaseFitnessLayer):
 
         normalized: List[List[float]] = []
         for row in raw_values:
-            if isinstance(row, torch.Tensor):
+            if _is_torch_tensor(row):
                 row = row.detach().cpu().numpy()
 
             if isinstance(row, np.ndarray):
@@ -179,6 +198,7 @@ class NumericFitness(BaseFitnessLayer):
         padded_reps = [
             r + [np.nan] * (max_reps - len(r)) for r in self._replicates
         ]
+        torch = _torch_module()
         return torch.tensor(padded_reps, dtype=torch.float32)
 
     def to_scalar(self,
@@ -332,7 +352,7 @@ class NumericFitness(BaseFitnessLayer):
             An instance of the NumericFitness class initialized with
             the provided parameters.
         """
-        arr = tensor.detach().cpu().numpy() if isinstance(tensor, torch.Tensor) else np.asarray(tensor)
+        arr = tensor.detach().cpu().numpy() if _is_torch_tensor(tensor) else np.asarray(tensor)
         if arr.ndim != 2:
             raise ValueError("NumericFitness.from_tensor expects a 2-D array (num_sequences, num_replicates)")
         vals: List[List[float]] = []
@@ -495,6 +515,7 @@ class CategoricalFitness(BaseFitnessLayer):
             (num_sequences, num_categories).
         """
         num_classes = len(self.categories)
+        torch = _torch_module()
         one_hot = torch.zeros(len(self._values), num_classes, dtype=torch.float32)
         
         for i, val in enumerate(self._values):
@@ -625,7 +646,7 @@ class CategoricalFitness(BaseFitnessLayer):
             An instance of the CategoricalFitness class initialized
             with the provided parameters.
         """
-        mat = one_hot.detach().cpu().numpy() if isinstance(one_hot, torch.Tensor) else np.asarray(one_hot)
+        mat = one_hot.detach().cpu().numpy() if _is_torch_tensor(one_hot) else np.asarray(one_hot)
         if mat.ndim != 2:
             raise ValueError("CategoricalFitness.from_one_hot expects a 2-D array")
         idx = np.argmax(mat, axis=1)
@@ -747,6 +768,7 @@ class ProbabilisticCategoricalFitness(BaseFitnessLayer):
             category. The tensor will have shape (num_sequences,
             num_categories).
         """
+        torch = _torch_module()
         return torch.tensor(self.probabilities, dtype=torch.float32)
 
     def get_value(self,
@@ -834,7 +856,7 @@ class ProbabilisticCategoricalFitness(BaseFitnessLayer):
         ProbabilisticCategoricalFitness
             An instance of the ProbabilisticCategoricalFitness class.
         """
-        arr = probabilities.detach().cpu().numpy() if isinstance(probabilities, torch.Tensor) else np.asarray(probabilities, dtype=float)
+        arr = probabilities.detach().cpu().numpy() if _is_torch_tensor(probabilities) else np.asarray(probabilities, dtype=float)
         if arr.ndim != 2:
             raise ValueError("from_probabilities expects 2-D (num_sequences, num_categories)")
         # row-normalize defensively
@@ -880,7 +902,7 @@ class ProbabilisticCategoricalFitness(BaseFitnessLayer):
         ProbabilisticCategoricalFitness
             An instance of the ProbabilisticCategoricalFitness class.
         """
-        z = logits.detach().cpu().numpy() if isinstance(logits, torch.Tensor) else np.asarray(logits, dtype=float)
+        z = logits.detach().cpu().numpy() if _is_torch_tensor(logits) else np.asarray(logits, dtype=float)
         if z.ndim != 2:
             raise ValueError("from_logits expects 2-D (num_sequences, num_categories)")
         z = z - z.max(axis=1, keepdims=True)  # numerical stability
@@ -930,7 +952,7 @@ class ProbabilisticCategoricalFitness(BaseFitnessLayer):
         ProbabilisticCategoricalFitness
             An instance of the ProbabilisticCategoricalFitness class.
         """
-        c = counts.detach().cpu().numpy() if isinstance(counts, torch.Tensor) else np.asarray(counts, dtype=float)
+        c = counts.detach().cpu().numpy() if _is_torch_tensor(counts) else np.asarray(counts, dtype=float)
         if c.ndim != 2:
             raise ValueError("from_counts expects 2-D (num_sequences, num_categories)")
         if alpha > 0:
@@ -1475,12 +1497,16 @@ class ArithmeticFitnessModifier(BaseFitnessModifier):
     
 # Batch factory functions
 
-FitnessLike = Union[
-    BaseFitnessLayer,
-    List[float],                 # numeric scalars
-    List[List[float]],           # numeric replicates
-    np.ndarray, torch.Tensor,    # numeric (vector/matrix) or categorical (one-hot / probs)
-]
+if TYPE_CHECKING:
+    FitnessLike = Union[
+        BaseFitnessLayer,
+        List[float],
+        List[List[float]],
+        np.ndarray,
+        torch.Tensor,
+    ]
+else:
+    FitnessLike = Any
 
 def make_fitness_layer(name: str,
                        obj: FitnessLike,
@@ -1526,7 +1552,7 @@ def make_fitness_layer(name: str,
     if isinstance(obj, BaseFitnessLayer):
         return obj
 
-    is_tensor = isinstance(obj, torch.Tensor)
+    is_tensor = _is_torch_tensor(obj)
 
     # Fast-path: replicate lists (ragged)
     if isinstance(obj, list) and obj and isinstance(obj[0], (list, tuple, np.ndarray)):

@@ -37,10 +37,24 @@ bundles:
 python -m pip install "landscapy[parquet]"
 ```
 
+Optional backends are installed explicitly so the core package remains small:
+
+- `knn` for scikit-learn nearest-neighbour and diffusion graphs;
+- `tda` for topological graph construction;
+- `faiss` for accelerated nearest-neighbour search;
+- `alignment` for soft sequence alignment;
+- `phylogeny` for tree inference and ancestral reconstruction;
+- `parallel` for Ray-backed parallel execution;
+- `embeddings` for protein language-model embeddings;
+- `ml` for embeddings plus PyTorch Geometric export; and
+- `cli` for the command-line entry points.
+
+Install every optional backend with `python -m pip install "landscapy[all]"`.
+
 For development from a checkout:
 
 ```bash
-python -m pip install -e ".[dev,parquet]"
+python -m pip install -e ".[dev,all]"
 python -m pytest
 ```
 
