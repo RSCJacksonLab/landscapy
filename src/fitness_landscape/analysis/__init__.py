@@ -11,6 +11,10 @@ from .dirichlet_energy import (
     calculate_ruggedness_dirichlet_energy,
     local_dirichlet_energy_contribution)
 
+from .coupling import (
+    cross_spectral_coherence
+)
+
 from .graph_induction_alignment import (
     procrustes,
     edge_prf_on_observed,
@@ -88,6 +92,7 @@ __all__ = [
     'calculate_ruggedness_autocorrelation_stochastic',
     'category_boundary_crossing_times',
     'compute_persistent_homology',
+    'cross_spectral_coherence',
     'compute_ruggedness_diffusion_scale',
     'compute_ruggedness_variance_energy',
     'fit_t_bayesian_laplace',
