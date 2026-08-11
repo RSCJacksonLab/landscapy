@@ -22,6 +22,7 @@ average_precision_score = sklearn_metrics.average_precision_score
 roc_auc_score = sklearn_metrics.roc_auc_score
 from ..transforms.eigenmode import eigenmode_decomposition
 from ..core.landscape import FitnessLandscape
+from ..core.edge_schema import AUTO_EDGE_KEY
 import statistics as stats
 from scipy.optimize import linear_sum_assignment
 from ..graph_matching import isorank_with_features
@@ -192,7 +193,8 @@ def sp_rmse(Ga: nx.Graph,
 
 def spectral_rmse(Ga: nx.Graph,
                   Gb: nx.Graph,
-                  k: int = 20) -> float:
+                  k: int = 20,
+                  weight_key: str | None = AUTO_EDGE_KEY) -> float:
     """
     Function to compute the spectral RMSE between two input graphs.
 
@@ -206,14 +208,17 @@ def spectral_rmse(Ga: nx.Graph,
     
     k : int, default=20
         The number of Laplacian eigenvectors to compute.
+    weight_key : str or None, default="auto"
+        Conductance attribute used for both spectra. ``None`` requests
+        unweighted operators.
 
     Returns
     -------
     float
         The root-mean-squared difference between eigenvalues.
     """
-    eigvals_a, _ = eigenmode_decomposition(Ga, k=k)
-    eigvals_b, _ = eigenmode_decomposition(Gb, k=k)
+    eigvals_a, _ = eigenmode_decomposition(Ga, k=k, weight_key=weight_key)
+    eigvals_b, _ = eigenmode_decomposition(Gb, k=k, weight_key=weight_key)
     kmin = min(eigvals_a.shape[0], eigvals_b.shape[0])
     return float(np.sqrt(np.mean((eigvals_a[:kmin] - eigvals_b[:kmin])**2)))
 
@@ -1576,7 +1581,12 @@ def _collect_features(G: nx.Graph,
     if n == 0:
         return np.zeros((0, 0), dtype=float)
     k = min(max(2, spectral_k + 1), n)
-    _, U = eigenmode_decomposition(G, k=k, matrix='norm_laplacian')
+    _, U = eigenmode_decomposition(
+        G,
+        k=k,
+        matrix='norm_laplacian',
+        weight_key=None,
+    )
     if U.shape[1] > 1:
         return U[:, 1:min(k, U.shape[1])]
     deg = np.array([G.degree(u) for u in nodes], dtype=float)[:, None]
@@ -1777,8 +1787,18 @@ def evaluate_isorank_alignment(Ga: Union[FitnessLandscape, nx.Graph],
 
     # Spectral correlation on first k non-trivial modes
     k_corr = min(spectral_corr_k, max(1, min(nA, nB) - 1))
-    wA, UA = eigenmode_decomposition(A, k=k_corr + 1, matrix='norm_laplacian')
-    wB, UB = eigenmode_decomposition(B, k=k_corr + 1, matrix='norm_laplacian')
+    wA, UA = eigenmode_decomposition(
+        A,
+        k=k_corr + 1,
+        matrix='norm_laplacian',
+        weight_key=None,
+    )
+    wB, UB = eigenmode_decomposition(
+        B,
+        k=k_corr + 1,
+        matrix='norm_laplacian',
+        weight_key=None,
+    )
     UA = UA[:, 1:1 + k_corr] if UA.shape[1] > 1 else UA
     UB = UB[:, 1:1 + k_corr] if UB.shape[1] > 1 else UB
     idxA = list(r_idx)

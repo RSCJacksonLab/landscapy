@@ -2,10 +2,12 @@ import numpy as np
 import networkx as nx
 from typing import Hashable, List, Union, Dict
 from ..core.landscape import FitnessLandscape
+from ..core.edge_schema import AUTO_EDGE_KEY, resolve_edge_attribute
 
 def calculate_ruggedness_dirichlet_energy(landscape: FitnessLandscape,
                                           edge_weight_bins: Union[np.ndarray, List] = None,
-                                          weighted_laplacian : bool = False) -> Dict:
+                                          weighted_laplacian : bool = False,
+                                          weight_key: str | None = AUTO_EDGE_KEY) -> Dict:
     """
     Function to determine the analytical dirichlet energy of a fitness
     landscape.
@@ -22,6 +24,11 @@ def calculate_ruggedness_dirichlet_energy(landscape: FitnessLandscape,
     
     weighted_laplacian : bool, default=False
         Boolean to indicate if a weighted Laplacian should be used.
+
+    weight_key : str or None, default="auto"
+        Conductance attribute for weighted analysis. ``"auto"`` resolves the
+        constructor-declared conductance; ``None`` requests an unweighted
+        analysis explicitly.
     
     Returns
     -------
@@ -31,13 +38,21 @@ def calculate_ruggedness_dirichlet_energy(landscape: FitnessLandscape,
 
     node_order = list(landscape.graph.nodes())
     if weighted_laplacian:
-        # Weighted Laplacian for kNN graphs.
+        resolved_weight_key = resolve_edge_attribute(
+            landscape.graph,
+            "conductance",
+            weight_key,
+            required=True,
+        )
         laplacian = nx.laplacian_matrix(
-            G=landscape.graph, nodelist=node_order, weight='weight'
+            G=landscape.graph,
+            nodelist=node_order,
+            weight=resolved_weight_key,
         ).toarray()
     else:
+        resolved_weight_key = None
         laplacian = nx.laplacian_matrix(
-            G=landscape.graph, nodelist=node_order
+            G=landscape.graph, nodelist=node_order, weight=None
         ).toarray()
 
     results = {}
@@ -54,6 +69,7 @@ def calculate_ruggedness_dirichlet_energy(landscape: FitnessLandscape,
     results = {
         'total_dirichlet_energy': total_de_per_node,
         'weighted_laplacian': weighted_laplacian,
+        'weight_key': resolved_weight_key,
     }
 
     if edge_weight_bins is not None:
@@ -63,14 +79,22 @@ def calculate_ruggedness_dirichlet_energy(landscape: FitnessLandscape,
         for bin_range in edge_weight_bins:
             
             # Collect edges in the bin range.
-            edge_list = _collect_edges(landscape=landscape, weight=bin_range)
+            edge_list = _collect_edges(
+                landscape=landscape,
+                weight=bin_range,
+                weight_key=resolved_weight_key,
+            )
             edge_de = 0.0
             
             for u, v in edge_list:
                 fitness1 = fitness_by_node[u]
                 fitness2 = fitness_by_node[v]
                 
-                current_edge_weight = landscape.graph.edges[u, v].get('weight', 1.0)
+                current_edge_weight = (
+                    landscape.graph.edges[u, v][resolved_weight_key]
+                    if resolved_weight_key is not None
+                    else 1.0
+                )
                 edge_de += _sum_dirichlet_energy(fitness1=fitness1,
                                                 fitness2=fitness2,
                                                 weighted_edge=weighted_laplacian,
@@ -103,7 +127,8 @@ def _sum_dirichlet_energy(fitness1: float,
     return squared_diffs / 2
 
 def _collect_edges(landscape: Union[FitnessLandscape, nx.Graph],
-                   weight: np.ndarray) -> List[tuple[int, int]]:
+                   weight: np.ndarray,
+                   weight_key: str | None) -> List[tuple[int, int]]:
     """
     Helper function to collect edges into distance bins. 
     """
@@ -117,7 +142,7 @@ def _collect_edges(landscape: Union[FitnessLandscape, nx.Graph],
     min_weight, max_weight = weight
     selected_edges = []
     for u, v, data in graph.edges(data=True):
-        w = data.get('weight', 1.0)
+        w = data[weight_key] if weight_key is not None else 1.0
         if min_weight <= w < max_weight:
             selected_edges.append((u, v))
     return selected_edges

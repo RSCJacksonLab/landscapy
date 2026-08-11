@@ -16,7 +16,7 @@ from .graph import (
     _encode_multiallele,
     create_phylo_graph,
     create_evol_diffusion_graph,
-    compute_edge_mutations_star,
+    _annotate_existing_edges_hamming,
 )
 from .fitness import (
     NumericFitness,
@@ -27,6 +27,7 @@ from .fitness import (
     apply_fitness_modifier,
 )
 from .annotation import AnnotationLayer
+from .edge_schema import declare_edge_semantics
 from abc import ABC, abstractmethod
 from ..utils import _compute_embeddings_from_sequences, alignment_to_base_numpy_sequences
 from .._optional import require_optional
@@ -3294,11 +3295,22 @@ class FitnessLandscape:
                             pass
 
             if _compute_hamming_edges and graph.number_of_edges() > 0:
-                compute_edge_mutations_star(
-                    graph,
-                    _log_progress=_log_progress,
-                    _nested_parallel=_nested_parallel,
-                )
+                _annotate_existing_edges_hamming(graph)
+
+            declare_edge_semantics(
+                graph,
+                constructor="phylogeny",
+                distance_key="branch_length",
+                distance_units="expected_substitutions_per_site",
+                normalized_distance_key=(
+                    "normalized_distance" if _compute_hamming_edges else None
+                ),
+                affinity_key=None,
+                conductance_key=None,
+                notes=(
+                    "Phylogenetic branch length is a distance, not conductance."
+                ),
+            )
 
             node_order = list(graph.nodes())
             sequences = [graph.nodes[name]['sequence'] for name in node_order]
@@ -3356,11 +3368,20 @@ class FitnessLandscape:
             G.nodes[name]['gapped_arr'] = record['gapped_arr']
 
         if _compute_hamming_edges and G.number_of_edges() > 0:
-            compute_edge_mutations_star(
-                G,
-                _log_progress=_log_progress,
-                _nested_parallel=_nested_parallel,
-            )
+            _annotate_existing_edges_hamming(G)
+
+        declare_edge_semantics(
+            G,
+            constructor="phylogeny",
+            distance_key="branch_length",
+            distance_units="expected_substitutions_per_site",
+            normalized_distance_key=(
+                "normalized_distance" if _compute_hamming_edges else None
+            ),
+            affinity_key=None,
+            conductance_key=None,
+            notes="Phylogenetic branch length is a distance, not conductance.",
+        )
 
         node_order = list(G.nodes())
         sequences = [G.nodes[name]['sequence'] for name in node_order]

@@ -8,6 +8,7 @@ from fitness_landscape.core.graph import (
     _row_softmax_csr,
     create_evol_diffusion_graph,
 )
+from fitness_landscape.core.edge_schema import EDGE_SCHEMA_GRAPH_KEY
 from fitness_landscape.core.sequence import BaseNumpySequence
 from fitness_landscape.phylo._sub_matrices import lg
 
@@ -122,8 +123,11 @@ def test_long_protein_construction_retains_edges_after_scoring():
 
     assert graph.number_of_nodes() == 3
     assert graph.number_of_edges() == 3
+    assert graph.graph[EDGE_SCHEMA_GRAPH_KEY]["conductance"]["key"] == "weight"
     assert all(
-        np.isfinite(data["kernel_weight"]) and data["kernel_weight"] > 0.0
+        np.isfinite(data["kernel_weight"])
+        and data["kernel_weight"] == data["affinity"] == data["weight"]
+        and data["weight"] > 0.0
         for _, _, data in graph.edges(data=True)
     )
 

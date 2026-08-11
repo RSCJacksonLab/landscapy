@@ -28,6 +28,10 @@ from ..core.fitness import (
     ProbabilisticCategoricalFitness,
 )
 from ..core.sequence import BaseNumpySequence, SoftSequence
+from ..core.edge_schema import (
+    EDGE_SCHEMA_GRAPH_KEY,
+    migrate_legacy_edge_semantics,
+)
 from .exceptions import BundleValidationError, ChecksumMismatchError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -663,6 +667,9 @@ def _write_graph_edges(
         "path": GRAPH_FILENAME,
         "storage_backend": storage_backend,
         "edge_attributes": attribute_manifest,
+        "edge_schema": _normalize_json(
+            graph.graph.get(EDGE_SCHEMA_GRAPH_KEY)
+        ),
     }
 
 
@@ -1067,6 +1074,15 @@ def _load_graph(bundle_dir: Path, manifest: Mapping[str, Any], node_keys: Sequen
             attrs[spec["name"]] = _decode_attribute_value(value, codec=spec["codec"])
         attrs = {key: value for key, value in attrs.items() if value is not None}
         graph.add_edge(node_keys[src_index], node_keys[dst_index], **attrs)
+
+    declared_schema = graph_manifest.get("edge_schema")
+    if isinstance(declared_schema, Mapping):
+        graph.graph[EDGE_SCHEMA_GRAPH_KEY] = dict(declared_schema)
+    else:
+        migrate_legacy_edge_semantics(
+            graph,
+            sequence_length=int(manifest.get("sequence_length") or 0),
+        )
 
     return graph
 

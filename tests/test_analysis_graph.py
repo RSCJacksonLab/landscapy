@@ -77,7 +77,8 @@ def _small_categorical_landscape():
 def test_resistance_distance_matrix_plain_graph_returns_matrix_only():
     G = nx.path_graph(3)
     res = resistance_distance_matrix(G)
-    assert set(res.keys()) == {"resistance_mat", "sampled_nodes"}
+    assert set(res.keys()) == {"resistance_mat", "sampled_nodes", "weight_key"}
+    assert res["weight_key"] is None
     with pytest.raises(ValueError):
         resistance_distance_matrix(G, layers=["anything"])
 

@@ -111,6 +111,11 @@ The exact supported names and import namespaces are listed in the
 [0.9 public API contract](docs/public_api.md). CI validates that contract
 against the exported objects and their NumPy-style docstrings.
 
+Graph constructors and weighted analyses follow the documented
+[edge distance and conductance contract](docs/edge_semantics.md). In
+particular, NetworkX `weight` is reserved for conductance and is never a raw
+distance.
+
 - `fitness_landscape.core`: sequences, fitness and annotation layers,
   undirected graph construction, and `FitnessLandscape`.
 - `fitness_landscape.models`: NK, Rough Mount Fuji, and elementary landscapes.

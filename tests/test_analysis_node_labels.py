@@ -33,6 +33,7 @@ from fitness_landscape.analysis.random_walk import (
     category_boundary_crossing_times,
 )
 from fitness_landscape.core.fitness import CategoricalFitness, NumericFitness
+from fitness_landscape.core.edge_schema import declare_edge_semantics
 from fitness_landscape.core.landscape import FitnessLandscape
 from fitness_landscape.core.sequence import BaseNumpySequence
 from fitness_landscape.transforms.graph_fourier import graph_fourier_transform
@@ -71,6 +72,11 @@ def _landscape(node_by_index, insertion_indices):
             node_by_index[sequence_index + 1],
             weight=1.0,
         )
+    declare_edge_semantics(
+        graph,
+        constructor="node-label-regression",
+        conductance_key="weight",
+    )
 
     numeric = NumericFitness.from_scalars("fitness", [0.0, 1.0, 2.0, 3.0])
     categorical = CategoricalFitness.from_values(

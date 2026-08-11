@@ -2,6 +2,7 @@ import numpy as np
 import networkx as nx
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
 from ..core.landscape import FitnessLandscape
+from ..core.edge_schema import AUTO_EDGE_KEY
 from ..core.fitness import CategoricalFitness, ProbabilisticCategoricalFitness
 from ..core.graph import create_hamming_graph
 from ..core.sequence import sequence_distance
@@ -9,6 +10,7 @@ from ..transforms import graph_fourier_transform, eigenmode_decomposition
 
 def calculate_ruggedness_autocorrelation_analytical(landscape: FitnessLandscape,
                                                       lag_max: int = None,
+                                                      weight_key: str | None = AUTO_EDGE_KEY,
                                                       _eigenvectors: Optional[np.ndarray] = None,
                                                       _eigenvalues: Optional[np.ndarray] = None) -> Dict:
     """
@@ -22,6 +24,9 @@ def calculate_ruggedness_autocorrelation_analytical(landscape: FitnessLandscape,
     
     lag_max : int, default=`None`
         The maximum lag to include in the autocorrelation calculation.
+    weight_key : str or None, default="auto"
+        Conductance attribute used for the graph-Fourier basis. ``None``
+        requests an unweighted basis.
     _eigenvectors : ndarray, optional
         Precomputed graph-Laplacian eigenvectors ordered by ascending
         eigenvalue.
@@ -51,6 +56,7 @@ def calculate_ruggedness_autocorrelation_analytical(landscape: FitnessLandscape,
     eigenvectors, _, gft_coefficients = graph_fourier_transform(
         landscape,
         signal=mean_centered_signal,
+        weight_key=weight_key,
         _eigenvectors=_eigenvectors,
         _eigenvalues=_eigenvalues,
     )

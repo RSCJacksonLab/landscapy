@@ -913,7 +913,9 @@ def test_hamming_graph_binary_hypercube_degree_and_edges():
     # default edge attributes present
     for u, v, d in G.edges(data=True):
         assert d.get('weight') == 1.0
-        assert d.get('distance') == 0.25
+        assert d.get('distance') == 1.0
+        assert d.get('normalized_distance') == 0.25
+        assert d.get('affinity') == 1.0
 
 
 def test_hamming_graph_binary_dispatch_auto_backend():
@@ -1011,7 +1013,8 @@ def test_hamming_graph_multiallele_attributes_alignment():
         assert np.array_equal(G.nodes[i]['sequence'].to_array(), s.to_array())
     for u, v, d in G.edges(data=True):
         assert d.get('weight') == 1.0
-        assert d.get('distance') == 0.5
+        assert d.get('distance') == 1.0
+        assert d.get('normalized_distance') == 0.5
 
 def _toy_binary_seqs_L4():
     # 16 nodes = all 4-bit strings
@@ -1028,7 +1031,8 @@ def test_knn_balltree_degree_union_symmetrize():
         assert G.degree[v] >= k
     for u, v, d in G.edges(data=True):
         assert "distance" in d and "weight" in d
-        assert d["distance"] == d["weight"]
+        assert d["weight"] == pytest.approx(np.exp(-d["normalized_distance"]))
+        assert d["knn_weight"] == d["distance"]
     A = nx.to_numpy_array(G, weight="distance")
     assert np.allclose(A, A.T)
 
