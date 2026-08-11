@@ -33,6 +33,8 @@ All notable changes to Landscapy are documented here.
   annotations, and every embedding domain, including duplicate-safe attachment.
 - Made publication-facing graph analyses independent of node-label type and
   preserved graph labels alongside explicit sequence-row indices in results.
+- Standardized edge distance, normalized-distance, affinity, transition, and
+  conductance semantics across constructors, analyses, and portable bundles.
 
 ### Removed
 

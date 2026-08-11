@@ -6,6 +6,7 @@ from functools import lru_cache
 from ..core.annotation import AnnotationLayer
 from ..core.fitness import CategoricalFitness, ProbabilisticCategoricalFitness
 from ..core.landscape import FitnessLandscape
+from ..core.edge_schema import AUTO_EDGE_KEY, resolve_edge_attribute
 from ..transforms.eigenmode import eigenmode_decomposition
 from typing import Any, Mapping, Union, Dict, Literal, Sequence, Optional, Iterable, Hashable
 import scipy.sparse as sp
@@ -88,7 +89,7 @@ def annotate_louvain_communities(
     landscape: FitnessLandscape,
     *,
     annotation_name: str = "louvain_communities",
-    weight: Optional[str] = "weight",
+    weight: Optional[str] = AUTO_EDGE_KEY,
     resolution: float = 1.0,
     threshold: float = 1e-7,
     seed: Optional[Union[int, np.random.Generator, np.random.RandomState]] = None,
@@ -103,8 +104,9 @@ def annotate_louvain_communities(
         Target landscape with an instantiated graph.
     annotation_name :
         Name for the annotation layer that will store community metadata.
-    weight :
-        Edge attribute representing weights. ``None`` treats the graph as unweighted.
+    weight : str or None, default="auto"
+        Conductance attribute. ``"auto"`` resolves constructor metadata;
+        ``None`` treats the graph as unweighted.
     resolution :
         Resolution parameter passed to :func:`networkx.algorithms.community.louvain_communities`.
     threshold :
@@ -124,6 +126,12 @@ def annotate_louvain_communities(
         raise ValueError("Cannot compute communities: landscape graph is missing.")
     if graph.number_of_nodes() == 0:
         raise ValueError("Cannot compute communities: landscape graph has no nodes.")
+    resolved_weight = resolve_edge_attribute(
+        graph,
+        "conductance",
+        weight,
+        required=False,
+    )
 
     if annotation_name in landscape.annotation_layers:
         if not overwrite:
@@ -134,7 +142,13 @@ def annotate_louvain_communities(
         landscape.detach_annotation(annotation_name)
 
     communities = list(
-        louvain_communities(graph, weight=weight, resolution=resolution, threshold=threshold, seed=seed)
+        louvain_communities(
+            graph,
+            weight=resolved_weight,
+            resolution=resolution,
+            threshold=threshold,
+            seed=seed,
+        )
     )
     if not communities:
         raise RuntimeError("Louvain community detection returned no communities.")
@@ -147,7 +161,9 @@ def annotate_louvain_communities(
             node_to_comm[node] = cid
 
     try:
-        modularity_score = float(modularity(graph, communities, weight=weight))
+        modularity_score = float(
+            modularity(graph, communities, weight=resolved_weight)
+        )
     except Exception:
         modularity_score = None
 
@@ -180,7 +196,7 @@ def annotate_louvain_communities(
 
     metadata = {
         "algorithm": "louvain",
-        "weight_key": weight,
+        "weight_key": resolved_weight,
         "resolution": resolution,
         "threshold": threshold,
         "seed": metadata_seed,
@@ -268,7 +284,8 @@ def calculate_ruggedness_local_optima(landscape: FitnessLandscape,
     
 def graph_spectral_analysis(landscape: FitnessLandscape,
                             matrix: Literal['laplacian', 'norm_laplacian'] = 'laplacian',
-                            k: int = None) -> Dict:
+                            k: int = None,
+                            weight_key: str | None = AUTO_EDGE_KEY) -> Dict:
     """
     Analyze the eigenmodes of a graph.
     
@@ -281,13 +298,21 @@ def graph_spectral_analysis(landscape: FitnessLandscape,
         `laplacian` or `norm_laplcian`.
     k : int or None, optional
         Number of eigenmodes to analyze.
+    weight_key : str or None, default="auto"
+        Conductance attribute used for the spectral operator. ``None``
+        requests an unweighted operator.
         
     Returns
     -------
     dict
         Eigenspectral analysis results. 
     """
-    eigenvalues, eigenvectors = eigenmode_decomposition(landscape, matrix=matrix, k=k)
+    eigenvalues, eigenvectors = eigenmode_decomposition(
+        landscape,
+        matrix=matrix,
+        k=k,
+        weight_key=weight_key,
+    )
     
     w = np.asarray(eigenvalues, dtype=float)
     U = np.asarray(eigenvectors, dtype=float)
@@ -308,6 +333,12 @@ def graph_spectral_analysis(landscape: FitnessLandscape,
         'localization': ipr,
         'node_centralities': node_c,
         'node_order': list(landscape.graph.nodes()),
+        'weight_key': resolve_edge_attribute(
+            landscape.graph,
+            "conductance",
+            weight_key,
+            required=False,
+        ),
     }
     if m >= 2:
         # ascending-ordered eigenvalues => spectral gap between first two
@@ -760,7 +791,7 @@ def _compute_resistance_matrix(G: nx.Graph,
 def resistance_distance_matrix(graph: Union[FitnessLandscape, nx.Graph],
                                nodes: Optional[Sequence] = None,
                                *,
-                               weight_key: Optional[str] = None,
+                               weight_key: Optional[str] = AUTO_EDGE_KEY,
                                jitter: float = 1e-10,
                                sparse_threshold: int = 1000,
                                weight_epsilon: float = 1e-8,
@@ -787,9 +818,9 @@ def resistance_distance_matrix(graph: Union[FitnessLandscape, nx.Graph],
     nodes : Sequence, optional
         Optional ordered sequence of nodes to include. Defaults to all
         nodes present in the graph.
-    weight_key : str, optional
-        Edge attribute representing conductance/weight. When ``None``,
-        edges are treated as unweighted.
+    weight_key : str or None, default="auto"
+        Edge attribute representing conductance. ``"auto"`` uses the
+        constructor-declared conductance; ``None`` treats edges as unweighted.
     jitter : float, default=1e-10
         Diagonal regularisation added when the Laplacian is not full
         rank to ensure a stable pseudoinverse.
@@ -856,6 +887,12 @@ def resistance_distance_matrix(graph: Union[FitnessLandscape, nx.Graph],
     G = graph.graph if isinstance(graph, FitnessLandscape) else graph
     if G is None:
         raise ValueError("Graph is required to compute resistance distances.")
+    resolved_weight_key = resolve_edge_attribute(
+        G,
+        "conductance",
+        weight_key,
+        required=False,
+    )
 
     node_order = list(G.nodes()) if nodes is None else list(nodes)
     n_total = len(node_order)
@@ -889,7 +926,7 @@ def resistance_distance_matrix(graph: Union[FitnessLandscape, nx.Graph],
     R, diag_scaled, norm_factor, solver_data, laplacian_pinv = _compute_resistance_matrix(
         G,
         node_order,
-        weight_key=weight_key,
+        weight_key=resolved_weight_key,
         jitter=jitter,
         sparse_threshold=sparse_threshold,
         weight_epsilon=weight_epsilon,
@@ -900,6 +937,7 @@ def resistance_distance_matrix(graph: Union[FitnessLandscape, nx.Graph],
     )
     result: Dict[str, Any] = {}
     result["sampled_nodes"] = list(node_order)
+    result["weight_key"] = resolved_weight_key
     if R is not None:
         result["resistance_mat"] = R
 
@@ -1006,7 +1044,7 @@ def category_diffusion_hierarchy(
     annotation_field: str | None = None,
     embedding_dim: int = 10,
     diffusion_matrix: Literal["norm_laplacian", "laplacian"] = "norm_laplacian",
-    weight_key: Optional[str] = "weight",
+    weight_key: Optional[str] = AUTO_EDGE_KEY,
     skip_first: bool = True,
     embedding: Optional[np.ndarray] = None,
     filter_small_embedding: bool = True,
@@ -1031,8 +1069,9 @@ def category_diffusion_hierarchy(
         the first eigenvector when ``skip_first`` is True).
     diffusion_matrix : {"norm_laplacian", "laplacian"}, default="norm_laplacian"
         Graph matrix passed to :func:`eigenmode_decomposition`.
-    weight_key : str, optional
-        Edge weight attribute forwarded to the Laplacian construction.
+    weight_key : str or None, default="auto"
+        Conductance attribute forwarded to the Laplacian construction.
+        ``None`` requests an unweighted operator.
     skip_first : bool, default=True
         Drop the leading eigenvector (often the constant mode) from the
         diffusion embedding.

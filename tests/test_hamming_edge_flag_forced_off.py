@@ -6,10 +6,6 @@ from fitness_landscape._const import PROT_20
 from fitness_landscape.core.sequence import BaseNumpySequence, BinarySequence
 
 
-def _fail_if_called(*args, **kwargs):
-    raise AssertionError("Hamming edge annotation should be disabled.")
-
-
 class _FakeASRConstructor:
     def __init__(self, *args, **kwargs):
         self.tip_names = {"tip"}
@@ -28,9 +24,7 @@ class _FakeASRConstructor:
         return graph
 
 
-def test_create_hamming_graph_binary_ignores_hamming_edge_flag(monkeypatch):
-    monkeypatch.setattr(graph_mod, "attach_expected_hamming_to_edges", _fail_if_called)
-
+def test_create_hamming_graph_binary_exposes_hamming_attributes_when_flagged():
     sequences = [
         BinarySequence.from_bits([0, 0]),
         BinarySequence.from_bits([0, 1]),
@@ -39,12 +33,25 @@ def test_create_hamming_graph_binary_ignores_hamming_edge_flag(monkeypatch):
     graph = graph_mod.create_hamming_graph_binary(sequences, _compute_hamming_edges=True)
 
     assert graph.number_of_edges() == 1
+    edge = next(iter(graph.edges(data=True)))[2]
+    assert edge["distance"] == 1.0
+    assert edge["normalized_distance"] == 0.5
 
 
-def test_create_phylo_graph_ignores_hamming_edge_flag(monkeypatch):
+def test_create_phylo_graph_honors_hamming_edge_flag(monkeypatch):
     monkeypatch.setattr(phylo_mod, "ASRConstructor", _FakeASRConstructor)
-    monkeypatch.setattr(graph_mod, "compute_edge_mutations_star", _fail_if_called)
+    called = []
+
+    def _annotate(graph, **kwargs):
+        called.append(True)
+        for u, v in graph.edges():
+            graph[u][v]["hamming_distance"] = 0.0
+            graph[u][v]["normalized_distance"] = 0.0
+
+    monkeypatch.setattr(graph_mod, "_annotate_existing_edges_hamming", _annotate)
 
     graph = graph_mod.create_phylo_graph("unused", _compute_hamming_edges=True)
 
     assert graph.number_of_edges() == 1
+    assert called == [True]
+    assert graph["root"]["tip"]["hamming_distance"] == 0.0

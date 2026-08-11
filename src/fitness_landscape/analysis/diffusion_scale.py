@@ -38,7 +38,8 @@ def _precompute_GMRF_stats(G: nx.Graph,
         eigenvectors = np.asarray(_eigenvectors, dtype=float)
     else:
         eigenvalues, eigenvectors = eigenmode_decomposition(G,
-                                                            matrix = 'norm_laplacian')
+                                                            matrix='norm_laplacian',
+                                                            weight_key=None)
 
     mu = np.mean(signal)
     
@@ -65,7 +66,11 @@ def _precompute_GMRF_stats_with_evecs(G: nx.Graph,
         eigenvalues = np.asarray(_eigenvalues, dtype=float)
         eigenvectors = np.asarray(_eigenvectors, dtype=float)
     else:
-        eigenvalues, eigenvectors = eigenmode_decomposition(G, matrix='norm_laplacian')
+        eigenvalues, eigenvectors = eigenmode_decomposition(
+            G,
+            matrix='norm_laplacian',
+            weight_key=None,
+        )
     mu = np.mean(signal)
     signal_centered = signal - mu
     f_hat = eigenvectors.T @ signal_centered
@@ -1013,7 +1018,11 @@ def compute_ruggedness_variance_energy(landscape: FitnessLandscape,
         eigenvalues = np.asarray(_eigenvalues, dtype=float)
         eigenvectors = np.asarray(_eigenvectors, dtype=float)
     else:
-        eigenvalues, eigenvectors = eigenmode_decomposition(G, matrix='norm_laplacian')
+        eigenvalues, eigenvectors = eigenmode_decomposition(
+            G,
+            matrix='norm_laplacian',
+            weight_key=None,
+        )
 
     # Centered mean used in the likelihood is zero-mean; keep both:
     mu_emp = float(np.mean(signal))

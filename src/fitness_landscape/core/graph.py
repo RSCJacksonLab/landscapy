@@ -11,6 +11,7 @@ from .._const import PROT_20
 from .._optional import ray_runtime, require_optional
 from ..utils import calculate_gapped_soft_score
 from .annotation import register_auto_annotation
+from .edge_schema import declare_edge_semantics
 from scipy import sparse
 from scipy.linalg import expm
 from scipy.sparse import csr_matrix
@@ -26,16 +27,76 @@ _BaseSequence = [BaseNumpySequence, BinarySequence, SoftSequence]
 
 
 def _force_disable_hamming_edge_computation(_requested: bool) -> bool:
-    """
-    Force Hamming edge annotation off for graph constructors.
+    """Normalize the legacy Hamming-edge annotation flag.
 
-    The ingestion pipeline can hit prohibitive memory use when the
-    soft-alignment path is triggered on large landscapes, so the
-    annotation pass is disabled globally while keeping the legacy
-    keyword for API compatibility.
+    The flag was historically forced off without warning. It now controls an
+    edge-local annotation pass, whose memory use is linear in graph size.
     """
 
-    return False
+    return bool(_requested)
+
+
+def _distance_affinity(normalized_distance: float) -> float:
+    """Convert a non-negative normalized distance to an RBF-like affinity."""
+    return float(np.exp(-float(normalized_distance)))
+
+
+def _declare_hamming_graph_semantics(G: nx.Graph, *, constructor: str) -> None:
+    """Declare unit-conductance semantics for a Hamming adjacency graph."""
+    declare_edge_semantics(
+        G,
+        constructor=constructor,
+        distance_key="distance",
+        distance_units="hamming_count",
+        normalized_distance_key="normalized_distance",
+        affinity_key="affinity",
+        conductance_key="weight",
+        legacy_aliases={"sim": "affinity"},
+        notes=(
+            "Edges connect one-mutant neighbours. Conductance and affinity are "
+            "unit-valued topological adjacency weights."
+        ),
+    )
+
+
+def _attach_knn_edge_semantics(
+    G: nx.Graph,
+    *,
+    sequence_length: int,
+    constructor: str,
+) -> None:
+    """Attach canonical Hamming kNN distances, affinities, and conductances."""
+    length = int(sequence_length)
+    if length <= 0 and G.number_of_edges() > 0:
+        raise ValueError("kNN edge semantics require sequences of positive length.")
+
+    attributes = {}
+    for u, v, data in G.edges(data=True):
+        distance = float(data["distance"])
+        normalized = distance / length if length > 0 else 0.0
+        affinity = _distance_affinity(normalized)
+        attributes[(u, v)] = {
+            "distance": distance,
+            "normalized_distance": normalized,
+            "affinity": affinity,
+            "weight": affinity,
+            "knn_weight": distance,
+            "sim": affinity,
+        }
+    if attributes:
+        nx.set_edge_attributes(G, attributes)
+
+    declare_edge_semantics(
+        G,
+        constructor=constructor,
+        distance_key="distance",
+        distance_units="hamming_count",
+        normalized_distance_key="normalized_distance",
+        affinity_key="affinity",
+        conductance_key="weight",
+        legacy_aliases={"knn_weight": "distance", "sim": "affinity"},
+        notes="Conductance is exp(-normalized Hamming distance).",
+    )
 
 
 def _attach_unit_hamming_edge_attributes(
@@ -54,7 +115,13 @@ def _attach_unit_hamming_edge_attributes(
     norm_distance = float(1.0 / seq_len) if seq_len > 0 else 0.0
 
     edge_attrs = {
-        (u, v): {"weight": 1.0, "distance": norm_distance}
+        (u, v): {
+            "distance": 1.0,
+            "normalized_distance": norm_distance,
+            "affinity": 1.0,
+            "weight": 1.0,
+            "sim": 1.0,
+        }
         for u, v in G.edges()
     }
     nx.set_edge_attributes(G, edge_attrs)
@@ -234,11 +301,7 @@ def create_hamming_graph_binary(sequences: list[BinarySequence], *, _compute_ham
         G.nodes[i]['sequence'] = seq
 
     _attach_unit_hamming_edge_attributes(G, sequences)
-        
-    # Optionally attach standardised Hamming edge attributes
-    if _compute_hamming_edges:
-        aligned_arr = [s.to_array() for s in sequences]
-        attach_expected_hamming_to_edges(G, aligned_arr)
+    _declare_hamming_graph_semantics(G, constructor="hamming-binary")
     
     return G
 
@@ -447,13 +510,10 @@ def create_hamming_graph_multiallele(sequences: list[BaseNumpySequence], *, _com
         G.nodes[i]['sequence'] = seq
 
     _attach_unit_hamming_edge_attributes(G, sequences)
+    _declare_hamming_graph_semantics(G, constructor="hamming-multiallele")
 
     if len(sequences) == 0 or G.number_of_nodes() == 0 or G.number_of_edges() == 0:
         return G
-        
-    if _compute_hamming_edges:
-        aligned_arr = [s.to_array() for s in sequences]
-        attach_expected_hamming_to_edges(G, aligned_arr)
     
     return G
 
@@ -484,9 +544,8 @@ def create_hamming_graph(sequences: List[BaseNumpySequence],
         - `auto` : automatically chooses backend based on the sequence
         type.
     _compute_hamming_edges : bool, default=False
-        Reserved compatibility flag. Release builds always disable additional
-        Hamming-edge computation because unit Hamming attributes are attached
-        during construction.
+        Accepted for compatibility. Hamming graphs always expose exact raw and
+        normalized Hamming distances, so no additional pass is required.
 
     Returns
     -------
@@ -815,20 +874,11 @@ def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
     for i in range(n):
         G.nodes[i]['sequence'] = sequences[i]
 
-    # Compute distances on the fly if not PROT_20.
-    if not all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for seq in sequences):
-        # Keep FAISS/BallTree distances as *Hamming counts* for tests
-        # Add weight and knn_weight as the same Hamming count
-        counts = { (u, v): float(d["distance"]) for u, v, d in G.edges(data=True) }
-        nx.set_edge_attributes(G, counts, "distance")
-        nx.set_edge_attributes(G, counts, "weight")
-        nx.set_edge_attributes(G, counts, "knn_weight")
-        # Similarity based on the per-site fraction; safe even if tests don't assert it
-        nx.set_edge_attributes(G, { (u, v): float(-np.log(max(d["distance"] / max(L, 1), eps)))
-                                    for u, v, d in G.edges(data=True) }, "sim")
-    # Attach edge attributes - ONLY if 20 amino acids.
-    # else:
-    #     compute_edge_mutations_star(G=G)
+    _attach_knn_edge_semantics(
+        G,
+        sequence_length=L,
+        constructor="knn-balltree",
+    )
 
     return G
 
@@ -968,19 +1018,13 @@ def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
 
     del I, hamming_all
 
-    if not all(seq.alphabet == PROT_20 for _, seq in G.nodes(data='sequence')):
-        # Stamp FAISS-derived attributes as *Hamming counts*
-        if min_hamming:
-            counts = { (u, v): float(h) for (u, v), h in min_hamming.items() }
-            nx.set_edge_attributes(G, counts, "distance")
-            nx.set_edge_attributes(G, counts, "weight")
-            nx.set_edge_attributes(G, counts, "knn_weight")
-            nx.set_edge_attributes(G, { (u, v): float(-np.log(max(h / max(L, 1), eps)))
-                                        for (u, v), h in min_hamming.items() }, "sim")
-
-    # else:
-    #     # Compute exat Hamming distances.
-    #     compute_edge_mutations_star(G=G)
+    if min_hamming:
+        nx.set_edge_attributes(G, min_hamming, "distance")
+    _attach_knn_edge_semantics(
+        G,
+        sequence_length=L,
+        constructor=f"knn-faiss-{index_type}-{metric}",
+    )
     return G
 
 def create_knn_graph(sequences: List[BaseNumpySequence],
@@ -1098,7 +1142,7 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
         and getattr(seq, "alphabet", None) == PROT_20
         for seq in sequences
     ):
-        compute_edge_mutations_star(G=G)
+        _annotate_existing_edges_hamming(G)
     return G
 
 def create_tda_graph(sequences: List[BaseNumpySequence],
@@ -1181,7 +1225,26 @@ def create_tda_graph(sequences: List[BaseNumpySequence],
         if len(simplex) == 2:
             node1, node2 = simplex[0], simplex[1]
             dist = np.linalg.norm(low_dim_data[node1] - low_dim_data[node2])
-            G.add_edge(node1, node2, weight=dist, tda_distance=dist)
+            affinity = 1.0 / (1.0 + float(dist))
+            G.add_edge(
+                node1,
+                node2,
+                distance=float(dist),
+                affinity=affinity,
+                weight=affinity,
+                tda_distance=float(dist),
+            )
+
+    declare_edge_semantics(
+        G,
+        constructor="tda-alpha-complex",
+        distance_key="distance",
+        distance_units="pca_euclidean",
+        affinity_key="affinity",
+        conductance_key="weight",
+        legacy_aliases={"tda_distance": "distance"},
+        notes="Conductance is 1 / (1 + PCA-space Euclidean distance).",
+    )
             
     if reweight_simplex_edges:
         G = _reweight_graph_by_simplices(G=G,
@@ -1411,7 +1474,23 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
     rows, cols = np.where(np.triu(diffused_matrix > connectivity_threshold, k=1))
     
     for i, j in zip(rows, cols):
-        G.add_edge(i, j, kernel_weight=diffused_matrix[i, j])
+        affinity = float(diffused_matrix[i, j])
+        G.add_edge(
+            i,
+            j,
+            affinity=affinity,
+            weight=affinity,
+            kernel_weight=affinity,
+        )
+
+    declare_edge_semantics(
+        G,
+        constructor="embedding-diffusion",
+        affinity_key="affinity",
+        conductance_key="weight",
+        legacy_aliases={"kernel_weight": "affinity"},
+        notes="Conductance is the retained undirected diffusion affinity.",
+    )
         
     for i, seq in enumerate(sequences):
         G.nodes[i]['sequence'] = seq
@@ -1422,7 +1501,7 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         and getattr(seq, "alphabet", None) == PROT_20
         for seq in sequences
     ):
-        compute_edge_mutations_star(G=G)
+        _annotate_existing_edges_hamming(G)
     return G
 
 def create_phylo_graph(sequences: Union[Path, Alignment],
@@ -1463,7 +1542,7 @@ def create_phylo_graph(sequences: Union[Path, Alignment],
         the phylogenetic topology can still be analysed.
     _compute_hamming_edges : bool, default=False
         Compute optional mutation attributes after topology construction.
-        Release builds force this compatibility flag off.
+        The annotation pass operates only on existing edges.
     _lightweight_nodes : bool, default=False
         Remove stored gapped arrays from graph nodes.
     _hard_ancestors : bool, default=False
@@ -1507,7 +1586,7 @@ def create_phylo_graph(sequences: Union[Path, Alignment],
     
     # Attach edge attributes (serial by default to avoid nested Ray OOM)
     if _compute_hamming_edges:
-        compute_edge_mutations_star(G=graph, _log_progress=_log_progress, _nested_parallel=_nested_parallel)
+        _annotate_existing_edges_hamming(graph)
 
     role_records = {
         node: {"node_role": "extant" if node in constructor.tip_names else "ancestral"}
@@ -1518,6 +1597,22 @@ def create_phylo_graph(sequences: Union[Path, Alignment],
         "node_role",
         role_records,
         metadata={"description": "Phylogenetic node roles (ancestral vs extant)."},
+    )
+    declare_edge_semantics(
+        graph,
+        constructor="phylogeny",
+        distance_key="branch_length",
+        distance_units="expected_substitutions_per_site",
+        normalized_distance_key=(
+            "normalized_distance" if _compute_hamming_edges else None
+        ),
+        affinity_key=None,
+        conductance_key=None,
+        legacy_aliases={"sim": "hamming_affinity"},
+        notes=(
+            "Phylogenetic branch length is a distance, not conductance. "
+            "Weighted Laplacian analyses require an explicit derived conductance."
+        ),
     )
     return graph
 
@@ -1993,7 +2088,23 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     # add edges with attribute
     if len(edge_weights):
         for i, j, w in zip(rows, cols, edge_weights):
-            graph.add_edge(int(i), int(j), kernel_weight=float(w))
+            affinity = float(w)
+            graph.add_edge(
+                int(i),
+                int(j),
+                affinity=affinity,
+                weight=affinity,
+                kernel_weight=affinity,
+            )
+
+    declare_edge_semantics(
+        graph,
+        constructor="evolutionary-diffusion",
+        affinity_key="affinity",
+        conductance_key="weight",
+        legacy_aliases={"kernel_weight": "affinity"},
+        notes="Conductance is the retained undirected evolutionary-diffusion affinity.",
+    )
 
     for i, seq in enumerate(sequences):
         graph.nodes[i]['sequence'] = seq
@@ -2006,7 +2117,7 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         and getattr(seq, "alphabet", None) == PROT_20
         for seq in sequences
     ):
-        compute_edge_mutations_star(G=graph)
+        _annotate_existing_edges_hamming(graph)
         _logger.info('compute_edge_mutations_star done: wall=%.2fs cpu=%.2fs', time.perf_counter()-_t_ham0, time.process_time()-_c_ham0)
     return graph
     
@@ -2217,7 +2328,7 @@ def _star_block(u, neighbors, seq_u, seqs_v, alphabet, chunk_size, eps):
             mut, eff, dist = expected_hamming_from_aligned(Au, Av)
             set_w[(u, v)] = float(mut)
             set_d[(u, v)] = float(dist)
-            set_s[(u, v)] = float(-np.log(max(dist, eps)))
+            set_s[(u, v)] = _distance_affinity(float(dist))
     return set_w, set_d, set_s
 
 def compute_edge_mutations_star(G: nx.Graph,
@@ -2278,6 +2389,7 @@ def compute_edge_mutations_star(G: nx.Graph,
     if _log_progress:
         _logger.info('compute_edge_mutations_star: start (nodes=%d, edges=%d, chunk=%s)', G.number_of_nodes(), G.number_of_edges(), chunk_size)
     set_w, set_d, set_s = {}, {}, {}
+    node_position = {node: index for index, node in enumerate(G.nodes())}
 
     if G.number_of_edges() == 0:
         return
@@ -2290,7 +2402,10 @@ def compute_edge_mutations_star(G: nx.Graph,
         )
         for u in G.nodes():
             # Avoid duplicate pairs in undirected graphs
-            nbrs = [v for v in G.neighbors(u) if u < v]
+            nbrs = [
+                v for v in G.neighbors(u)
+                if node_position[u] < node_position[v]
+            ]
             if not nbrs:
                 continue
             Pu = _sanitize(G.nodes[u]['sequence'].ungapped_arr)
@@ -2305,7 +2420,7 @@ def compute_edge_mutations_star(G: nx.Graph,
                     mut, eff, dist = expected_hamming_from_aligned(Au, Av)
                     set_w[(u, v)] = float(mut)
                     set_d[(u, v)] = float(dist)
-                    set_s[(u, v)] = float(-np.log(max(dist, eps)))
+                    set_s[(u, v)] = _distance_affinity(float(dist))
     else:
         # Ray-parallel star computation per node
         with ray_runtime(1, purpose="parallel edge mutation alignment") as ray:
@@ -2313,7 +2428,10 @@ def compute_edge_mutations_star(G: nx.Graph,
             tasks = []
             node_list = list(G.nodes())
             for u in node_list:
-                nbrs = [v for v in G.neighbors(u) if u < v]
+                nbrs = [
+                    v for v in G.neighbors(u)
+                    if node_position[u] < node_position[v]
+                ]
                 if not nbrs:
                     continue
                 seqs_v = [G.nodes[v]['sequence'] for v in nbrs]
@@ -2353,9 +2471,9 @@ def compute_edge_mutations_star(G: nx.Graph,
                         _logger.info('compute_edge_mutations_star heartbeat: %d/%d completed%s', done_count, total, rss)
 
     if set_w:
-        nx.set_edge_attributes(G, set_w, "weight")
-        nx.set_edge_attributes(G, set_d, "distance")
-        nx.set_edge_attributes(G, set_s, "sim")
+        nx.set_edge_attributes(G, set_w, "hamming_distance")
+        nx.set_edge_attributes(G, set_d, "normalized_distance")
+        nx.set_edge_attributes(G, set_s, "hamming_affinity")
     if _log_progress:
         _logger.info('compute_edge_mutations_star: complete')
 
@@ -2399,31 +2517,61 @@ def attach_expected_hamming_to_edges(G: nx.Graph,
     if len(node_order) != len(aligned):
         raise ValueError("node_order length must match len(aligned)")
 
-    # Compute pairwise matrices (soft or hard, auto-detected)
-    exp_mut, eff_len, dist = expected_hamming_from_aligned(
-        aligned, gap_at=gap_at, return_norm=True, block_cols=block_cols, eps=eps
-    )
     idx = {n: i for i, n in enumerate(node_order)}
 
-    # Stamp onto existing edges
-    set_weight = {}
-    set_distance = {}
-    set_sim = {}
+    # Compute only existing edges. This avoids the legacy O(n^2) pairwise
+    # allocation when a sparse graph requests Hamming annotation.
+    set_hamming_distance = {}
+    set_normalized_distance = {}
+    set_hamming_affinity = {}
 
     for u, v in G.edges():
         i, j = idx[u], idx[v]
-        w_count  = float(exp_mut[i, j]) # absolute expected mutations (Hamming count)
+        left = np.asarray(aligned[i])
+        right = np.asarray(aligned[j])
+        if left.shape != right.shape:
+            raise ValueError(
+                "Hamming edge annotation requires aligned arrays of equal shape."
+            )
+        if left.ndim == 1:
+            effective_length = float(left.shape[0])
+            mutations = float(np.count_nonzero(left != right))
+            normalized = mutations / max(effective_length, eps)
+        elif left.ndim == 2:
+            mutations, _effective_length, normalized = expected_hamming_from_aligned(
+                left,
+                right,
+                gap_at=gap_at,
+                return_norm=True,
+                block_cols=block_cols,
+                eps=eps,
+            )
+        else:
+            raise ValueError(
+                "Aligned edge arrays must be hard 1-D labels or 2-D posterior matrices."
+            )
+        set_hamming_distance[(u, v)] = float(mutations)
+        set_normalized_distance[(u, v)] = float(normalized)
+        set_hamming_affinity[(u, v)] = _distance_affinity(float(normalized))
 
-        # Normalised distance.
-        w_dist = float(dist[i, j])
+    if set_hamming_distance:
+        nx.set_edge_attributes(G, set_hamming_distance, "hamming_distance")
+        nx.set_edge_attributes(G, set_normalized_distance, "normalized_distance")
+        nx.set_edge_attributes(G, set_hamming_affinity, "hamming_affinity")
 
-        set_weight[(u, v)] = w_count
-        set_distance[(u, v)] = w_dist
-        set_sim[(u, v)] = float(1.0 / (w_count + eps))
 
-    if set_weight:
-        nx.set_edge_attributes(G, set_weight, "weight")
-    if set_distance:
-        nx.set_edge_attributes(G, set_distance, "distance")
-    if set_sim:
-        nx.set_edge_attributes(G, set_sim, "sim")
+def _annotate_existing_edges_hamming(G: nx.Graph) -> None:
+    """Safely annotate only existing edges from already aligned sequences."""
+    node_order = list(G.nodes())
+    aligned = []
+    for node in node_order:
+        sequence = G.nodes[node].get("sequence")
+        if not isinstance(sequence, BaseNumpySequence):
+            raise ValueError(
+                f"Graph node {node!r} lacks a BaseNumpySequence under 'sequence'."
+            )
+        if isinstance(sequence, SoftSequence):
+            aligned.append(np.asarray(sequence.posterior, dtype=float))
+        else:
+            aligned.append(np.asarray(sequence.to_array()))
+    attach_expected_hamming_to_edges(G, aligned, node_order=node_order)

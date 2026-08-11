@@ -7,12 +7,13 @@ import networkx as nx
 import warnings
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
 from ..core.landscape import FitnessLandscape
+from ..core.edge_schema import AUTO_EDGE_KEY, resolve_edge_attribute
 
 
 def eigenmode_decomposition(graph: Union[nx.Graph, FitnessLandscape],
                             k: int = None,
                             matrix: Literal['adjacency', 'laplacian', 'transition', 'norm_laplacian'] = 'laplacian',
-                            weight_key: str = 'weight',
+                            weight_key: str | None = AUTO_EDGE_KEY,
                             dense_threshold: int = 5000) -> Tuple:
     """
     Compute eigenmode decomposition of a graph.
@@ -27,8 +28,9 @@ def eigenmode_decomposition(graph: Union[nx.Graph, FitnessLandscape],
     matrix : str, default = `laplacian`
         The graph matrix to decompose. Either Laplacian matrix or the
         adjacency matrix.
-    weight_key : str, default='weight'
-        Edge attribute used when constructing weighted graph matrices.
+    weight_key : str or None, default="auto"
+        Conductance attribute used to construct graph matrices. ``"auto"``
+        resolves constructor metadata; ``None`` requests unweighted matrices.
     dense_threshold : int, default=5000
         The node threshold count to compute sparse / dense matrices.
         
@@ -41,23 +43,32 @@ def eigenmode_decomposition(graph: Union[nx.Graph, FitnessLandscape],
         graph = graph.graph
     if not isinstance(graph, nx.Graph):
         raise TypeError("graph must be a NetworkX Graph or FitnessLandscape")
+    resolved_weight_key = resolve_edge_attribute(
+        graph,
+        "conductance",
+        weight_key,
+        required=False,
+    )
 
     # Build the requested matrix (prefer sparse)
     if matrix == 'laplacian':
-        M = nx.laplacian_matrix(graph, weight=weight_key).astype(float).tocsr()
+        M = nx.laplacian_matrix(graph, weight=resolved_weight_key).astype(float).tocsr()
         symmetric_psd = True
     
     elif matrix == 'norm_laplacian':
-        M = nx.normalized_laplacian_matrix(graph, weight=weight_key).astype(float).tocsr()
+        M = nx.normalized_laplacian_matrix(
+            graph,
+            weight=resolved_weight_key,
+        ).astype(float).tocsr()
         symmetric_psd = True
     
     elif matrix == 'adjacency':
-        M = nx.adjacency_matrix(graph, weight=weight_key).astype(float).tocsr()
+        M = nx.adjacency_matrix(graph, weight=resolved_weight_key).astype(float).tocsr()
         symmetric_psd = True  # symmetric for undirected graphs (not PSD)
     
     elif matrix == 'transition':
         # Row-stochastic: A D^{-1}
-        A = nx.adjacency_matrix(graph, weight=weight_key).astype(float).tocsr()
+        A = nx.adjacency_matrix(graph, weight=resolved_weight_key).astype(float).tocsr()
         d = np.asarray(A.sum(axis=1)).ravel()
         d[d == 0.0] = 1.0
         Dinv = sp.diags(1.0 / d)
