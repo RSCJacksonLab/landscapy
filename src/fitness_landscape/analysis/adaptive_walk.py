@@ -3,7 +3,42 @@ import networkx as nx
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
 from ..core.landscape import FitnessLandscape
 from ..core.sequence import BaseNumpySequence
-from ..core.graph import create_hamming_graph
+
+
+def _sequence_index(
+    landscape: FitnessLandscape,
+    target: BaseNumpySequence,
+    *,
+    label: str = "Sequence",
+) -> int:
+    """Resolve a sequence argument, preferring object identity for duplicates."""
+    for index, sequence in enumerate(landscape.sequences):
+        if sequence is target:
+            return index
+    matches = [
+        index for index, sequence in enumerate(landscape.sequences) if sequence == target
+    ]
+    if not matches:
+        raise ValueError(f"{label} not found in landscape")
+    if len(matches) > 1:
+        raise ValueError(
+            "Sequence value matches multiple landscape rows; pass the exact sequence object."
+        )
+    return matches[0]
+
+
+def _node_fitness(landscape: FitnessLandscape) -> dict[Any, float]:
+    """Return active scalar fitness keyed by graph-node label."""
+    signal = landscape.get_signal()
+    return {
+        node: float(signal[landscape.sequence_index_for_node(node)])
+        for node in landscape.graph.nodes()
+    }
+
+
+def _random_node(nodes: list[Any]) -> Any:
+    """Choose from arbitrary hashable labels without NumPy coercing tuples."""
+    return nodes[int(np.random.randint(len(nodes)))]
 
 def find_greedy_accessible_paths(landscape: FitnessLandscape, 
                                  start_sequence: BaseNumpySequence,
@@ -30,63 +65,46 @@ def find_greedy_accessible_paths(landscape: FitnessLandscape,
     Dict
         Path analysis results.
     """
-    # Extract sequences
     sequences = landscape.sequences
-    
-    # Find indices of start and end sequences
-    start_idx = None
-    end_idx = None
-    
-    for i, seq in enumerate(sequences):
-        if seq == start_sequence:
-            start_idx = i
-        if seq == end_sequence:
-            end_idx = i
-    
-    if start_idx is None:
-        raise ValueError("Start sequence not found in landscape")
-    if end_idx is None:
-        raise ValueError("End sequence not found in landscape")
+    start_idx = _sequence_index(landscape, start_sequence, label="Start sequence")
+    end_idx = _sequence_index(landscape, end_sequence, label="End sequence")
     
     # Assert graph structure exists in landscape and warn if not Hamming graph.
     assert landscape.graph is not None, \
     'Landscape graph must be initialised.'
     
 
-    # Create directed graph for accessible paths
+    start_node = landscape.node_for_sequence_index(start_idx)
+    end_node = landscape.node_for_sequence_index(end_idx)
+    fitness_by_node = _node_fitness(landscape)
+
     directed_graph = nx.DiGraph()
-    
-    # Add nodes with fitness values
-    for i, seq in enumerate(sequences):
-        directed_graph.add_node(i, fitness=landscape.get_fitness(seq))
-    
-    # Add directed edges for fitness increases
-    for i, j in landscape.graph.edges():
-        fitness_i = landscape.get_fitness(sequences[i])
-        fitness_j = landscape.get_fitness(sequences[j])
-        
-        if fitness_j > fitness_i:
-            directed_graph.add_edge(i, j)
-        elif fitness_i > fitness_j:
-            directed_graph.add_edge(j, i)
+    directed_graph.add_nodes_from(
+        (node, {"fitness": fitness}) for node, fitness in fitness_by_node.items()
+    )
+    for source, target in landscape.graph.edges():
+        if fitness_by_node[target] > fitness_by_node[source]:
+            directed_graph.add_edge(source, target)
+        elif fitness_by_node[source] > fitness_by_node[target]:
+            directed_graph.add_edge(target, source)
     
     # Find all simple paths from start to end
     try:
-        all_paths = list(nx.all_simple_paths(directed_graph, start_idx, end_idx))
+        all_paths = list(nx.all_simple_paths(directed_graph, start_node, end_node))
     except nx.NetworkXNoPath:
         all_paths = []
     
     # Convert path indices to sequences and fitness values
     paths = []
     
-    for path in all_paths:
-        path_sequences = [sequences[i] for i in path]
-        path_fitness = [landscape.get_fitness(seq) for seq in path_sequences]
-        
+    for node_path in all_paths:
+        path_indices = [landscape.sequence_index_for_node(node) for node in node_path]
+        path_sequences = [sequences[index] for index in path_indices]
         paths.append({
-            'indices': path,
+            'nodes': node_path,
+            'indices': path_indices,
             'sequences': path_sequences,
-            'fitness': path_fitness
+            'fitness': [fitness_by_node[node] for node in node_path],
         })
     
     # Calculate path statistics
@@ -106,8 +124,10 @@ def find_greedy_accessible_paths(landscape: FitnessLandscape,
         'max_path_length': max_length,
         'start_sequence': start_sequence,
         'end_sequence': end_sequence,
-        'start_fitness': landscape.get_fitness(start_sequence),
-        'end_fitness': landscape.get_fitness(end_sequence)
+        'start_node': start_node,
+        'end_node': end_node,
+        'start_fitness': fitness_by_node[start_node],
+        'end_fitness': fitness_by_node[end_node],
     }
 
 def analyze_path_accessibility(landscape: FitnessLandscape,
@@ -128,62 +148,30 @@ def analyze_path_accessibility(landscape: FitnessLandscape,
     Dict
         Path accessibility analysis results.
     """
-    # Extract sequences
-    sequences = landscape.sequences
-    
-    # Assert graph structure exists in landscape and warn if not Hamming graph.
     assert landscape.graph is not None, \
     'Landscape graph must be initialised.'
-    
-    # Find local minima and maxima
+    fitness_by_node = _node_fitness(landscape)
+
     local_minima = []
     local_maxima = []
-    
-    for i, seq in enumerate(sequences):
-        # Get fitness of current sequence
-        fitness = landscape.get_fitness(seq)
-        
-        # Get neighbors
-        neighbors = list(landscape.graph.neighbors(i))
-        
-        # Check if local minimum
-        is_minimum = True
-        for neighbor in neighbors:
-            neighbor_fitness = landscape.get_fitness(sequences[neighbor])
-            if neighbor_fitness < fitness:
-                is_minimum = False
-                break
-        
-        if is_minimum:
-            local_minima.append(i)
-        
-        # Check if local maximum
-        is_maximum = True
-        for neighbor in neighbors:
-            neighbor_fitness = landscape.get_fitness(sequences[neighbor])
-            if neighbor_fitness > fitness:
-                is_maximum = False
-                break
-        
-        if is_maximum:
-            local_maxima.append(i)
-    
-    # Create directed graph for accessible paths
+
+    for node in landscape.graph.nodes():
+        neighbors = list(landscape.graph.neighbors(node))
+        fitness = fitness_by_node[node]
+        if all(fitness_by_node[neighbor] >= fitness for neighbor in neighbors):
+            local_minima.append(node)
+        if all(fitness_by_node[neighbor] <= fitness for neighbor in neighbors):
+            local_maxima.append(node)
+
     directed_graph = nx.DiGraph()
-    
-    # Add nodes with fitness values
-    for i, seq in enumerate(sequences):
-        directed_graph.add_node(i, fitness=landscape.get_fitness(seq))
-    
-    # Add directed edges for fitness increases
-    for i, j in landscape.graph.edges():
-        fitness_i = landscape.get_fitness(sequences[i])
-        fitness_j = landscape.get_fitness(sequences[j])
-        
-        if fitness_j > fitness_i:
-            directed_graph.add_edge(i, j)
-        elif fitness_i > fitness_j:
-            directed_graph.add_edge(j, i)
+    directed_graph.add_nodes_from(
+        (node, {"fitness": fitness}) for node, fitness in fitness_by_node.items()
+    )
+    for source, target in landscape.graph.edges():
+        if fitness_by_node[target] > fitness_by_node[source]:
+            directed_graph.add_edge(source, target)
+        elif fitness_by_node[source] > fitness_by_node[target]:
+            directed_graph.add_edge(target, source)
     
     # Analyze paths from each local minimum to each local maximum
     paths_to_maxima = {}
@@ -214,6 +202,12 @@ def analyze_path_accessibility(landscape: FitnessLandscape,
     return {
         'local_minima': local_minima,
         'local_maxima': local_maxima,
+        'local_minima_indices': [
+            landscape.sequence_index_for_node(node) for node in local_minima
+        ],
+        'local_maxima_indices': [
+            landscape.sequence_index_for_node(node) for node in local_maxima
+        ],
         'minima_count': len(local_minima),
         'maxima_count': len(local_maxima),
         'paths_to_maxima': paths_to_maxima,
@@ -243,56 +237,46 @@ def calculate_basin_of_attraction_greedy(landscape: FitnessLandscape,
     Dict
         Basin of attraction analysis results.
     """
-    # Extract sequences
     sequences = landscape.sequences
-    
-    # Find index of local optimum
-    optimum_idx = None
-    
-    for i, seq in enumerate(sequences):
-        if seq == local_optimum:
-            optimum_idx = i
-            break
-    
-    if optimum_idx is None:
-        raise ValueError("Local optimum not found in landscape")
+    optimum_idx = _sequence_index(landscape, local_optimum, label="Local optimum")
     
     # Assert graph structure exists in landscape and warn if not Hamming graph.
     assert landscape.graph is not None, \
     'Landscape graph must be initialised.'
     
-    # Verify that the sequence is a local optimum
-    optimum_fitness = landscape.get_fitness(local_optimum)
-    neighbors = list(landscape.graph.neighbors(optimum_idx))
+    optimum_node = landscape.node_for_sequence_index(optimum_idx)
+    fitness_by_node = _node_fitness(landscape)
+    optimum_fitness = fitness_by_node[optimum_node]
+    neighbors = list(landscape.graph.neighbors(optimum_node))
     
     for neighbor in neighbors:
-        neighbor_fitness = landscape.get_fitness(sequences[neighbor])
-        if neighbor_fitness > optimum_fitness:
+        if fitness_by_node[neighbor] > optimum_fitness:
             raise ValueError("Specified sequence is not a local optimum")
     
     # Calculate basin of attraction
     basin = set()
     
     # For each sequence, check if adaptive walk leads to the optimum
-    for i, seq in enumerate(sequences):
+    for node in landscape.graph.nodes():
         # Skip the optimum itself
-        if i == optimum_idx:
-            basin.add(i)
+        if node == optimum_node:
+            basin.add(node)
             continue
         
         # Simulate adaptive walk
-        current_idx = i
-        current_fitness = landscape.get_fitness(sequences[current_idx])
-        
-        visited = set([current_idx])
+        current_node = node
+        current_fitness = fitness_by_node[current_node]
+        visited = {current_node}
         reached_optimum = False
         
         while True:
             # Get neighbors
-            neighbors = list(landscape.graph.neighbors(current_idx))
+            neighbors = list(landscape.graph.neighbors(current_node))
+            if not neighbors:
+                break
             
             # Get fitness of neighbors
-            neighbor_fitness = [landscape.get_fitness(sequences[j]) for j in neighbors]
+            neighbor_fitness = [fitness_by_node[neighbor] for neighbor in neighbors]
             
             # Find best neighbor
             best_idx = np.argmax(neighbor_fitness)
@@ -304,22 +288,21 @@ def calculate_basin_of_attraction_greedy(landscape: FitnessLandscape,
                 break
             
             # Check if we've reached the target optimum
-            if best_neighbor == optimum_idx:
+            if best_neighbor == optimum_node:
                 reached_optimum = True
                 break
             
             # Update current position
-            current_idx = best_neighbor
+            current_node = best_neighbor
             current_fitness = best_fitness
             
             # Check for cycles
-            if current_idx in visited:
+            if current_node in visited:
                 break
-            
-            visited.add(current_idx)
+            visited.add(current_node)
         
         if reached_optimum:
-            basin.add(i)
+            basin.add(node)
     
     # Calculate basin statistics
     basin_size = len(basin)
@@ -327,9 +310,12 @@ def calculate_basin_of_attraction_greedy(landscape: FitnessLandscape,
     
     return {
         'basin': list(basin),
+        'basin_indices': [landscape.sequence_index_for_node(node) for node in basin],
         'basin_size': basin_size,
         'basin_fraction': basin_fraction,
         'optimum': local_optimum,
+        'optimum_node': optimum_node,
+        'optimum_index': optimum_idx,
         'optimum_fitness': optimum_fitness
     }
 
@@ -374,41 +360,39 @@ def calculate_basin_of_attraction_stochastic(landscape: FitnessLandscape,
     if not sequences or landscape.graph is None:
         raise ValueError("Landscape must contain sequences and an initialized graph.")
 
-    # Find the index of the target local optimum
-    try:
-        optimum_idx = sequences.index(local_optimum)
-    except ValueError:
-        raise ValueError("Local optimum not found in the landscape's sequences.")
-
-    optimum_fitness = landscape.get_fitness(local_optimum)
+    optimum_idx = _sequence_index(landscape, local_optimum, label="Local optimum")
+    optimum_node = landscape.node_for_sequence_index(optimum_idx)
+    fitness_by_node = _node_fitness(landscape)
+    optimum_fitness = fitness_by_node[optimum_node]
     basin_probabilities = {}
     basin_sequences = set()
 
     # For each sequence in the landscape, estimate its probability of reaching the optimum
-    for i, start_seq in enumerate(sequences):
-        if i == optimum_idx:
-            basin_probabilities[i] = 1.0
+    for start_node in landscape.graph.nodes():
+        if start_node == optimum_node:
+            basin_probabilities[start_node] = 1.0
             continue
 
         successful_walks = 0
         for _ in range(n_simulations):
-            current_idx = i
+            current_node = start_node
+            reached = False
             
-            for step in range(max_steps):
-                if current_idx == optimum_idx:
-                    successful_walks += 1
-                    break # Walk successfully reached the optimum
+            for _step in range(max_steps):
+                if current_node == optimum_node:
+                    reached = True
+                    break
 
-                current_fitness = landscape.get_fitness(sequences[current_idx])
-                neighbors = list(landscape.graph.neighbors(current_idx))
+                current_fitness = fitness_by_node[current_node]
+                neighbors = list(landscape.graph.neighbors(current_node))
                 
                 if not neighbors:
                     # Trapped at a node with no neighbors
                     break 
 
                 # Propose a random move to a neighbor
-                proposed_neighbor_idx = np.random.choice(neighbors)
-                proposed_fitness = landscape.get_fitness(sequences[proposed_neighbor_idx])
+                proposed_neighbor = _random_node(neighbors)
+                proposed_fitness = fitness_by_node[proposed_neighbor]
                 
                 # Calculate the acceptance probability
                 delta_fitness = proposed_fitness - current_fitness
@@ -419,13 +403,14 @@ def calculate_basin_of_attraction_stochastic(landscape: FitnessLandscape,
                 
                 # Accept or reject the move
                 if np.random.rand() < acceptance_prob:
-                    current_idx = proposed_neighbor_idx
-            
-            if current_idx == optimum_idx and step < max_steps -1 :
-                successful_walks +=1
+                    current_node = proposed_neighbor
+            if current_node == optimum_node:
+                reached = True
+            if reached:
+                successful_walks += 1
 
         # Calculate the probability of belonging to the basin
-        basin_probabilities[i] = successful_walks / n_simulations
+        basin_probabilities[start_node] = successful_walks / n_simulations
 
     # A sequence is in the basin if its probability exceeds the threshold
     for idx, prob in basin_probabilities.items():
@@ -434,11 +419,20 @@ def calculate_basin_of_attraction_stochastic(landscape: FitnessLandscape,
 
     return {
         'basin': list(basin_sequences),
+        'basin_indices': [
+            landscape.sequence_index_for_node(node) for node in basin_sequences
+        ],
         'basin_size': len(basin_sequences),
         'basin_fraction': len(basin_sequences) / len(sequences),
         'optimum': local_optimum,
+        'optimum_node': optimum_node,
+        'optimum_index': optimum_idx,
         'optimum_fitness': optimum_fitness,
         'basin_probabilities': basin_probabilities,
+        'basin_probabilities_by_index': {
+            landscape.sequence_index_for_node(node): probability
+            for node, probability in basin_probabilities.items()
+        },
         'parameters': {
             'n_simulations': n_simulations,
             'max_steps': max_steps,
@@ -479,39 +473,34 @@ def adaptive_walk_stochastic(landscape: FitnessLandscape,
     if not sequences:
         raise ValueError("Landscape contains no sequences")
     
-    # Create Hamming graph if not already present
     if landscape.graph is None:
-        landscape.graph = create_hamming_graph(sequences, 
-                                              [landscape.get_fitness(seq) for seq in sequences])
+        raise ValueError("Landscape graph must be initialized before an adaptive walk.")
+
+    fitness_by_node = _node_fitness(landscape)
     
     # Determine start sequence
     if start_sequence is None:
-        # Choose random sequence
         start_idx = np.random.choice(len(sequences))
         start_sequence = sequences[start_idx]
     else:
-        # Find index of start sequence
-        for i, seq in enumerate(sequences):
-            if seq == start_sequence:
-                start_idx = i
-                break
-        else:
-            raise ValueError("Start sequence not found in landscape")
+        start_idx = _sequence_index(landscape, start_sequence, label="Start sequence")
+
+    start_node = landscape.node_for_sequence_index(int(start_idx))
     
     # Initialize walk
-    current_idx = start_idx
-    current_fitness = landscape.get_fitness(sequences[current_idx])
-    
-    walk_indices = [current_idx]
+    current_node = start_node
+    current_fitness = fitness_by_node[current_node]
+
+    walk_nodes = [current_node]
     walk_fitness = [current_fitness]
     
     # Perform walk
     for step in range(max_steps):
         # Get neighbors
-        neighbors = list(landscape.graph.neighbors(current_idx))
+        neighbors = list(landscape.graph.neighbors(current_node))
         
         # Get fitness of neighbors
-        neighbor_fitness = [landscape.get_fitness(sequences[i]) for i in neighbors]
+        neighbor_fitness = [fitness_by_node[node] for node in neighbors]
         
         # Find neighbors with higher fitness
         better_indices = [i for i, fitness in enumerate(neighbor_fitness) 
@@ -525,28 +514,30 @@ def adaptive_walk_stochastic(landscape: FitnessLandscape,
         if strategy == 'greedy':
             # Choose neighbor with highest fitness
             best_idx = np.argmax(neighbor_fitness)
-            next_idx = neighbors[best_idx]
+            next_node = neighbors[best_idx]
         elif strategy == 'random_improvement':
             # Choose random neighbor with higher fitness
             better_neighbors = [neighbors[i] for i in better_indices]
-            next_idx = np.random.choice(better_neighbors)
+            next_node = _random_node(better_neighbors)
         else:
             raise ValueError(f"Unsupported walk strategy: {strategy}")
         
         # Update current position
-        current_idx = next_idx
-        current_fitness = landscape.get_fitness(sequences[current_idx])
+        current_node = next_node
+        current_fitness = fitness_by_node[current_node]
         
         # Update walk
-        walk_indices.append(current_idx)
+        walk_nodes.append(current_node)
         walk_fitness.append(current_fitness)
     
     # Calculate walk statistics
-    steps_taken = len(walk_indices) - 1
+    walk_indices = [landscape.sequence_index_for_node(node) for node in walk_nodes]
+    steps_taken = len(walk_nodes) - 1
     fitness_gain = walk_fitness[-1] - walk_fitness[0]
     
     return {
         'walk_indices': walk_indices,
+        'walk_nodes': walk_nodes,
         'walk_fitness': walk_fitness,
         'steps_taken': steps_taken,
         'fitness_gain': fitness_gain,
@@ -574,26 +565,20 @@ def neutral_network_analysis(landscape: FitnessLandscape,
     dict
         Neutral network analysis results.
     """
-    # Extract sequences and fitness values
-    sequences = landscape.sequences
-    fitness_values = np.array([landscape.get_fitness(seq) for seq in sequences])
-    
-    # Create Hamming graph if not already present
     if landscape.graph is None:
-        landscape.graph = create_hamming_graph(sequences, fitness_values)
+        raise ValueError("Landscape graph must be initialized before neutral-network analysis.")
+    fitness_by_node = _node_fitness(landscape)
     
     # Create neutral network graph
     neutral_graph = nx.Graph()
     
-    # Add all nodes
-    for i in range(len(sequences)):
-        neutral_graph.add_node(i, fitness=fitness_values[i])
+    for node in landscape.graph.nodes():
+        neutral_graph.add_node(node, fitness=fitness_by_node[node])
     
     # Add edges between neutral neighbors
-    for i, j in landscape.graph.edges():
-        # Check if fitness difference is within threshold
-        if abs(fitness_values[i] - fitness_values[j]) <= threshold:
-            neutral_graph.add_edge(i, j)
+    for source, target in landscape.graph.edges():
+        if abs(fitness_by_node[source] - fitness_by_node[target]) <= threshold:
+            neutral_graph.add_edge(source, target)
     
     # Find connected components (neutral networks)
     components = list(nx.connected_components(neutral_graph))
@@ -606,7 +591,7 @@ def neutral_network_analysis(landscape: FitnessLandscape,
         component = list(component)
         
         # Calculate statistics
-        network_fitness = [fitness_values[j] for j in component]
+        network_fitness = [fitness_by_node[node] for node in component]
         mean_fitness = np.mean(network_fitness)
         std_fitness = np.std(network_fitness)
         size = len(component)
@@ -625,7 +610,10 @@ def neutral_network_analysis(landscape: FitnessLandscape,
             'mean_fitness': mean_fitness,
             'std_fitness': std_fitness,
             'diameter': diameter,
-            'nodes': component
+            'nodes': component,
+            'sequence_indices': [
+                landscape.sequence_index_for_node(node) for node in component
+            ],
         })
     
     # Sort networks by size (largest first)

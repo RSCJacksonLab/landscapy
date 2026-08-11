@@ -223,6 +223,8 @@ def compute_persistent_homology(landscape: FitnessLandscape,
         "persistence_intervals": persistence_intervals,
         "betti_numbers": betti_numbers,
         "stats": stats,
+        "node_order": list(landscape.graph.nodes()),
+        "vertex_to_node": dict(enumerate(landscape.graph.nodes())),
     }
 
 

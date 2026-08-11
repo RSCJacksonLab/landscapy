@@ -1,6 +1,6 @@
 import numpy as np
 import networkx as nx
-from typing import List, Union, Dict
+from typing import Hashable, List, Union, Dict
 from ..core.landscape import FitnessLandscape
 
 def calculate_ruggedness_dirichlet_energy(landscape: FitnessLandscape,
@@ -29,15 +29,21 @@ def calculate_ruggedness_dirichlet_energy(landscape: FitnessLandscape,
         The Dirichlet energy results dict.
     """
 
-    if weighted_laplacian: 
+    node_order = list(landscape.graph.nodes())
+    if weighted_laplacian:
         # Weighted Laplacian for kNN graphs.
-        laplacian = nx.laplacian_matrix(G=landscape.graph, weight='weight').toarray()
+        laplacian = nx.laplacian_matrix(
+            G=landscape.graph, nodelist=node_order, weight='weight'
+        ).toarray()
     else:
-        laplacian = nx.laplacian_matrix(G=landscape.graph).toarray()
+        laplacian = nx.laplacian_matrix(
+            G=landscape.graph, nodelist=node_order
+        ).toarray()
 
     results = {}
 
-    signal = landscape.get_signal()
+    signal = landscape.get_node_signal(node_order)
+    fitness_by_node = dict(zip(node_order, signal))
 
     # The formula for total Dirichlet energy is f' * L * f
     total_de = signal @ laplacian @ signal
@@ -61,8 +67,8 @@ def calculate_ruggedness_dirichlet_energy(landscape: FitnessLandscape,
             edge_de = 0.0
             
             for u, v in edge_list:
-                fitness1 = landscape.graph.nodes[u].get('fitness', 0.0)
-                fitness2 = landscape.graph.nodes[v].get('fitness', 0.0)
+                fitness1 = fitness_by_node[u]
+                fitness2 = fitness_by_node[v]
                 
                 current_edge_weight = landscape.graph.edges[u, v].get('weight', 1.0)
                 edge_de += _sum_dirichlet_energy(fitness1=fitness1,
@@ -116,7 +122,9 @@ def _collect_edges(landscape: Union[FitnessLandscape, nx.Graph],
             selected_edges.append((u, v))
     return selected_edges
 
-def local_dirichlet_energy_contribution(landscape: FitnessLandscape) -> Dict[int, float]:
+def local_dirichlet_energy_contribution(
+    landscape: FitnessLandscape,
+) -> Dict[Hashable, float]:
     """Calculate each node's local contribution to Dirichlet energy.
 
     Parameters
@@ -126,7 +134,7 @@ def local_dirichlet_energy_contribution(landscape: FitnessLandscape) -> Dict[int
 
     Returns
     -------
-    dict of int to float
+    dict of hashable to float
         Half the sum of squared fitness differences over each node's incident
         edges. Summing these values counts each undirected edge once overall.
 
@@ -142,10 +150,12 @@ def local_dirichlet_energy_contribution(landscape: FitnessLandscape) -> Dict[int
     fitness_values = landscape.get_signal()
     local_energies = {}
 
-    for i in graph.nodes():
+    for node in graph.nodes():
+        sequence_index = landscape.sequence_index_for_node(node)
         local_sum = 0
-        for j in graph.neighbors(i):
-            local_sum += (fitness_values[i] - fitness_values[j])**2
-        local_energies[i] = 0.5 * local_sum
+        for neighbor in graph.neighbors(node):
+            neighbor_index = landscape.sequence_index_for_node(neighbor)
+            local_sum += (fitness_values[sequence_index] - fitness_values[neighbor_index])**2
+        local_energies[node] = 0.5 * local_sum
         
     return local_energies

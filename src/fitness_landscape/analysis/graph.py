@@ -29,6 +29,12 @@ def graph_properties(graph: Union[FitnessLandscape, nx.Graph]) -> Dict:
         Dictionary of graph properties.
     """
     
+    graph = graph.graph if isinstance(graph, FitnessLandscape) else graph
+    if not isinstance(graph, nx.Graph):
+        raise TypeError("graph must be a NetworkX graph or FitnessLandscape")
+    if graph.number_of_nodes() == 0:
+        raise ValueError("Graph properties are undefined for an empty graph.")
+
     properties = ['degree', 'clustering', 'path_length', 'components', 'density']
     
     results = {}
@@ -145,9 +151,7 @@ def annotate_louvain_communities(
     except Exception:
         modularity_score = None
 
-    node_index_map = getattr(landscape, "_nodes_by_index", None)
-    if node_index_map is None:
-        raise RuntimeError("Landscape is missing node index mapping; cannot align annotations.")
+    node_index_map = landscape.sequence_index_to_node
 
     n = len(landscape.sequences)
     community_ids: list[Optional[int]] = [None] * n
@@ -214,7 +218,6 @@ def calculate_ruggedness_local_optima(landscape: FitnessLandscape,
     Dict
         The results dictionary.
     """
-    # Extract sequences
     sequences = landscape.sequences
     
     if not sequences:
@@ -223,32 +226,25 @@ def calculate_ruggedness_local_optima(landscape: FitnessLandscape,
     assert landscape.graph is not None, \
     'Landscape graph must be initialised.'
     
-    # Find local optima
+    signal = landscape.get_signal()
     local_optima = []
-    
-    for i, seq in enumerate(sequences):
-        # Get fitness of current sequence
-        fitness = landscape.get_fitness(seq)
-        
-        # Get neighbors
-        neighbors = list(landscape.graph.neighbors(i))
-        
-        # Check if fitness is higher than all neighbors
-        is_local_optimum = True
-        for neighbor in neighbors:
-            neighbor_fitness = landscape.get_fitness(sequences[neighbor])
-            if neighbor_fitness > fitness:
-                is_local_optimum = False
-                break
-        
-        if is_local_optimum:
-            local_optima.append(i)
+    for node in landscape.graph.nodes():
+        sequence_index = landscape.sequence_index_for_node(node)
+        fitness = signal[sequence_index]
+        if all(
+            signal[landscape.sequence_index_for_node(neighbor)] <= fitness
+            for neighbor in landscape.graph.neighbors(node)
+        ):
+            local_optima.append(node)
     
     # Calculate density of local optima
     density = len(local_optima) / len(sequences)
     
     # Calculate fitness statistics of local optima
-    local_optima_fitness = [landscape.get_fitness(sequences[i]) for i in local_optima]
+    local_optima_indices = [
+        landscape.sequence_index_for_node(node) for node in local_optima
+    ]
+    local_optima_fitness = [signal[index] for index in local_optima_indices]
     
     if local_optima_fitness:
         mean_fitness = np.mean(local_optima_fitness)
@@ -261,7 +257,8 @@ def calculate_ruggedness_local_optima(landscape: FitnessLandscape,
     return {
         'local_optima_count': len(local_optima),
         'local_optima_density': density,
-        'local_optima_indices': local_optima,
+        'local_optima': local_optima,
+        'local_optima_indices': local_optima_indices,
         'mean_fitness': mean_fitness,
         'std_fitness': std_fitness,
         'max_fitness': max_fitness,
@@ -310,6 +307,7 @@ def graph_spectral_analysis(landscape: FitnessLandscape,
         'participation_ratios': pr,
         'localization': ipr,
         'node_centralities': node_c,
+        'node_order': list(landscape.graph.nodes()),
     }
     if m >= 2:
         # ascending-ordered eigenvalues => spectral gap between first two
@@ -875,7 +873,8 @@ def resistance_distance_matrix(graph: Union[FitnessLandscape, nx.Graph],
             raise ValueError(f"Unknown sample_method '{sample_method}'.")
         if sample_method == "random":
             rng = np.random.default_rng(sample_seed)
-            node_order = rng.choice(node_order, size=target, replace=False).tolist()
+            positions = rng.choice(len(node_order), size=target, replace=False)
+            node_order = [node_order[int(position)] for position in positions]
         else:
             node_order = node_order[:target]
     agg_mode = aggregation_function.lower()
@@ -1169,5 +1168,10 @@ def category_diffusion_hierarchy(
         "linkage": linkage_matrix,
         "dendrogram_order": dendrogram_order,
         "kept_node_indices": kept_indices,
+        "kept_nodes": [node_order[index] for index in kept_indices],
+        "kept_sequence_indices": [
+            landscape.sequence_index_for_node(node_order[index])
+            for index in kept_indices
+        ],
         "filtered_node_count": len(node_order) - len(kept_indices),
     }

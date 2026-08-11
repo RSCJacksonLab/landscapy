@@ -734,11 +734,11 @@ def compute_ruggedness_diffusion_scale(landscape: FitnessLandscape,
     """
     # Use current active fitness layer.
     if fitness_layer is None:
-        signal = landscape.get_signal()
+        signal = landscape.get_node_signal()
     # View a key valued fitness layer instead.
     else:
         _ = landscape.view(fitness_layer)
-        signal = landscape.get_signal()
+        signal = landscape.get_node_signal()
     
     # Make sure not directed graph.
     if not isinstance(landscape.graph, nx.Graph):
@@ -987,7 +987,8 @@ def compute_ruggedness_variance_energy(landscape: FitnessLandscape,
         expected local energy.
     """
     G = landscape.graph
-    signal = landscape.get_signal() 
+    node_order = list(G.nodes())
+    signal = landscape.get_node_signal(node_order)
 
     # Estimate t if not given
     if t is None:
@@ -1036,6 +1037,10 @@ def compute_ruggedness_variance_energy(landscape: FitnessLandscape,
     return {
         'covariance_matrix': Sigma,
         'expected_local_energy': local_E,
+        'expected_local_energy_by_node': {
+            node: float(local_E[index]) for index, node in enumerate(node_order)
+        },
         'expected_global_energy': float(global_E),
         't_used': t_value,
+        'node_order': node_order,
     }

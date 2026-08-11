@@ -500,6 +500,89 @@ class FitnessLandscape:
     def sequence_index_to_node(self) -> dict[int, Hashable]:
         """Return the canonical sequence-index to graph-node mapping."""
         return dict(self._nodes_by_index)
+
+    def sequence_index_for_node(self, node: Hashable) -> int:
+        """Return the canonical sequence row for a graph node.
+
+        Parameters
+        ----------
+        node : hashable
+            Graph-node label.
+
+        Returns
+        -------
+        int
+            Position in :attr:`sequences` and every aligned data layer.
+
+        Raises
+        ------
+        KeyError
+            If the node is not part of this landscape.
+        """
+        try:
+            return self._index_by_node[node]
+        except KeyError as error:
+            raise KeyError(f"Graph node {node!r} is not part of this landscape.") from error
+
+    def node_for_sequence_index(self, sequence_index: int) -> Hashable:
+        """Return the graph node aligned with a sequence row.
+
+        Parameters
+        ----------
+        sequence_index : int
+            Zero-based position in :attr:`sequences`.
+
+        Returns
+        -------
+        hashable
+            Graph-node label.
+
+        Raises
+        ------
+        IndexError
+            If the sequence index is outside the landscape.
+        """
+        try:
+            return self._nodes_by_index[sequence_index]
+        except KeyError as error:
+            raise IndexError(
+                f"Sequence index {sequence_index} is outside [0, {len(self.sequences)})."
+            ) from error
+
+    def sequence_for_node(self, node: Hashable) -> BaseNumpySequence:
+        """Return the sequence row aligned with a graph node.
+
+        Parameters
+        ----------
+        node : hashable
+            Graph-node label.
+
+        Returns
+        -------
+        BaseNumpySequence
+            Sequence aligned with ``node``.
+        """
+        return self.sequences[self.sequence_index_for_node(node)]
+
+    def get_node_signal(self, nodes: Sequence[Hashable] | None = None) -> np.ndarray:
+        """Return active fitness values in an explicit graph-node order.
+
+        Parameters
+        ----------
+        nodes : sequence of hashable, optional
+            Requested graph-node order. Defaults to NetworkX iteration order.
+
+        Returns
+        -------
+        ndarray
+            Scalar fitness values aligned with ``nodes``.
+        """
+        node_order = list(self.graph.nodes()) if nodes is None else list(nodes)
+        signal = self.get_signal()
+        return np.asarray(
+            [signal[self.sequence_index_for_node(node)] for node in node_order],
+            dtype=float,
+        )
     
     def _build_sequence_index(self) -> Dict[Tuple, int]:
         """
