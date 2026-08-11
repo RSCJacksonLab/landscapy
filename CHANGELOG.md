@@ -42,6 +42,9 @@ All notable changes to Landscapy are documented here.
 - Replaced order-dependent diffusion edge weights and stationary marginals
   with a reversible lazy transition and symmetric stationary-measure kernel;
   stationary limits are now evaluated within communicating components.
+- Corrected random-walk Laplacian eigenmodes by solving the similar symmetric
+  normalized operator and mapping real right modes back to the transition
+  operator, including explicit stationary modes for isolated nodes.
 
 ### Removed
 
