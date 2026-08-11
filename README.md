@@ -11,6 +11,10 @@ The `0.9` publication release is intentionally limited to undirected fitness
 landscapes. It includes the analysis methods used by the accompanying
 application note and deterministic export to portable landscape bundles.
 
+> Branch note: `feature/directed-landscapes-v2` restores the experimental
+> directed-landscape implementation for continued development. The publication
+> branches remain limited to undirected landscapes.
+
 The following experimental areas are not part of this release:
 
 - directed graphs and directed fitness landscapes;

@@ -5,7 +5,8 @@ from typing import Any
 from fitness_landscape.core.sequence import *
 from fitness_landscape.core.graph import *
 from fitness_landscape.core.graph import _encode_multiallele 
-from fitness_landscape.core.landscape import FitnessLandscape, to_csv_landscape, read_csv_landscape
+from fitness_landscape.core.digraph import *
+from fitness_landscape.core.landscape import FitnessLandscape, DirectedFitnessLandscape, to_csv_landscape, read_csv_landscape
 from fitness_landscape.core.fitness import (
     NumericFitness,
     CategoricalFitness,
@@ -18,6 +19,8 @@ import pandas as pd
 from torch_geometric.data import Data
 from fitness_landscape.core.fitness import NumericFitness, CategoricalFitness, ProbabilisticCategoricalFitness
 from pathlib import Path
+from fitness_landscape.phylo._sub_matrices import nq_pfam
+from fitness_landscape.embedding.particle_sampler import SequenceGenerator, TopPSampler
 from unittest.mock import patch
 from cogent3 import get_moltype
 from fitness_landscape.core.annotation import register_auto_annotation
@@ -37,6 +40,20 @@ def test_hamming_graph_multiallele_smoke_largeish(n, L, B):
     # It’s possible (but unlikely) to be empty if all rows identical; allow >=0 and check typical case >0
     assert G.number_of_edges() >= 0
 
+@pytest.fixture
+def mock_embedder(mocker):
+    """Mocks the ESMEmbedder to avoid loading a real model."""
+    embedder = mocker.MagicMock()
+    embedder.alphabet = list('ACDEFGHIKLMNPQRSTVWY-') + ['<cls>', '<eos>', '<pad>', '<mask>']
+    embedder.embed_relaxed_seqs.return_value = np.random.rand(10, 320)
+    embedder.lm_output_probabilities.return_value = [np.random.rand(5, 25) for _ in range(10)]
+    return embedder
+
+@pytest.fixture
+def sequence_generator(mock_embedder):
+    """Provides a SequenceGenerator with a mocked embedder."""
+    sampler = TopPSampler()
+    return SequenceGenerator(embedder=mock_embedder, sampler=sampler, batch_size=10)
 
 @pytest.fixture
 def basic_landscape():
@@ -598,7 +615,83 @@ def test_read_from_fasta(tmp_path: Path):
     assert sequences[0].id == "seq1"
     assert np.array_equal(sequences[1].to_array(), list("GATTACA"))
 
+@pytest.mark.skip(reason="Temporarily disabled: piqtree Python wrapper can core dump under pytest capture; revisit once stabilized.")
+def test_create_phylo_digraph_from_fasta(phylo_test_data: Path):
+    """
+    Tests that create_phylo_digraph correctly builds a directed graph
+    from a FASTA file, inferring the tree and ancestral states.
+    """
+    # Run the constructor
+    digraph = create_phylo_digraph(sequences=phylo_test_data)
+    assert isinstance(digraph, nx.DiGraph), "The output should be a NetworkX DiGraph."
+    assert digraph.number_of_nodes() == 5, "Expected 3 tip nodes and 2 ancestral nodes."
+    assert digraph.number_of_edges() == 4, "Expected 4 edges in the phylogenetic tree."
+    assert isinstance(digraph.nodes['seq1']['sequence'], BaseNumpySequence)
+    internal_node = [n for n in digraph.nodes if n not in ['seq1', 'seq2', 'seq3']][0]
+    assert 'sequence' in digraph.nodes[internal_node]
 
+def test_create_evol_diffusion_digraph(diffusion_test_data):
+    """
+    Tests that the evolutionary diffusion graph constructor correctly
+    builds a directed graph using k-NN filtering and soft alignment scoring.
+    """
+    sequences, embeddings = diffusion_test_data
+
+
+    G = create_evol_diffusion_digraph(
+        sequences=sequences,
+        embeddings=embeddings,
+        replacement_matrix=nq_pfam,
+        k=1, # Each node finds only its single nearest neighbor
+        t=2,
+        tau=0.1 # A low tau to create a sharp kernel
+    )
+
+    assert isinstance(G, nx.DiGraph), "The output should be a NetworkX DiGraph."
+    assert G.number_of_nodes() == 3, "Graph should have 3 nodes."
+
+def test_parent_selector():
+    """Tests that the ParentSelector selects the correct number of candidates."""
+    selector = ParentSelector(max_state_size=5)
+    candidates = list(range(10))
+    weights = np.random.rand(10).tolist()
+    selected = selector.select(list(zip(candidates, weights)))
+    assert len(selected) == 5
+
+def test_sampler_initialization(sequence_generator):
+    """Tests that the EvolutionParticleSampler initializes correctly."""
+    selector = ParentSelector(max_state_size=2)
+    sampler = EvolutionParticleSampler(
+        generator=sequence_generator,
+        selector=selector,
+        n_samples=2,
+        traj_length=5
+    )
+    sampler.initialize(seed_sequences=["ACDEF"])
+
+    assert isinstance(sampler.G, nx.DiGraph)
+    assert sampler.G.number_of_nodes() == 1
+    node_data = list(sampler.G.nodes(data=True))[0][1]
+    assert isinstance(node_data['sequence'], BaseNumpySequence)
+    assert node_data['sequence'].to_str() == "ACDEF"
+
+def test_sampler_step(sequence_generator):
+    """Tests a single step of the sampler to ensure it adds nodes and edges."""
+    selector = ParentSelector(max_state_size=1)
+    sampler = EvolutionParticleSampler(
+        generator=sequence_generator,
+        selector=selector,
+        n_samples=10,
+        traj_length=10
+    )
+    sampler.initialize(seed_sequences=["ACGT"])
+
+    initial_nodes = sampler.G.number_of_nodes()
+    sampler._step()
+
+    # More tests on function would be good
+    newly_added_nodes = sampler.G.number_of_nodes() - initial_nodes
+    assert isinstance(sampler.G, nx.DiGraph)
     
 @pytest.mark.skip(reason="Temporarily disabled: piqtree Python wrapper can core dump under pytest capture; revisit once stabilized.")
 def test_create_phylo_graph_returns_undirected_graph(phylo_test_data):
@@ -884,6 +977,34 @@ def test_create_evol_diffusion_graph_is_undirected_and_symmetric(diffusion_test_
     adj_matrix = nx.to_numpy_array(graph)
     assert np.allclose(adj_matrix, adj_matrix.T), "The adjacency matrix of an undirected graph must be symmetric."
 
+
+def test_directed_landscape_build_attaches_auto_annotations():
+    """register_auto_annotation metadata becomes an AnnotationLayer in DirectedFitnessLandscape."""
+    seq_a = BaseNumpySequence.from_string("ACDE", alphabet=PROT_20, sequence_id="a")
+    seq_b = BaseNumpySequence.from_string("ACDF", alphabet=PROT_20, sequence_id="b")
+
+    G = nx.DiGraph()
+    G.add_node("a", sequence=seq_a)
+    G.add_node("b", sequence=seq_b)
+    G.add_edge("a", "b")
+
+    register_auto_annotation(
+        G,
+        "node_role",
+        {"a": {"node_role": "terminal"}, "b": {"node_role": "steiner"}},
+        metadata={"source": "unit-test"},
+    )
+
+    landscape = DirectedFitnessLandscape.build(
+        sequences=[seq_a, seq_b],
+        digraph=G,
+        attach_embeddings=False,
+    )
+
+    layer = landscape.annotation_layers.get("node_role")
+    assert layer is not None
+    frame = layer.to_dataframe()
+    assert list(frame["node_role"]) == ["terminal", "steiner"]
 
 def test_hamming_graph_binary_hypercube_degree_and_edges():
     """

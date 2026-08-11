@@ -29,6 +29,7 @@ dependencies = [
   "cogent3==2025.7.10a10",
   "faiss-cpu>=1.11",
   "gudhi>=3.11",
+  "matplotlib>=3.7",
   "networkx>=3.2",
   "numpy>=1.24",
   "pandas>=2.3",

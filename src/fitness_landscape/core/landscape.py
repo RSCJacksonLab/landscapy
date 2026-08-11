@@ -21,6 +21,13 @@ from .graph import (
     create_evol_diffusion_graph,
     compute_edge_mutations_star,
 )
+from .digraph import (
+    create_phylo_digraph,
+    create_evol_diffusion_digraph,
+    create_particle_filter_digraph,
+    create_plm_interpolation_digraph,
+    create_trajectory_digraph,
+)
 from .fitness import (
     NumericFitness,
     CategoricalFitness,
@@ -45,7 +52,6 @@ import warnings
 from .._const import PROT_20, ALPHABET_21
 from ..phylo.phylogenetic_asr import ASRConstructor
 from xml.etree.ElementTree import Element, SubElement, ElementTree
-
 
 
 GraphCtor = Callable[..., nx.Graph]
@@ -288,11 +294,6 @@ class FitnessLandscape:
                  embedding_metadata: Mapping[str, Mapping[str, Any]] | None = None,
                  _build_sequence_indexes: bool = True):
         
-        if graph.is_directed():
-            raise TypeError(
-                "FitnessLandscape requires an undirected networkx graph."
-            )
-
         # Initialize Core Attributes with pre-computed objects
         self.sequences = sequences
         self.graph = graph
@@ -3120,6 +3121,249 @@ class FitnessLandscape:
     def __repr__(self):
         return f"{self.__class__.__name__}(n_sequences={len(self.sequences)})"
 
+
+class DirectedFitnessLandscape(FitnessLandscape):
+    """
+    A fitness landscape represented by a directed graph, typically
+    for phylogenetic or evolutionary trajectory data.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not isinstance(self.graph, nx.DiGraph):
+            raise TypeError("DirectedFitnessLandscape requires a networkx.DiGraph object.")
+
+    @classmethod
+    def from_graph(cls,
+                   graph: nx.DiGraph, **kwargs) -> 'DirectedFitnessLandscape':
+        """
+        Factory method to create a FitnessLandscape from an existing,
+        annotated networkx graph.
+        """
+        if not isinstance(graph, nx.DiGraph):
+            raise TypeError("Input graph must be a networkx.DiGraph.")
+
+        # Undirected FitnessLandscape logic is correct, just different typing.
+        return super(DirectedFitnessLandscape, cls).from_graph(graph, **kwargs)
+
+
+
+    @classmethod
+    def build(cls,
+              sequences: list[BaseNumpySequence] | Alignment | Path | pd.DataFrame | Sequence[Mapping[str, Any]],
+              *,
+              digraph: str | nx.DiGraph = "phylogenetic",
+              fitness_layers: dict[str, BaseFitnessLayer] | None = None,
+              annotation_layers: dict[str, AnnotationLayer] | None = None,
+              embeddings: Mapping[str, np.ndarray] | np.ndarray | None = None,
+              embedding_domain: Literal["plm", "ohe"] = "ohe",
+              attach_embeddings: bool = True,
+              emb_arr_key: str = "emb_arr",
+              model_name: str = "facebook/esm2_t6_8M_UR50D",
+              batch_size: int = 64,
+              device: str | None = None,
+              _compute_phylo_embeddings: bool = False,
+              **kwargs) -> "DirectedFitnessLandscape":
+
+        """
+        Constructor method for main entry to DirectedFitnessLandscape.
+
+        Parameters
+        ----------
+        sequences : list[BaseNumpySequence] | Alignment | Path | pandas.DataFrame | sequence of mappings
+            Sequence payload used to build the landscape. For most digraph
+            modes this is a list of sequences or an alignment. When
+            ``digraph="trajectory"``, provide a trajectory table containing
+            at least ordered current/next state columns.
+
+        digraph : str or nx.DiGraph, default=`"phylogenetic"`
+            The directed graph type or an existing networkx directed graph.
+            If a string, it should be one of the registered digraph types.
+
+        fitness_layers : dict[str, BaseFitnessLayer], optional
+            Dictionary of fitness layers to attach to the landscape.
+
+        annotation_layers : dict[str, AnnotationLayer], optional
+            Dictionary of annotation layers aligned to the sequence order.
+
+        embeddings : Mapping[str, np.ndarray] | np.ndarray | None, optional
+            Pre-computed embeddings for the sequences. Plain numpy arrays
+            are assumed to match `embedding_domain`. If `None`, they will
+            be computed when required.
+
+        embedding_domain : str, default=`"ohe"`
+            The domain for embeddings. Options are:
+            - `"plm"`: Protein language model embeddings.
+            - `"ohe"`: One-hot encoded sequences.
+
+        attach_embeddings : bool, default=`True`
+            Whether to attach embeddings as node attributes in the graph.
+
+        emb_arr_key : str, default=`"emb_arr"`
+            The key under which embeddings will be stored in the graph nodes.
+
+        model_name : str, default=`"facebook/esm2_t6_8M_UR50D"`
+            The name of the model to use for PLM embeddings.
+
+        batch_size : int, default=`64`
+            Batch size for PLM embedding computation.
+
+        device : str or None, default=`None`
+            Device to use for PLM embedding computation (e.g., "cpu" or "cuda").
+
+        _compute_phylo_embeddings : bool, default=`False`
+            Whether to compute embeddings for phylogenetic sequences.
+
+        kwargs : dict
+            Additional keyword arguments to pass to the digraph constructor.
+
+        Returns
+        -------
+        DirectedFitnessLandscape
+            The constructed directed fitness landscape object.
+        """
+
+        if isinstance(digraph, nx.DiGraph):
+            DG = digraph
+            seqs = [data["sequence"] for _, data in DG.nodes(data=True)]
+            _, embedding_store = _prepare_embedding_store(embeddings, embedding_domain)
+            auto_layers = _collect_auto_annotation_layers(DG)
+            annotation_layers = _merge_annotation_layers(annotation_layers, auto_layers)
+            return cls(
+                sequences=seqs,
+                graph=DG,
+                fitness_layers=fitness_layers,
+                annotation_layers=annotation_layers,
+                embeddings=(embedding_store or None),
+                emb_arr_key=emb_arr_key,
+                active_embedding_domain=_choose_active_embedding_domain(
+                    embedding_store, embedding_domain, attach_embeddings
+                ),
+            )
+
+        dtype = str(digraph)
+        if dtype == "trajectory":
+            DG = create_trajectory_digraph(sequences, **kwargs)
+            seqs = [data["sequence"] for _, data in DG.nodes(data=True)]
+            _, embedding_store = _prepare_embedding_store(embeddings, embedding_domain)
+            auto_layers = _collect_auto_annotation_layers(DG)
+            annotation_layers = _merge_annotation_layers(annotation_layers, auto_layers)
+            return cls(
+                sequences=seqs,
+                graph=DG,
+                fitness_layers=fitness_layers,
+                annotation_layers=annotation_layers,
+                embeddings=(embedding_store or None),
+                emb_arr_key=emb_arr_key,
+                active_embedding_domain=_choose_active_embedding_domain(
+                    embedding_store, embedding_domain, attach_embeddings
+                ),
+            )
+
+        if dtype == "phylogenetic":
+            aln = load_aligned_seqs(sequences) if isinstance(sequences, Path) else sequences
+            DG = create_phylo_digraph(aln, **kwargs)
+            seqs = [data["sequence"] for _, data in DG.nodes(data=True)]
+
+            embedding_store: dict[str, np.ndarray] = {}
+            if _compute_phylo_embeddings:
+                if embedding_domain == "plm":
+                    E = _compute_embeddings_from_sequences(
+                        seqs, model_name=model_name, batch_size=batch_size, device=device
+                    )
+                elif embedding_domain == "ohe":
+                    E, _ = _encode_multiallele(seqs)
+                else:
+                    raise ValueError(f"embedding_domain must be 'plm' or 'ohe', got {embedding_domain!r}")
+                embedding_store[embedding_domain] = E
+
+            auto_layers = _collect_auto_annotation_layers(DG)
+            annotation_layers = _merge_annotation_layers(annotation_layers, auto_layers)
+            return cls(
+                sequences=seqs,
+                graph=DG,
+                fitness_layers=fitness_layers,
+                annotation_layers=annotation_layers,
+                embeddings=(embedding_store or None),
+                emb_arr_key=emb_arr_key,
+                active_embedding_domain=_choose_active_embedding_domain(
+                    embedding_store, embedding_domain, attach_embeddings
+                ),
+            )
+
+        # embedding-based directed constructors
+        ctor_map = {
+            "diffusion_nq": create_evol_diffusion_digraph,
+            "particle_filter": create_particle_filter_digraph,
+            "plm_interpolation": create_plm_interpolation_digraph,
+        }
+        if dtype not in ctor_map:
+            raise ValueError(f"Unknown digraph type {dtype!r}. Options: {list(ctor_map)}")
+
+        seqs = (
+            sequences
+            if not isinstance(sequences, (Path, Alignment))
+            else alignment_to_base_numpy_sequences(sequences)
+        )
+        graph_embeddings, embedding_store = _prepare_embedding_store(embeddings, embedding_domain)
+        # resolve embeddings if needed
+        graph_embeddings, extra = _resolve_embeddings_for_graph(
+            seqs,
+            "diffusion",
+            graph_embeddings,
+            embedding_domain,
+            model_name=model_name,
+            batch_size=batch_size,
+            device=device,
+        )
+        if graph_embeddings is not None:
+            embedding_store[embedding_domain] = graph_embeddings
+        DG = ctor_map[dtype](seqs, **kwargs, **extra)
+        seqs = [data["sequence"] for _, data in DG.nodes(data=True)]
+
+        if embedding_store:
+            mismatch_domains = [
+                domain for domain, emb in embedding_store.items() if emb.shape[0] != len(seqs)
+            ]
+            if mismatch_domains:
+                if attach_embeddings:
+                    warnings.warn(
+                        "Node count increased during digraph construction (e.g., due to Steiner "
+                        "nodes); recomputing embeddings so they align with the expanded graph.",
+                        RuntimeWarning,
+                    )
+                    embedding_store.clear()
+                    if embedding_domain == "plm":
+                        new_emb = _compute_embeddings_from_sequences(
+                            seqs,
+                            model_name=model_name,
+                            batch_size=batch_size,
+                            device=device,
+                        )
+                        embedding_store[embedding_domain] = new_emb
+                    elif embedding_domain == "ohe":
+                        new_emb, _ = _encode_multiallele(seqs)
+                        embedding_store[embedding_domain] = new_emb
+                else:
+                    warnings.warn(
+                        "Node count increased during digraph construction, but embeddings are not "
+                        "attached; dropping stored embeddings to avoid mismatches.",
+                        RuntimeWarning,
+                    )
+                    embedding_store.clear()
+
+        auto_layers = _collect_auto_annotation_layers(DG)
+        annotation_layers = _merge_annotation_layers(annotation_layers, auto_layers)
+        return cls(
+            sequences=seqs,
+            graph=DG,
+            fitness_layers=fitness_layers,
+            annotation_layers=annotation_layers,
+            embeddings=(embedding_store or None),
+            emb_arr_key=emb_arr_key,
+            active_embedding_domain=_choose_active_embedding_domain(
+                embedding_store, embedding_domain, attach_embeddings
+            ),
+        )
 
 def read_csv_landscape(path: str | Path,
                        *,
