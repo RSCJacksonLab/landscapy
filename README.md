@@ -107,6 +107,10 @@ CSV export is also available through `to_csv_landscape` and
 
 ## Main modules
 
+The exact supported names and import namespaces are listed in the
+[0.9 public API contract](docs/public_api.md). CI validates that contract
+against the exported objects and their NumPy-style docstrings.
+
 - `fitness_landscape.core`: sequences, fitness and annotation layers,
   undirected graph construction, and `FitnessLandscape`.
 - `fitness_landscape.models`: NK, Rough Mount Fuji, and elementary landscapes.

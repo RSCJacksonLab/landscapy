@@ -3,6 +3,7 @@ include README.md
 include CHANGELOG.md
 include CITATION.cff
 include pyproject.toml
+recursive-include docs *.md
 
 recursive-exclude tests *
 recursive-exclude .github *

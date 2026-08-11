@@ -281,9 +281,6 @@ def create_nk_binary_landscape(N: int,
     K : int
         Number of interacting neighbors for each gene (epistatic
         interactions).
-    alphabet_size : int, default=`2`
-        Number of possible states per site (default is 2 for binary
-        sequences).
     seed : int, optional
         Random seed for reproducibility.
     adj_mat : np.ndarray, optional
@@ -331,31 +328,26 @@ def create_nk_multi_landscape(N: int,
                                alphabet: List,
                                seed: Optional[int] = None,
                                **kwargs) -> FitnessLandscape:
-    """
-    Factory function to create a binary NK fitness landscape.
-    Sequence types are `BinarySequence`.
+    """Create a multiallelic NK fitness landscape.
 
     Parameters
     ----------
     N : int
         Number of sites in each sequence.
     K : int
-        Number of interacting neighbors for each gene (epistatic
-        interactions).
-    alphabet_size : int, default=`2`
-        Number of possible states per site (default is 2 for binary
-        sequences).
+        Number of interacting neighbours per site.
+    alphabet : list
+        Ordered allele values permitted at every site.
     seed : int, optional
         Random seed for reproducibility.
-    **kwargs : dict, optional
+    **kwargs
         Additional keyword arguments to pass to the FitnessLandscape
         constructor.
 
     Returns
     -------
     FitnessLandscape
-        An instance of the FitnessLandscape class representing the NK
-        landscape.
+        Multiallelic NK landscape with a numeric fitness layer.
     """
     sequences_np, fitness_values = generate_NK_states(N, K, alphabet=alphabet, seed=seed)
     

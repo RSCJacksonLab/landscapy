@@ -483,6 +483,10 @@ def create_hamming_graph(sequences: List[BaseNumpySequence],
         of position p. Scales in O(L n log n)
         - `auto` : automatically chooses backend based on the sequence
         type.
+    _compute_hamming_edges : bool, default=False
+        Reserved compatibility flag. Release builds always disable additional
+        Hamming-edge computation because unit Hamming attributes are attached
+        during construction.
 
     Returns
     -------
@@ -1026,6 +1030,10 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
         - `l2` : the L2 norm. 
         Use of `ip` guarantees distances are returned / stored as
         Hamming distances. 
+
+    include_self : bool, default=False
+        Whether FAISS candidate queries include each sequence itself. Self
+        edges are not added to the final undirected graph.
     
     use_gpu : bool, default=`False`
         Boolean to use GPU on flat indexing. 
@@ -1047,6 +1055,11 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
     
     seed : int, default=42
         The random state seed. 
+
+    _compute_hamming_edges : bool, default=False
+        Reserved compatibility flag. Release builds disable the optional
+        post-construction edge mutation pass.
+
     Returns
     -------
     nx.Graph    
@@ -1111,6 +1124,9 @@ def create_tda_graph(sequences: List[BaseNumpySequence],
     
     reweight_simplex_edges : bool, default=`False`
         Bool to reweight graph edges by triangle simplexes.
+
+    **kwargs
+        Reserved for compatibility. No keyword is currently consumed.
     
     Returns
     -------
@@ -1248,13 +1264,11 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
     embeddings : np.ndarray
         The sequence embeddings, indexed according to sequence order.
 
-    t : int | float | None, default=`5`
-        Diffusion power for the Markov transition matrix. When ``None``,
-        ``0`` or ``np.inf`` the stationary distribution is used instead of
-        an explicit matrix power.
-
     k : int, default=`5`
         Nearest neighbors to scale the rbf gamma parameter.
+
+    tiebuffer : int, default=0
+        Additional nearest-neighbour candidates retained for tie handling.
 
     backend : str, default=`auto`
         The computational backend to use. Options are:
@@ -1278,6 +1292,10 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         - `l2` : the L2 norm. 
         Use of `ip` guarantees distances are returned / stored as
         Hamming distances. 
+
+    include_self : bool, default=False
+        Whether FAISS candidate queries may include the query point. The final
+        diffusion graph has no self edges.
     
     use_gpu : bool, default=`False`
         Boolean to use GPU on flat indexing. 
@@ -1285,11 +1303,20 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
     hnsw_M : int, default=32
         The hnsw dimension size.
     
-    tiebuffer : int, default=128
-        The number of hits kept in buffer to eliminate ties.
+    t : int | float | None, default=`5`
+        Diffusion power for the Markov transition matrix. When ``None``,
+        ``0`` or ``np.inf`` the stationary distribution is used instead of
+        an explicit matrix power.
 
     connectivity_threshold : float, default=`1e-04`
         The threshold the define discrete connectivity.
+
+    _compute_hamming_edges : bool, default=False
+        Reserved compatibility flag. Release builds disable the optional
+        post-construction mutation pass.
+
+    **kwargs
+        Reserved for compatibility. No keyword is currently consumed.
 
     Returns
     -------
@@ -1411,34 +1438,43 @@ def create_phylo_graph(sequences: Union[Path, Alignment],
                        _lightweight_nodes: bool = False,
                        _hard_ancestors: bool = False,
                        **kwargs) -> nx.Graph:
-    """
-    Factory function to create an undirected graph using phylogenetic
-    inference and ancestral sequence reconstruction (with an 
-    equilibrium amino acid replacement matrix).
+    """Construct an undirected phylogenetic landscape topology.
 
     Parameters
     ----------
-    alignment : Path or Alignment
-        The alignment of extant sequences to use for ASR and
-        phylogenetic infernece.
-    
-    replacement_matrix : List, default=[`LG`]
-        List of replacement matrices to use for phylogenetic
-        reconstruction. Must be an NQ non-equilibrium model.
-
-    model_fitting : bool, default=`True`
-        Whether to fit the ML model, using the model set defined in
-        `replacement_matrix`.
-    
-    reconstruct_ancestral_states : bool, default=`True`
-        Whether to reconstruct ancestral amino-acid states. If False,
+    sequences : pathlib.Path or cogent3.Alignment
+        Alignment of extant sequences used for tree inference and ancestral
+        reconstruction.
+    replacement_matrix : list of str, default=['LG']
+        Candidate amino-acid substitution models.
+    model_fitting : bool, default=True
+        Fit the maximum-likelihood model selected from ``replacement_matrix``.
+    _log_progress : bool, default=False
+        Emit progress logging for phylogenetic and edge computations.
+    _nested_parallel : bool, default=False
+        Permit nested parallelism in optional edge calculations.
+    phylo_backend : str, default='cogent_nj'
+        Tree-inference backend accepted by :class:`ASRConstructor`.
+    _dist_calc : str, default='pdist'
+        Pairwise-distance calculator used by compatible tree backends.
+    reconstruct_ancestral_states : bool, default=True
+        Reconstruct ancestral amino-acid states. If false,
         internal nodes are populated with placeholder sequences so that
         the phylogenetic topology can still be analysed.
+    _compute_hamming_edges : bool, default=False
+        Compute optional mutation attributes after topology construction.
+        Release builds force this compatibility flag off.
+    _lightweight_nodes : bool, default=False
+        Remove stored gapped arrays from graph nodes.
+    _hard_ancestors : bool, default=False
+        Replace probabilistic ancestral sequences with their hard calls.
+    **kwargs
+        Reserved for compatibility. No keyword is currently consumed.
 
     Returns
     -------
-    G : nx.Graph
-        The undirected graph output.
+    networkx.Graph
+        Undirected tree topology with sequence and node-role annotations.
     """
     _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
 
@@ -1673,15 +1709,15 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     sequences : List[BaseNumpySequence]
         The list of sequence in the landscape. 
 
+    embeddings : np.ndarray
+        Sequence embeddings indexed by the entry in `sequences`.
+
     replacement_matrix : np.ndarray, optional
         Reversible instantaneous amino-acid rate generator in PROT_20 order.
         Defaults to the bundled LG matrix.
-    
-    embeddings : np.ndarray
-        Sequence embeddings indexed by the entry in `sequences`.
-    
-    k : int, default=50
-        The number of neighbours to use for kNN pre-filtering.
+
+    tiebuffer : int, default=0
+        Additional nearest-neighbour candidates retained for tie handling.
 
     backend : str, default=`auto`
         The computational backend to use. Options are:
@@ -1705,6 +1741,10 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         - `l2` : the L2 norm. 
         Use of `ip` guarantees distances are returned / stored as
         Hamming distances. 
+
+    include_self : bool, default=False
+        Whether the candidate-neighbour query includes each sequence itself.
+        Self edges are removed from the final graph.
     
     use_gpu : bool, default=`False`
         Boolean to use GPU on flat indexing. 
@@ -1712,8 +1752,8 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     hnsw_M : int, default=32
         The hnsw dimension size.
     
-    tiebuffer : int, default=128
-        The number of hits kept in buffer to eliminate ties.
+    k : int, default=50
+        The number of neighbours to use for kNN pre-filtering.
     
     t : int | float | None, default=5
         Diffusion power for the Markov transition matrix. When ``None``,
@@ -1724,6 +1764,13 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         Temperature applied to length-normalized evolutionary log-odds before
         row-wise softmax normalization.
 
+    connectivity_threshold : float, default=1e-4
+        Minimum symmetrized diffusion probability retained as an edge.
+
+    cpus : int, default=1
+        Target number of worker CPUs for Ray alignment tasks. Each task
+        consumes a single CPU.
+
     evolutionary_time : float, default=1.0
         Evolutionary time used to obtain transition probabilities from the
         instantaneous rate generator. This is distinct from the graph
@@ -1733,9 +1780,12 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         Stationary amino-acid frequencies in PROT_20 order. When omitted they
         are inferred from ``replacement_matrix``.
 
-    cpus : int, default=1
-        Target number of worker CPUs for Ray alignment tasks. Each task
-        consumes a single CPU.
+    _compute_hamming_edges : bool, default=False
+        Reserved compatibility flag. Release builds disable the optional
+        post-construction mutation pass.
+
+    **kwargs
+        Reserved for compatibility. No keyword is currently consumed.
 
     Returns
     -------

@@ -109,19 +109,31 @@ def compute_persistent_homology(landscape: FitnessLandscape,
     landscape : FitnessLandscape
         The fitness landscape to analyze.
 
-    method : str, default=`'vietoris_rips'`
-        The method to use for computing persistent homology.
-        Supported methods:
-        - 'vietoris_rips': Vietoris-Rips complex.
-        - 'delaunay_cech': Delaunay-Čech complex.
-
+    max_dim : int, default=2
+        The maximum dimension of the simplices to compute.
     dist_matrix : np.ndarray,default=`None`
         The distance matrix to use in vietrois-rips complex
         computations. If `None`, the graph walk distance matrix will
         be used.
-    
-    max_dim : int, default=2
-        The maximum dimension of the simplices to compute.
+    max_distance : float, optional
+        Maximum Vietoris-Rips edge filtration value. If omitted, use the
+        largest finite entry of the distance matrix.
+    weighted : bool, default=False
+        When deriving graph distances, use the graph's ``weight`` edge
+        attribute. Ignored when ``dist_matrix`` is supplied.
+
+    Returns
+    -------
+    dict
+        GUDHI simplex tree, persistence pairs and intervals, Betti numbers,
+        and finite-lifetime summaries grouped by homology dimension.
+
+    Notes
+    -----
+    This function always builds a Vietoris-Rips filtration. Persistence
+    entropy is the Shannon entropy of finite lifetimes normalized to sum to
+    one; essential intervals are counted separately and excluded from finite
+    lifetime statistics.
     """
     # landscape filtration via vietoris-rips complex
     simplex_tree = vietoris_rips_complex(landscape,

@@ -70,6 +70,7 @@ all = [
 ]
 dev = [
   "build>=1.2",
+  "numpydoc>=1.8",
   "pytest>=8",
   "pytest-cov>=6",
   "pytest-mock>=3.14",
@@ -127,3 +128,19 @@ fail_under = 56
 precision = 1
 show_missing = true
 skip_covered = true
+
+[tool.numpydoc_validation]
+# The publication API gate focuses on executable documentation contracts.
+# Layout-only rules (blank lines, one-line summaries, punctuation), mandatory
+# See Also/Examples sections, and optional extended summaries remain advisory.
+checks = [
+  "GL06",
+  "GL08",
+  "PR01",
+  "PR02",
+  "PR03",
+  "PR04",
+  "RT01",
+  "RT04",
+  "YD01",
+]

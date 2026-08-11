@@ -21,12 +21,14 @@ def eigenmode_decomposition(graph: Union[nx.Graph, FitnessLandscape],
     ----------
     graph : networkx.Graph or FitnessLandscape
         Graph to decompose.
-    matrix : str, default = `laplacian`
-        The graph matrix to decompose. Either Laplacian matrix or the
-        adjacency matrix. 
     k : int or None, optional
         Number of eigenmodes to compute. If None, compute all eigenpairs
         using a dense decomposition (may be expensive for large graphs).
+    matrix : str, default = `laplacian`
+        The graph matrix to decompose. Either Laplacian matrix or the
+        adjacency matrix.
+    weight_key : str, default='weight'
+        Edge attribute used when constructing weighted graph matrices.
     dense_threshold : int, default=5000
         The node threshold count to compute sparse / dense matrices.
         

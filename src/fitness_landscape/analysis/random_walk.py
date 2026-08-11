@@ -22,11 +22,24 @@ def calculate_ruggedness_autocorrelation_analytical(landscape: FitnessLandscape,
     
     lag_max : int, default=`None`
         The maximum lag to include in the autocorrelation calculation.
+    _eigenvectors : ndarray, optional
+        Precomputed graph-Laplacian eigenvectors ordered by ascending
+        eigenvalue.
+    _eigenvalues : ndarray, optional
+        Eigenvalues corresponding to ``_eigenvectors``.
     
     Returns
     -------
     results : Dict
         The analytical autocorrelation results.
+
+    Notes
+    -----
+    The active fitness signal is mean-centred. Its graph-Fourier power is
+    transformed to an autocovariance matrix, averaged over unordered node
+    pairs at each unweighted shortest-path distance, and normalized by lag
+    zero. The reported correlation length is ``-1 / log(abs(r[1]))`` when
+    ``0 < abs(r[1]) < 1`` and infinity otherwise.
     """
  
     # Center signal on 0
@@ -87,8 +100,11 @@ def calculate_ruggedness_autocorrelation_stochastic(landscape: FitnessLandscape,
     ----------
     landscape : FitnessLandscape
         The fitness landscape to analyze.
+
+    n_walks : int, default=100
+        Number of independent random walks averaged.
     
-    steps : int, default=1000
+    steps : int, default=100
         The number of random walk steps.
     
     lag_max : int, default=`None`
@@ -101,6 +117,14 @@ def calculate_ruggedness_autocorrelation_stochastic(landscape: FitnessLandscape,
     -------
     results : Dict
         The stochastic autocorrelation results.
+
+    Notes
+    -----
+    Each trajectory begins at a uniformly selected graph node and moves to a
+    uniformly selected neighbour. Autocorrelation is computed after centring
+    each trajectory by its own mean, normalized at lag zero, and then averaged
+    across walks. The correlation length uses the same lag-one definition as
+    :func:`calculate_ruggedness_autocorrelation_analytical`.
     """
     rng = np.random.default_rng(seed)
     

@@ -70,6 +70,25 @@ _GRAPH_REGISTRY: dict[str, _GraphRegistryItem] = {
 
 @dataclass(frozen=True)
 class AnnotationQueryResult:
+    """Store records and graph entities selected by an annotation query.
+
+    Parameters
+    ----------
+    layer : str
+        Queried annotation-layer name.
+    criteria : dict
+        Normalized query criteria.
+    dataframe : pandas.DataFrame
+        Matching annotation records.
+    sequence_indices : list of int
+        Matching sequence positions.
+    node_ids : list of hashable
+        Graph nodes corresponding to matching sequences.
+    edges : list of tuple
+        Edges induced by ``node_ids`` when requested.
+    sequences : list of BaseNumpySequence
+        Matching sequence objects.
+    """
     layer: str
     criteria: dict[str, Any]
     dataframe: pd.DataFrame
@@ -79,6 +98,20 @@ class AnnotationQueryResult:
     sequences: list[BaseNumpySequence]
 
     def to_subgraph(self, graph: nx.Graph, *, copy: bool = True) -> nx.Graph:
+        """Extract the graph induced by the query result.
+
+        Parameters
+        ----------
+        graph : networkx.Graph
+            Source graph containing ``node_ids``.
+        copy : bool, default=True
+            Return an independent graph when true; otherwise return a view.
+
+        Returns
+        -------
+        networkx.Graph
+            Induced subgraph or view.
+        """
         sub = graph.subgraph(self.node_ids)
         return sub.copy() if copy else sub
 
@@ -246,10 +279,30 @@ def _merge_annotation_layers(
 SeqKey = Union['BaseNumpySequence', str, Tuple]
 
 class FitnessLandscape:
-    """
-    FitnessLandscape is a class that represents a fitness landscape
-    constructed from a networkx graph. It allows for the analysis of
-    fitness layers, sequences, and their relationships.
+    """Represent sequences and measured fitness on an undirected graph.
+
+    Parameters
+    ----------
+    sequences : list of BaseNumpySequence
+        Sequence objects ordered consistently with graph nodes.
+    graph : networkx.Graph
+        Undirected landscape topology.
+    fitness_layers : dict of str to BaseFitnessLayer, optional
+        Per-sequence fitness layers.
+    annotation_layers : dict of str to AnnotationLayer, optional
+        Per-sequence annotation layers.
+    embeddings : mapping of str to ndarray or ndarray, optional
+        Per-sequence embedding arrays. A bare array is stored under the active
+        or ``'default'`` domain.
+    emb_arr_key : str, default='emb_arr'
+        Graph-node attribute used for active embeddings.
+    active_embedding_domain : str, optional
+        Embedding domain used by graph annotations and tensor exports.
+    embedding_metadata : mapping, optional
+        Provenance metadata keyed by embedding domain.
+    _build_sequence_indexes : bool, default=True
+        Build duplicate-safe sequence lookup indexes. Disabling this is only
+        supported when no fitness or annotation layers are attached.
 
     Attributes
     ---------- 
@@ -419,8 +472,17 @@ class FitnessLandscape:
         return self._active_embedding_domain
     
     def set_active_embedding_domain(self, domain: str) -> None:
-        """
-        Set the active embedding domain used for downstream exports.
+        """Set the active embedding domain used for downstream exports.
+
+        Parameters
+        ----------
+        domain : str
+            Key in :attr:`embeddings` to activate.
+
+        Raises
+        ------
+        KeyError
+            If the domain is unavailable.
         """
         self._ensure_embedding_state()
         if domain not in self.embeddings:
@@ -434,8 +496,17 @@ class FitnessLandscape:
         return self._embedding_metadata
     
     def get_embedding_metadata(self, domain: str | None = None) -> dict[str, Any] | None:
-        """
-        Retrieve embedding provenance for a given domain (or the active domain).
+        """Retrieve embedding provenance for a domain.
+
+        Parameters
+        ----------
+        domain : str, optional
+            Domain key. If omitted, use the active domain.
+
+        Returns
+        -------
+        dict or None
+            Copy-free provenance mapping, or ``None`` when unavailable.
         """
         self._ensure_embedding_state()
         key = domain if domain is not None else self._active_embedding_domain
@@ -454,8 +525,17 @@ class FitnessLandscape:
         return meta.get("model_name")
     
     def get_embedding(self, domain: str | None = None) -> np.ndarray | None:
-        """
-        Retrieve the embedding array for the requested domain.
+        """Retrieve the embedding array for a domain.
+
+        Parameters
+        ----------
+        domain : str, optional
+            Domain key. If omitted, use or establish the active domain.
+
+        Returns
+        -------
+        ndarray or None
+            Per-sequence embedding matrix, or ``None`` when unavailable.
         """
         self._ensure_embedding_state()
         if not self.embeddings:
@@ -851,17 +931,42 @@ class FitnessLandscape:
     
     def add(self,
             **kwargs):
-        """
-        Convenience function to expedite fitness layer construction via
-        the `attach` method.
+        """Construct and attach a fitness layer.
+
+        Parameters
+        ----------
+        **kwargs
+            Raw-layer arguments accepted by :meth:`attach`. Passing a ready
+            ``layer`` is rejected; use :meth:`attach` directly instead.
+
+        Returns
+        -------
+        None
+            The layer is attached in place.
         """
         if 'layer' in kwargs and kwargs['layer'] is not None:
             raise ValueError("`.add` builds from values; use `.attach(layer=...)` to attach a ready layer.")
         return self.attach(**kwargs)
 
     def safe_layer_name(self, name: str, *, ensure_unique: bool = True) -> str:
-        """
-        Return a layer name that will not collide with existing fitness layers.
+        """Return a non-colliding fitness-layer name.
+
+        Parameters
+        ----------
+        name : str
+            Preferred layer name.
+        ensure_unique : bool, default=True
+            Append a numeric suffix when the name already exists.
+
+        Returns
+        -------
+        str
+            Original or suffixed layer name.
+
+        Raises
+        ------
+        ValueError
+            If ``name`` is empty.
         """
         if not name:
             raise ValueError("Layer name must be non-empty.")
@@ -930,6 +1035,11 @@ class FitnessLandscape:
         
         allow_missing : bool, default=False
             If `True`, allows sequences to not have a value assigned.
+
+        Returns
+        -------
+        None
+            The landscape is modified in place.
         """
 
         if layer is not None:
@@ -1114,22 +1224,27 @@ class FitnessLandscape:
 
         Parameters
         ----------
-        modifier :
+        modifier : BaseFitnessModifier or callable
             A callable or BaseFitnessModifier that returns a new
             BaseFitnessLayer when applied to an input layer.
-        source_layer :
+        source_layer : str or BaseFitnessLayer, optional
             Name or instance of the source fitness layer. Defaults to
             the active view if not provided.
-        output_name :
+        output_name : str, optional
             Optional name for the new layer. When omitted, the modifier
             decides the name. If ``ensure_unique_name`` is True, a
             non-colliding name is generated.
-        attach :
+        attach : bool, default=True
             When True (default), the resulting layer is attached to the
             landscape and returned.
-        ensure_unique_name :
+        ensure_unique_name : bool, default=True
             If True, generated names are made unique with
             ``safe_layer_name`` when a collision is detected.
+
+        Returns
+        -------
+        BaseFitnessLayer
+            Transformed layer, attached when ``attach`` is true.
         """
         if source_layer is None:
             if self._active_view_name is None:
@@ -1159,6 +1274,8 @@ class FitnessLandscape:
         """
         Detaches a fitness layer from the landscape.
 
+        Parameters
+        ----------
         layer_name : str
             The layer key to remove.
         """
@@ -1203,24 +1320,29 @@ class FitnessLandscape:
 
         Parameters
         ----------
-        layer :
+        layer : AnnotationLayer, optional
             Ready-made annotation layer. If provided, other keyword arguments
             must be omitted.
-        name :
+        name : str, optional
             Name for the new annotation layer when constructing from raw data.
-        data :
+        data : pandas.DataFrame, mapping, or sequence, optional
             Columnar annotation data aligned to the sequence order.
-        metadata :
+        metadata : mapping, optional
             Optional metadata to store on the layer when constructing inline.
-        map_by :
+        map_by : {'index', 'sequence', 'name'}, default='index'
             Strategy for aligning the provided data to existing sequences.
             - `"index"`: data is ordered by sequence index or keyed by index.
             - `"sequence"`: keys refer to sequence objects, tuples, lists, or
               strings that can be normalized to the landscape sequences.
             - `"name"`: keys refer to sequence identifiers (``sequence.id``).
-        allow_missing :
+        allow_missing : bool, default=False
             Allow sequences to be missing annotations when constructing from a
             mapping. Missing records are filled with ``None``.
+
+        Returns
+        -------
+        AnnotationLayer
+            Attached annotation layer.
         """
         if layer is not None:
             if any(x is not None for x in (name, data, metadata)):
@@ -1244,11 +1366,40 @@ class FitnessLandscape:
         return layer
 
     def get_annotation_layer(self, name: str) -> AnnotationLayer:
+        """Return an annotation layer by name.
+
+        Parameters
+        ----------
+        name : str
+            Layer name.
+
+        Returns
+        -------
+        AnnotationLayer
+            Requested layer.
+
+        Raises
+        ------
+        KeyError
+            If the layer is absent.
+        """
         if name not in self.annotation_layers:
             raise KeyError(f"Annotation layer '{name}' not found.")
         return self.annotation_layers[name]
 
     def detach_annotation(self, name: str) -> None:
+        """Remove an annotation layer and its graph-node attributes.
+
+        Parameters
+        ----------
+        name : str
+            Layer name.
+
+        Raises
+        ------
+        KeyError
+            If the layer is absent.
+        """
         if name not in self.annotation_layers:
             raise KeyError(f"Annotation layer '{name}' not found.")
 
@@ -1380,6 +1531,22 @@ class FitnessLandscape:
         *,
         include_edges: bool = True,
     ) -> AnnotationQueryResult:
+        """Query one annotation layer and map matches to graph entities.
+
+        Parameters
+        ----------
+        layer_name : str
+            Annotation-layer name.
+        criteria : mapping, optional
+            Column requirements accepted by :meth:`AnnotationLayer.query`.
+        include_edges : bool, default=True
+            Include edges induced by matching nodes.
+
+        Returns
+        -------
+        AnnotationQueryResult
+            Matching records, sequences, nodes, and optional edges.
+        """
         layer = self.get_annotation_layer(layer_name)
 
         seq_indices = layer.matching_indices(criteria)
@@ -1414,6 +1581,7 @@ class FitnessLandscape:
 
     @property
     def active_layer_name(self) -> str | None:
+        """Return the active fitness-layer name, if one is set."""
         return getattr(self, "_active_view_name", None)
 
     def get_layer(self,
@@ -1530,7 +1698,7 @@ class FitnessLandscape:
 
         Parameters
         ----------
-        partition :
+        partition : AnnotationLayer, str, mapping, sequence, or None
             Partition specification. When ``None``, an annotation layer must
             be supplied (by name or instance) via ``partition``. Accepted
             forms include:
@@ -2018,6 +2186,11 @@ class FitnessLandscape:
             Whether to attach scalar values for each fitness layer.
         include_annotations : bool, default=True
             Whether to attach annotation columns.
+
+        Returns
+        -------
+        pathlib.Path
+            Path of the written XGMML document.
         """
         if self.graph is None:
             raise ValueError("Landscape has no graph; cannot export XGMML.")
@@ -2464,6 +2637,11 @@ class FitnessLandscape:
         """
         [Legacy] Method to retrieve the fitness of a sequence.
 
+        Parameters
+        ----------
+        sequence : BaseNumpySequence
+            Sequence whose value is read from the active fitness layer.
+
         Returns
         -------
         float
@@ -2491,9 +2669,26 @@ class FitnessLandscape:
     @classmethod
     def from_graph(cls,
                    graph: nx.Graph, **kwargs) -> 'FitnessLandscape':
-        """
-        Factory method to create a FitnessLandscape from an existing,
-        annotated networkx graph.
+        """Create a landscape from an annotated NetworkX graph.
+
+        Parameters
+        ----------
+        graph : networkx.Graph
+            Undirected graph whose nodes carry ``sequence`` and optional
+            ``fitness_<name>`` attributes.
+        **kwargs
+            Additional :class:`FitnessLandscape` constructor arguments.
+
+        Returns
+        -------
+        FitnessLandscape
+            Landscape with fitness layers reconstructed from node attributes.
+
+        Raises
+        ------
+        ValueError
+            If a graph node lacks a sequence or reconstructed layer lengths do
+            not match the node count.
         """
 
         node_list = list(graph.nodes())
@@ -2598,7 +2793,7 @@ class FitnessLandscape:
         device : str or None, default=`None`
             Device to use for PLM embedding computation (e.g., "cpu" or "cuda").
         
-        graph_kwargs : dict
+        **graph_kwargs
             Additional keyword arguments to pass to the graph constructor.
         
         Returns
@@ -2700,7 +2895,7 @@ class FitnessLandscape:
         _compute_phylo_embeddings : bool, default=`False`
             Whether to compute embeddings for phylogenetic sequences.
         
-        phylo_kwargs : dict
+        **phylo_kwargs
             Additional keyword arguments to pass to the phylogenetic graph constructor.
         
         Returns
@@ -2770,11 +2965,17 @@ class FitnessLandscape:
         fasta : str | Path | Alignment
             FASTA alignment (path or Alignment object). If ancestral sequences
             are missing, they will be inferred using the supplied tree.
+        fitness_layers : dict[str, BaseFitnessLayer], optional
+            Fitness layers aligned with the resulting graph-node order.
+        annotation_layers : dict[str, AnnotationLayer], optional
+            Annotation layers aligned with the resulting graph-node order.
         strip_gap_columns : bool, default=True
             If True, remove alignment columns that contain a gap in any sequence
             before constructing the hard sequences (ensures PROT_20 alphabet).
             When False, the stored sequences retain gaps using the 21-character
             alphabet that includes ``"gap"``.
+        emb_arr_key : str, default='emb_arr'
+            Graph-node key reserved for attached embeddings.
         moltype : str, default="protein"
             Moltype hint passed to cogent3 sequence constructors.
         _compute_hamming_edges : bool, default=True
@@ -3057,8 +3258,19 @@ class FitnessLandscape:
 
     @classmethod
     def from_graph_annotated(cls, graph: nx.Graph, **kwargs) -> "FitnessLandscape":
-        """
-        Thin alias around  existing `from_graph` for parity with other APIs.
+        """Create a landscape from an annotated graph.
+
+        Parameters
+        ----------
+        graph : networkx.Graph
+            Graph accepted by :meth:`from_graph`.
+        **kwargs
+            Additional :class:`FitnessLandscape` constructor arguments.
+
+        Returns
+        -------
+        FitnessLandscape
+            Constructed landscape.
         """
         return cls.from_graph(graph, **kwargs)
 
@@ -3071,8 +3283,25 @@ class FitnessLandscape:
         include_legacy_pickle: bool = False,
         overwrite: bool = False,
     ) -> Path:
-        """
-        Save the landscape in the canonical portable directory bundle format.
+        """Save the landscape as a canonical portable directory bundle.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path
+            Destination directory.
+        metadata : mapping, optional
+            User metadata stored in the manifest.
+        include_embeddings : bool, default=True
+            Include embedding arrays in the bundle.
+        include_legacy_pickle : bool, default=False
+            Include an explicitly unsafe compatibility pickle.
+        overwrite : bool, default=False
+            Replace an existing destination.
+
+        Returns
+        -------
+        pathlib.Path
+            Written directory.
         """
         from ..io import save_bundle_dir as _save_bundle_dir
 
@@ -3087,8 +3316,17 @@ class FitnessLandscape:
 
     @classmethod
     def load_bundle_dir(cls, path: str | Path) -> "FitnessLandscape":
-        """
-        Load a landscape from a canonical portable directory bundle.
+        """Load a landscape from a portable directory bundle.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path
+            Bundle directory.
+
+        Returns
+        -------
+        FitnessLandscape
+            Reconstructed landscape.
         """
         from ..io import load_bundle_dir as _load_bundle_dir
 
@@ -3107,8 +3345,23 @@ class FitnessLandscape:
         backend: str = "portable",
         overwrite: bool = False,
     ) -> Path:
-        """
-        Export the landscape as an `.lsbundle` archive.
+        """Export the landscape as an ``.lsbundle`` archive.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path
+            Destination archive path.
+        metadata : mapping, optional
+            User metadata stored in the manifest.
+        backend : str, default='portable'
+            Serialization backend. The release supports ``'portable'``.
+        overwrite : bool, default=False
+            Replace an existing archive.
+
+        Returns
+        -------
+        pathlib.Path
+            Written archive.
         """
         from ..io import export_lsbundle as _export_lsbundle
 
@@ -3121,13 +3374,39 @@ class FitnessLandscape:
         )
 
     def save(self, filepath: Path):
-        """Saves the FitnessLandscape object to a file."""
+        """Serialize the landscape with Python pickle.
+
+        Parameters
+        ----------
+        filepath : pathlib.Path
+            Destination pickle file.
+
+        Notes
+        -----
+        Pickle is unsafe for untrusted data. Prefer :meth:`save_bundle_dir` for
+        portable release artifacts.
+        """
         with open(filepath, 'wb') as f:
             pickle.dump(self, f)
 
     @staticmethod
     def load(filepath: Path):
-        """Loads a FitnessLandscape object from a file."""
+        """Load a legacy Python pickle.
+
+        Parameters
+        ----------
+        filepath : pathlib.Path
+            Pickle file created by :meth:`save`.
+
+        Returns
+        -------
+        FitnessLandscape
+            Deserialized landscape.
+
+        Notes
+        -----
+        Never load a pickle from an untrusted source.
+        """
         with open(filepath, 'rb') as f:
             return pickle.load(f)
 

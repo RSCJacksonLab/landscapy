@@ -128,3 +128,21 @@ def test_save_and_load_embeddings(embedder, tmp_path: Path):
     
     # The loaded array should be identical to the original
     assert np.array_equal(original_embedding, loaded_embedding)
+
+
+def test_extract_features_delegates_to_embedding_path(monkeypatch):
+    """The convenience alias must not recurse into itself."""
+    embedder = object.__new__(ESMEmbedder)
+    expected = np.ones((2, 3), dtype=np.float32)
+    calls = []
+
+    def fake_embed(sequences, batch_size):
+        calls.append((sequences, batch_size))
+        return expected
+
+    monkeypatch.setattr(embedder, "embed_relaxed_seqs", fake_embed)
+
+    result = embedder.extract_features(["AC", "GT"], batch_size=7)
+
+    assert result is expected
+    assert calls == [(["AC", "GT"], 7)]

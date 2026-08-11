@@ -229,6 +229,12 @@ def edge_length_stats(G: nx.Graph,
     
     weight_key : str, default=`weight`
         The key that edge weights are stored under.
+
+    Returns
+    -------
+    dict
+        Edge count and mean, median, and population standard deviation of the
+        selected edge-length attribute.
     """
     L = [d.get(weight_key, 1.0) for _,_,d in G.edges(data=True)]
     return dict(n=len(L), mean=np.mean(L), median=np.median(L), std=np.std(L))
@@ -501,7 +507,7 @@ def evaluate_reconstruction(G_lat_truth: Union[FitnessLandscape, nx.Graph],
     G_induced : FitnessLandscape or nx.Graph
         The observed induced subgraph.
     
-    G_lat_recon: FitnessLandscape or nx.Graph
+    G_lat_recon : FitnessLandscape or nx.Graph
         The reconstructed latent Graph.
     
     Returns
@@ -1648,16 +1654,57 @@ def evaluate_isorank_alignment(Ga: Union[FitnessLandscape, nx.Graph],
                                plm_device: Optional[str] = None,
                                plm_batch_size: int = 64,
                                use_ohe_only: bool = False) -> Dict:
-    """
+    """Align two graphs with feature-aware IsoRank and evaluate the mapping.
+
     Align two graphs via IsoRank (with node features) and evaluate the
     induced mapping with edge precision/recall/F1 and spectral
     correlations over the first non-trivial Laplacian eigenvectors.
 
-    Feature selection per graph:
-      - If use_ohe_only=True: use averaged one-hot/ungapped encodings.
-      - Else, prefer node attributes in prefer_attrs; if missing and
-        use_plm_fallback=True, compute PLM embeddings from sequences;
-        otherwise use spectral features.
+    Parameters
+    ----------
+    Ga : FitnessLandscape or networkx.Graph
+        First undirected graph.
+    Gb : FitnessLandscape or networkx.Graph
+        Second undirected graph.
+    alpha : float, default=0.85
+        IsoRank mixing weight between topology and feature similarity.
+    max_iter : int, default=100
+        Maximum IsoRank iterations.
+    tol : float, default=1e-6
+        Frobenius-norm convergence tolerance.
+    prefer_attrs : tuple of str, default=('emb_arr',)
+        Node attributes considered for feature matrices in priority order.
+    spectral_k : int, default=16
+        Number of spectral feature modes used when preferred attributes are
+        unavailable.
+    spectral_corr_k : int, default=20
+        Maximum non-trivial Laplacian modes compared after matching.
+    use_plm_fallback : bool, default=True
+        Compute protein language-model features when preferred attributes are
+        absent and sequences are available.
+    plm_model_name : str, default='facebook/esm2_t6_8M_UR50D'
+        Hugging Face model used by the PLM fallback.
+    plm_device : str, optional
+        Torch device for PLM inference.
+    plm_batch_size : int, default=64
+        PLM inference batch size.
+    use_ohe_only : bool, default=False
+        Use averaged one-hot sequence features and bypass all other feature
+        sources.
+
+    Returns
+    -------
+    dict
+        Hungarian node mapping derived from the IsoRank similarity matrix,
+        mapped-edge precision/recall/F1, absolute correlation by matched
+        Laplacian mode, mean spectral correlation, and graph/match sizes.
+
+    Notes
+    -----
+    Unless ``use_ohe_only`` is true, node attributes in ``prefer_attrs`` are
+    used first. Missing attributes trigger PLM features when enabled, then
+    spectral features. Edge metrics compare the mapped edges of ``Ga`` with
+    the subgraph of ``Gb`` induced by matched nodes.
     """
     A = _ensure_graph(Ga)
     B = _ensure_graph(Gb)

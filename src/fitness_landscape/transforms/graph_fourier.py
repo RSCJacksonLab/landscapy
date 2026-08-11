@@ -30,6 +30,10 @@ def graph_fourier_transform(graph: Union[nx.Graph, FitnessLandscape],
     k : int, default=`None`
         Number of eigenvectors to use. If None, compute all eigenvectors
         (dense; may be expensive for large graphs).
+    _eigenvectors : ndarray, optional
+        Precomputed eigenvectors whose columns form the transform basis.
+    _eigenvalues : ndarray, optional
+        Eigenvalues corresponding to ``_eigenvectors``.
         
     Returns
     -------

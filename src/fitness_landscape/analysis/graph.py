@@ -206,6 +206,8 @@ def calculate_ruggedness_local_optima(landscape: FitnessLandscape,
     ----------
     landscape : FitnessLandscape
         The fitness landscape to analyze. 
+    **kwargs
+        Reserved for compatibility. No keyword is currently consumed.
     
     Returns
     -------
@@ -275,13 +277,13 @@ def graph_spectral_analysis(landscape: FitnessLandscape,
     
     Parameters
     ----------
-    graph : networkx.Graph or FitnessLandscape
-        Graph to analyze.
-    k : int or None, optional
-        Number of eigenmodes to analyze.
+    landscape : FitnessLandscape
+        Landscape whose graph topology is analysed.
     matrix : str, default=`laplacian`
         The matrix to use for spectral analysis. Options are
         `laplacian` or `norm_laplcian`.
+    k : int or None, optional
+        Number of eigenmodes to analyze.
         
     Returns
     -------
@@ -793,6 +795,9 @@ def resistance_distance_matrix(graph: Union[FitnessLandscape, nx.Graph],
     jitter : float, default=1e-10
         Diagonal regularisation added when the Laplacian is not full
         rank to ensure a stable pseudoinverse.
+    sparse_threshold : int, default=1000
+        Node count above which sparse grounded-Laplacian factorization replaces
+        the dense pseudoinverse path.
     weight_epsilon : float, default=1e-8
         Small positive value added to every edge weight (via an
         unweighted Laplacian) before factorisation to prevent the sparse
