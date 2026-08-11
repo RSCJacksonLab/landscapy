@@ -8,6 +8,8 @@ from __future__ import annotations
 try:  # pragma: no cover
     from phylo_landscapy.graph_matching.latent_alignment import *  # type: ignore
 except ModuleNotFoundError as exc:  # pragma: no cover
+    if exc.name and not exc.name.startswith("phylo_landscapy"):
+        raise
     _IMPORT_ERROR = exc
     _ERR = (
         "RJMCMC latent alignment has moved to 'phylo-landscapy'. "

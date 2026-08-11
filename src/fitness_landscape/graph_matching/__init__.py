@@ -47,6 +47,8 @@ try:  # pragma: no cover
 
     __all__ += sorted(_ALIGNER_NAMES)
 except ModuleNotFoundError as exc:  # pragma: no cover
+    if exc.name and not exc.name.startswith("phylo_landscapy"):
+        raise
     _IMPORT_ERROR = exc
     _ERR = (
         "RJMCMC alignment utilities have moved to 'phylo-landscapy'. "
