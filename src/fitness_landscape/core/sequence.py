@@ -617,15 +617,27 @@ class BaseNumpySequence:
         BaseNumpySequence
             The constructed BaseNumpySequence object.
         """
-        one_hot = np.asarray(one_hot)
+        try:
+            one_hot = np.array(one_hot, dtype=float, copy=True)
+        except (TypeError, ValueError) as error:
+            raise ValueError("one_hot must contain numeric values") from error
         if one_hot.ndim != 2:
             raise ValueError("one_hot must be 2D (L, |A|)")
-        idx = np.argmax(one_hot, axis=1)
+        if one_hot.shape[1] == 0:
+            raise ValueError("one_hot must contain at least one alphabet column")
         if alphabet is not None:
-            # Auto compute alphabet if not provided.
-            alphabet = list(alphabet)
-        else: 
+            alphabet = _validated_alphabet(alphabet)
+            if one_hot.shape[1] != len(alphabet):
+                raise ValueError("one_hot width must match alphabet length")
+        else:
             alphabet = list(range(one_hot.shape[1]))
+        if not np.all(np.isfinite(one_hot)):
+            raise ValueError("one_hot must contain only finite values")
+        if not np.all((one_hot == 0.0) | (one_hot == 1.0)):
+            raise ValueError("one_hot must contain only zero and one")
+        if not np.all(one_hot.sum(axis=1) == 1.0):
+            raise ValueError("one_hot rows must contain exactly one active value")
+        idx = np.argmax(one_hot, axis=1)
         arr = np.array([alphabet[i] for i in idx], dtype=object)
         
         return cls(arr,
