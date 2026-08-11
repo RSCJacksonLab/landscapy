@@ -11,6 +11,8 @@ from __future__ import annotations
 try:  # pragma: no cover - thin compatibility wrapper
     from phylo_landscapy.core.superscape import *  # type: ignore
 except ModuleNotFoundError as exc:  # pragma: no cover
+    if exc.name and not exc.name.startswith("phylo_landscapy"):
+        raise
     _IMPORT_ERROR = exc
     _ERR = (
         "Superscape utilities have moved to 'phylo-landscapy'. "

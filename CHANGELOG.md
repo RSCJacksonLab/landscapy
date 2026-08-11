@@ -17,6 +17,8 @@ All notable changes to Landscapy are documented here.
 - Consolidated package metadata in `pyproject.toml`.
 - Reduced the publication API to the methods required by the application note.
 - Improved memory use when loading and exporting large landscapes.
+- Compatibility imports for moved APIs now preserve their original cause and
+  report the required optional package without masking transitive import errors.
 
 ### Removed
 
