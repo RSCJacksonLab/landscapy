@@ -1,11 +1,75 @@
 [build-system]
-requires = ["setuptools>=42", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "landscapy"
+version = "0.9.0"
+description = "Construction and analysis of graph-based fitness landscapes"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+  { name = "Matthew A. Spence", email = "matthew.spence@anu.edu.au" },
+  { name = "Barnabas Gall" },
+  { name = "Dana S. Matthews" },
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = [
+  "click>=8.1",
+  "cogent3==2025.7.10a10",
+  "faiss-cpu>=1.11",
+  "gudhi>=3.11",
+  "networkx>=3.2",
+  "numpy>=1.24",
+  "pandas>=2.3",
+  "piqtree>=0.6.1",
+  "ray>=2.48",
+  "scikit-learn>=1.3",
+  "scipy>=1.10",
+  "softalign>=1.0.0",
+  "torch>=2.1",
+  "torch-geometric>=2.6",
+  "transformers>=4.53.2",
+]
+
+[project.optional-dependencies]
+parquet = ["pyarrow>=17"]
+dev = [
+  "build>=1.2",
+  "pytest>=8",
+  "pytest-cov>=6",
+  "pytest-mock>=3.14",
+  "ruff>=0.5",
+  "twine>=5",
+]
+
+[project.urls]
+Homepage = "https://github.com/RSCJacksonLab/landscapy"
+Issues = "https://github.com/RSCJacksonLab/landscapy/issues"
+Repository = "https://github.com/RSCJacksonLab/landscapy"
+
+[project.scripts]
+landscapy = "fitness_landscape.__main__:cli"
+landscapy-evol = "fitness_landscape.__main__:evol_diffusion_landscape"
+landscapy-phylo = "fitness_landscape.__main__:phylo_landscape"
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.black]
 line-length = 88
-target-version = ['py37', 'py38', 'py39']
-include = '\.pyi?$'
+target-version = ["py311", "py312"]
+include = "\\.pyi?$"
 
 [tool.isort]
 profile = "black"
@@ -15,29 +79,8 @@ multi_line_output = 3
 testpaths = ["tests"]
 python_files = "test_*.py"
 filterwarnings = [
-    "ignore:numpy.core._multiarray_umath.*:DeprecationWarning",
-    "ignore:.*SwigPyPacked.*:DeprecationWarning",
-    "ignore:.*SwigPyObject.*:DeprecationWarning",
-    "ignore:.*swigvarlink.*:DeprecationWarning",
-]
-
-[tool.coverage.run]
-omit = [
-  "src/fitness_landscape/__main__.py",
-  "src/fitness_landscape/phylo/*",
-  "src/fitness_landscape/graph_matching/latent_alignment.py",
-  "src/fitness_landscape/graph_matching/hierarchical_alignment.py",
-  "src/fitness_landscape/analysis/*",
-  "src/fitness_landscape/transforms/*",
-  "src/fitness_landscape/embedding/*",
-  # Heavier-core modules with complex integrations; measured via higher-level tests
-  "src/fitness_landscape/core/graph.py",
-  "src/fitness_landscape/core/landscape.py",
-  "src/fitness_landscape/core/sequence.py",
-  "src/fitness_landscape/core/superscape.py",
-  "src/fitness_landscape/core/fitness.py",
-  "src/fitness_landscape/core/digraph.py",
-  "src/fitness_landscape/utils.py",
-  "src/fitness_landscape/models/*",
-  "src/fitness_landscape/graph_matching/minimum_spanning_graph.py",
+  "ignore:numpy.core._multiarray_umath.*:DeprecationWarning",
+  "ignore:.*SwigPyPacked.*:DeprecationWarning",
+  "ignore:.*SwigPyObject.*:DeprecationWarning",
+  "ignore:.*swigvarlink.*:DeprecationWarning",
 ]
