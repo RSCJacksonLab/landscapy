@@ -16,18 +16,19 @@ def eigenmode_decomposition(graph: Union[nx.Graph, FitnessLandscape],
                             weight_key: str | None = AUTO_EDGE_KEY,
                             dense_threshold: int = 5000) -> Tuple:
     """
-    Compute eigenmode decomposition of a graph.
+    Compute a real eigenmode decomposition of an undirected graph.
     
     Parameters
     ----------
     graph : networkx.Graph or FitnessLandscape
         Graph to decompose.
     k : int or None, optional
-        Number of eigenmodes to compute. If None, compute all eigenpairs
+        Positive number of eigenmodes to compute. If None, compute all eigenpairs
         using a dense decomposition (may be expensive for large graphs).
     matrix : str, default = `laplacian`
-        The graph matrix to decompose. Either Laplacian matrix or the
-        adjacency matrix.
+        Matrix to decompose: adjacency, combinatorial Laplacian, symmetric
+        normalized Laplacian, or ``transition``. The latter denotes the
+        random-walk Laplacian ``I - D^-1 A``.
     weight_key : str or None, default="auto"
         Conductance attribute used to construct graph matrices. ``"auto"``
         resolves constructor metadata; ``None`` requests unweighted matrices.
@@ -37,12 +38,36 @@ def eigenmode_decomposition(graph: Union[nx.Graph, FitnessLandscape],
     Returns
     -------
     tuple
-        (eigenvalues, eigenvectors)
+        ``(eigenvalues, eigenvectors)`` ordered by ascending eigenvalue. For
+        ``matrix='transition'``, columns are real right eigenvectors of the
+        random-walk Laplacian and are orthonormal under node measure
+        ``degree`` (or unit measure for isolates).
+
+    Notes
+    -----
+    The random-walk Laplacian is generally nonsymmetric. Landscapy solves the
+    similar symmetric normalized operator and maps modes back with
+    ``D^-1/2``. Isolated nodes are assigned zero rows in both operators and
+    therefore contribute stationary zero modes.
     """
     if isinstance(graph, FitnessLandscape):
         graph = graph.graph
     if not isinstance(graph, nx.Graph):
         raise TypeError("graph must be a NetworkX Graph or FitnessLandscape")
+    if graph.is_directed():
+        raise TypeError("eigenmode_decomposition requires an undirected graph")
+    if k is not None:
+        if isinstance(k, (bool, np.bool_)) or not isinstance(k, (int, np.integer)):
+            raise TypeError("k must be a positive integer or None")
+        if k <= 0:
+            raise ValueError("k must be a positive integer or None")
+        k = int(k)
+    if isinstance(dense_threshold, (bool, np.bool_)) or not isinstance(
+        dense_threshold, (int, np.integer)
+    ):
+        raise TypeError("dense_threshold must be a non-negative integer")
+    if dense_threshold < 0:
+        raise ValueError("dense_threshold must be a non-negative integer")
     resolved_weight_key = resolve_edge_attribute(
         graph,
         "conductance",
@@ -51,6 +76,7 @@ def eigenmode_decomposition(graph: Union[nx.Graph, FitnessLandscape],
     )
 
     # Build the requested matrix (prefer sparse)
+    mode_scale = None
     if matrix == 'laplacian':
         M = nx.laplacian_matrix(graph, weight=resolved_weight_key).astype(float).tocsr()
         symmetric_psd = True
@@ -64,21 +90,50 @@ def eigenmode_decomposition(graph: Union[nx.Graph, FitnessLandscape],
     
     elif matrix == 'adjacency':
         M = nx.adjacency_matrix(graph, weight=resolved_weight_key).astype(float).tocsr()
-        symmetric_psd = True  # symmetric for undirected graphs (not PSD)
+        symmetric_psd = False  # symmetric for undirected graphs, but not PSD
     
     elif matrix == 'transition':
-        # Row-stochastic: A D^{-1}
+        # L_rw = I - D^-1 A is similar to the symmetric normalized
+        # L_sym = I - D^-1/2 A D^-1/2 on positive-degree nodes.
         A = nx.adjacency_matrix(graph, weight=resolved_weight_key).astype(float).tocsr()
         d = np.asarray(A.sum(axis=1)).ravel()
-        d[d == 0.0] = 1.0
-        Dinv = sp.diags(1.0 / d)
-        M = sp.eye(A.shape[0], format='csr') - Dinv @ A
-        symmetric_psd = False
+        positive = d > 0.0
+        inverse_root = np.zeros_like(d, dtype=float)
+        inverse_root[positive] = 1.0 / np.sqrt(d[positive])
+        Dinv_root = sp.diags(inverse_root)
+        M = sp.diags(positive.astype(float)) - Dinv_root @ A @ Dinv_root
+        M = M.astype(float).tocsr()
+        # Unit measure for isolates retains their canonical basis modes;
+        # positive-degree nodes use the standard degree measure.
+        mode_scale = np.ones_like(d, dtype=float)
+        mode_scale[positive] = inverse_root[positive]
+        symmetric_psd = True
     
     else:
         raise ValueError(f"Unsupported matrix: {matrix}")
 
     n = M.shape[0]
+
+    def _finalize(
+        eigenvalues: np.ndarray,
+        eigenvectors: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Sort, validate real semantics, and map transition modes back."""
+        values = np.real_if_close(eigenvalues, tol=1000)
+        vectors = np.real_if_close(eigenvectors, tol=1000)
+        if np.iscomplexobj(values) or np.iscomplexobj(vectors):
+            raise RuntimeError("Undirected graph eigendecomposition returned complex modes")
+        values = np.asarray(values, dtype=float)
+        vectors = np.asarray(vectors, dtype=float)
+        order = np.argsort(values, kind="stable")
+        values = values[order]
+        vectors = vectors[:, order]
+        if symmetric_psd:
+            tolerance = np.finfo(float).eps * max(1, n) * 100.0
+            values[np.abs(values) <= tolerance] = 0.0
+        if mode_scale is not None:
+            vectors = mode_scale[:, None] * vectors
+        return values, vectors
 
     def _dense_full(mat: sp.spmatrix) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -87,8 +142,7 @@ def eigenmode_decomposition(graph: Union[nx.Graph, FitnessLandscape],
         A = mat.toarray() if sp.issparse(mat) else np.asarray(mat, dtype=float)
         # Use dense matrix decomposition.
         w, U = np.linalg.eigh(A)
-        idx = np.argsort(w)
-        return w[idx], U[:, idx]
+        return _finalize(w, U)
 
     # Route based on size / k / symmetry
     if not sp.issparse(M):
@@ -106,16 +160,11 @@ def eigenmode_decomposition(graph: Union[nx.Graph, FitnessLandscape],
         return _dense_full(M)
 
     # If small graph use dense.
-    if n <= dense_threshold and k >= n:
-        return _dense_full(M)
-
-    k = int(k)
-    if k <= 0 or k >= n:
-        # Degenerate asks fall back to dense
+    if k >= n:
         return _dense_full(M)
 
     # Sparse path
-    if symmetric_psd and matrix in ('laplacian', 'norm_laplacian'):
+    if symmetric_psd:
         # Use shift–invert at sigma=0 to get smallest eigenpairs efficiently
         try:
             
@@ -130,6 +179,4 @@ def eigenmode_decomposition(graph: Union[nx.Graph, FitnessLandscape],
         # Adjacency or others: get largest magnitude by default
         w, U = spla.eigsh(M, k=k, which='LM')
 
-    # Sort by eigenvalues
-    idx = np.argsort(w)
-    return w[idx], U[:, idx]
+    return _finalize(w, U)

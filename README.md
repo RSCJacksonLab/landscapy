@@ -117,6 +117,8 @@ particular, NetworkX `weight` is reserved for conductance and is never a raw
 distance. Constructor input and small-sample behavior are specified in the
 [graph-constructor contract](docs/graph_constructors.md), and diffusion graphs
 follow the [reversible diffusion contract](docs/diffusion_semantics.md).
+Transition eigenmodes follow the documented
+[random-walk spectral contract](docs/spectral_operators.md).
 
 - `fitness_landscape.core`: sequences, fitness and annotation layers,
   undirected graph construction, and `FitnessLandscape`.
