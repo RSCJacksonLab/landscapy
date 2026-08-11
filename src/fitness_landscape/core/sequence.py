@@ -772,41 +772,7 @@ class SoftSequence(BaseNumpySequence):
 
         # No explicit gap channel — posterior already (L, A)
         return P
-    
-    @property
-    def ungapped_arr(self) -> np.ndarray:
-        """
-        Return a (L, A) probabilistic array with the gap channel
-        marginalised out. If the posterior already has no gap channel,
-        return it as-is.
-        """
-        P = np.asarray(self.posterior, dtype=float)
-        L, C = P.shape
 
-        # If a gap symbol exists in this sequence's alphabet, assume the
-        # posterior includes it (same order) and renormalise by (1 - p_gap).
-        if "gap" in self.alphabet:
-            gap_idx = self.alphabet.index("gap")
-            if not (0 <= gap_idx < C):
-                raise ValueError(
-                    "SoftSequence posterior width does not match alphabet including gap"
-                )
-            aa = np.delete(P, gap_idx, axis=1)      # (L, A)
-            p_gap = P[:, gap_idx:gap_idx + 1]       # (L, 1)
-            denom = np.clip(1.0 - p_gap, 1e-12, None)
-            return aa / denom
-
-        # No explicit gap channel — posterior already (L, A)
-        return P
-
-    def remove_gap_arr(self, *, gap_threshold: float = 0.5) -> np.ndarray:
-        """
-        For SoftSequence, prefer probabilistic gap removal by
-        marginalisation, not thresholding. Ignores gap_threshold and
-        returns the renormalised amino-acid posterior of shape (L, A).
-        """
-        return self.ungapped_arr
-    
     def remove_gap_arr(self, *, gap_threshold: float = 0.5) -> np.ndarray:
         """
         For SoftSequence, prefer probabilistic gap removal by

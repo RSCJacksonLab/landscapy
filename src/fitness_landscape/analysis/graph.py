@@ -1,4 +1,3 @@
-from networkx.algorithms.bipartite import matrix
 from networkx.algorithms.community import louvain_communities
 from networkx.algorithms.community.quality import modularity
 import numpy as np

@@ -1,7 +1,7 @@
 import math
 import numpy as np
 import networkx as nx
-from typing import List, Union, Optional, Tuple, Dict, Sequence, Callable, Literal
+from typing import TYPE_CHECKING, List, Union, Optional, Tuple, Dict, Sequence, Callable, Literal
 import torch
 from scipy import sparse as sp
 from scipy.spatial import cKDTree, distance_matrix
@@ -13,7 +13,9 @@ from ._const import ALPHABET_21, PROT_20
 from cogent3.core.alignment import Alignment, make_aligned_seqs
 from cogent3 import load_aligned_seqs
 from pathlib import Path
-from .core.sequence import BaseNumpySequence
+
+if TYPE_CHECKING:
+    from .core.landscape import FitnessLandscape
 
 def sanitize_alignment(aln: Alignment,
                        *,
@@ -367,7 +369,7 @@ def sample_observed_induced_connected(G_lat: nx.Graph,
                                       edge_keep: float = 0.6,
                                       seed: int = None,
                                       *, 
-                                      return_graph: bool = False,) -> Union[nx.Graph, 'FitessLandscape']:
+                                      return_graph: bool = False,) -> Union[nx.Graph, 'FitnessLandscape']:
     """
     Util function to induce a connected subgraph from a latent graph.
 

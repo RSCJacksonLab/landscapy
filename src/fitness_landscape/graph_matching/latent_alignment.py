@@ -8,6 +8,7 @@ from __future__ import annotations
 try:  # pragma: no cover
     from phylo_landscapy.graph_matching.latent_alignment import *  # type: ignore
 except ModuleNotFoundError as exc:  # pragma: no cover
+    _IMPORT_ERROR = exc
     _ERR = (
         "RJMCMC latent alignment has moved to 'phylo-landscapy'. "
         "Install phylo-landscapy to access RJMCMCAligner and related helpers."
@@ -16,4 +17,4 @@ except ModuleNotFoundError as exc:  # pragma: no cover
     __all__ = ()
 
     def __getattr__(name):  # type: ignore
-        raise ModuleNotFoundError(_ERR) from exc
+        raise ModuleNotFoundError(_ERR) from _IMPORT_ERROR

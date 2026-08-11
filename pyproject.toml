@@ -84,3 +84,22 @@ filterwarnings = [
   "ignore:.*SwigPyObject.*:DeprecationWarning",
   "ignore:.*swigvarlink.*:DeprecationWarning",
 ]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+# Release-blocking correctness rules. Broader style cleanup is intentionally
+# separate from this gate so it cannot obscure executable failures.
+select = ["F811", "F821", "F822"]
+
+[tool.coverage.run]
+branch = true
+source = ["fitness_landscape"]
+
+[tool.coverage.report]
+fail_under = 56
+precision = 1
+show_missing = true
+skip_covered = true

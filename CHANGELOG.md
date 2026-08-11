@@ -10,6 +10,7 @@ All notable changes to Landscapy are documented here.
 - Weighted random-walk support.
 - Corrected evolutionary-diffusion edge scoring.
 - Python 3.11 and 3.12 package metadata and build verification.
+- Release-blocking lint, public-import, CLI-smoke, and branch-coverage gates.
 
 ### Changed
 

@@ -616,7 +616,7 @@ def compute_ruggedness_diffusion_scale(landscape: FitnessLandscape,
         signal = landscape.get_signal()
     # View a key valued fitness layer instead.
     else:
-        _ = fitness_landscape.view(fitness_layer)
+        _ = landscape.view(fitness_layer)
         signal = landscape.get_signal()
     
     # Make sure not directed graph.
