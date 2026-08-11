@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import warnings
 import numpy as np
 import networkx as nx
@@ -24,6 +23,199 @@ if TYPE_CHECKING:
     from cogent3.core.alignment import Alignment
 
 _BaseSequence = [BaseNumpySequence, BinarySequence, SoftSequence]
+
+_NEIGHBOUR_BACKENDS = {"auto", "faiss", "balltree"}
+_FAISS_INDEX_TYPES = {"flat", "hnsw", "ivf"}
+_FAISS_METRICS = {"ip", "l2"}
+_TIE_POLICIES = {"all", "min_index", "random"}
+
+
+def _validate_sequence_collection(
+    sequences: Sequence[BaseNumpySequence],
+    *,
+    name: str = "sequences",
+) -> tuple[int, int]:
+    """Validate graph-constructor sequence structure.
+
+    Empty collections are supported and return ``(0, 0)``. Non-empty
+    collections must contain aligned, non-empty ``BaseNumpySequence``
+    instances.
+    """
+
+    if sequences is None:
+        raise TypeError(f"`{name}` must be a sequence collection, not None.")
+
+    try:
+        n_sequences = len(sequences)
+    except TypeError as error:
+        raise TypeError(f"`{name}` must be a sized sequence collection.") from error
+
+    if n_sequences == 0:
+        return 0, 0
+
+    for index, sequence in enumerate(sequences):
+        if not isinstance(sequence, BaseNumpySequence):
+            raise TypeError(
+                f"`{name}[{index}]` must be a BaseNumpySequence instance."
+            )
+
+    lengths = [len(sequence) for sequence in sequences]
+    if any(length <= 0 for length in lengths):
+        raise ValueError(f"`{name}` entries must be non-empty.")
+    if len(set(lengths)) != 1:
+        raise ValueError(
+            f"`{name}` entries must have a uniform aligned length; found {lengths}."
+        )
+    return n_sequences, lengths[0]
+
+
+def _validate_embedding_matrix(
+    embeddings: np.ndarray,
+    *,
+    n_sequences: int,
+    name: str = "embeddings",
+) -> np.ndarray:
+    """Return a finite two-dimensional embedding matrix aligned to sequences."""
+
+    matrix = np.asarray(embeddings)
+    if matrix.ndim != 2:
+        raise ValueError(f"`{name}` must be 2-D with shape (n_sequences, n_features).")
+    if matrix.shape[0] != n_sequences:
+        raise ValueError(
+            f"`{name}` rows must match `sequences`; found {matrix.shape[0]} rows "
+            f"for {n_sequences} sequences."
+        )
+    if matrix.shape[1] == 0:
+        raise ValueError(f"`{name}` must contain at least one feature column.")
+    if np.issubdtype(matrix.dtype, np.complexfloating):
+        raise ValueError(f"`{name}` must contain real numeric values.")
+    if not np.issubdtype(matrix.dtype, np.number):
+        try:
+            matrix = matrix.astype(np.float64)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"`{name}` must contain numeric values.") from error
+    if not np.all(np.isfinite(matrix)):
+        raise ValueError(f"`{name}` must contain only finite values.")
+    return matrix
+
+
+def _validate_integer(
+    value: Any,
+    *,
+    name: str,
+    minimum: int,
+) -> int:
+    """Return an integer parameter after rejecting booleans and coercions."""
+
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"`{name}` must be an integer >= {minimum}.")
+    result = int(value)
+    if result < minimum:
+        raise ValueError(f"`{name}` must be an integer >= {minimum}.")
+    return result
+
+
+def _validate_boolean(value: Any, *, name: str) -> bool:
+    """Return a strict boolean option."""
+
+    if not isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"`{name}` must be a boolean.")
+    return bool(value)
+
+
+def _validate_neighbour_configuration(
+    *,
+    n_sequences: int,
+    k: Any,
+    tiebuffer: Any,
+    backend: str,
+    index_type: str,
+    faiss_metric: str,
+    include_self: Any,
+    use_gpu: Any,
+    hnsw_M: Any,
+    tie_policy: str | None = None,
+) -> tuple[int, str]:
+    """Validate shared kNN options and return capped k and resolved backend."""
+
+    requested_k = _validate_integer(k, name="k", minimum=1)
+    _validate_integer(tiebuffer, name="tiebuffer", minimum=0)
+    _validate_integer(hnsw_M, name="hnsw_M", minimum=1)
+    include_self = _validate_boolean(include_self, name="include_self")
+    use_gpu = _validate_boolean(use_gpu, name="use_gpu")
+
+    if backend not in _NEIGHBOUR_BACKENDS:
+        raise ValueError(
+            f"Unsupported backend {backend!r}. Expected one of "
+            f"{sorted(_NEIGHBOUR_BACKENDS)}."
+        )
+    if index_type not in _FAISS_INDEX_TYPES:
+        raise ValueError(
+            f"Unsupported FAISS index_type {index_type!r}. Expected one of "
+            f"{sorted(_FAISS_INDEX_TYPES)}."
+        )
+    if faiss_metric not in _FAISS_METRICS:
+        raise ValueError(
+            f"Unsupported FAISS metric {faiss_metric!r}. Expected 'ip' or 'l2'."
+        )
+    if tie_policy is not None and tie_policy not in _TIE_POLICIES:
+        raise ValueError(
+            f"Unsupported tie_policy {tie_policy!r}. Expected one of "
+            f"{sorted(_TIE_POLICIES)}."
+        )
+
+    resolved_backend = (
+        "faiss" if backend == "auto" and n_sequences >= 5000
+        else "balltree" if backend == "auto"
+        else backend
+    )
+    if use_gpu and resolved_backend != "faiss":
+        raise ValueError("`use_gpu=True` requires the FAISS backend.")
+    if use_gpu and index_type != "flat":
+        raise ValueError("`use_gpu=True` is supported only with index_type='flat'.")
+
+    # k always denotes non-self neighbours. A request beyond the available
+    # population is explicitly capped instead of being left to a backend.
+    effective_k = min(requested_k, max(n_sequences - 1, 0))
+    _ = include_self  # validated above; it controls candidate-query capacity.
+    return effective_k, resolved_backend
+
+
+def _validate_diffusion_power(
+    t: Optional[Union[int, float]],
+) -> tuple[bool, int | None]:
+    """Validate diffusion power and normalize stationary sentinels."""
+
+    if t is None:
+        return True, None
+    if isinstance(t, (bool, np.bool_)) or not isinstance(
+        t, (int, float, np.integer, np.floating)
+    ):
+        raise TypeError("`t` must be a non-negative integer, None, or positive infinity.")
+    value = float(t)
+    if np.isnan(value) or value == -np.inf:
+        raise ValueError("`t` must be a non-negative integer, None, or positive infinity.")
+    if value == np.inf or value == 0.0:
+        return True, None
+    if not np.isfinite(value) or not value.is_integer() or value < 1.0:
+        raise ValueError("Finite `t` must be an integer >= 1.")
+    return False, int(value)
+
+
+def _validate_connectivity_threshold(value: Any) -> float:
+    """Return a finite diffusion-probability threshold in ``[0, 1]``."""
+
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError("`connectivity_threshold` must be a real number in [0, 1].")
+    try:
+        threshold = float(value)
+    except (TypeError, ValueError) as error:
+        raise TypeError(
+            "`connectivity_threshold` must be a real number in [0, 1]."
+        ) from error
+    if not np.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise ValueError("`connectivity_threshold` must be finite and lie in [0, 1].")
+    return threshold
 
 
 def _force_disable_hamming_edge_computation(_requested: bool) -> bool:
@@ -99,6 +291,34 @@ def _attach_knn_edge_semantics(
     )
 
 
+def _declare_tda_graph_semantics(G: nx.Graph) -> None:
+    """Declare canonical alpha-complex distance and conductance semantics."""
+
+    declare_edge_semantics(
+        G,
+        constructor="tda-alpha-complex",
+        distance_key="distance",
+        distance_units="pca_euclidean",
+        affinity_key="affinity",
+        conductance_key="weight",
+        legacy_aliases={"tda_distance": "distance"},
+        notes="Conductance is 1 / (1 + PCA-space Euclidean distance).",
+    )
+
+
+def _declare_diffusion_graph_semantics(G: nx.Graph, *, constructor: str) -> None:
+    """Declare canonical diffusion affinity and conductance semantics."""
+
+    declare_edge_semantics(
+        G,
+        constructor=constructor,
+        affinity_key="affinity",
+        conductance_key="weight",
+        legacy_aliases={"kernel_weight": "affinity"},
+        notes="Conductance is the retained undirected diffusion affinity.",
+    )
+
+
 def _attach_unit_hamming_edge_attributes(
     G: nx.Graph,
     sequences: Sequence[BaseNumpySequence],
@@ -125,23 +345,6 @@ def _attach_unit_hamming_edge_attributes(
         for u, v in G.edges()
     }
     nx.set_edge_attributes(G, edge_attrs)
-
-
-def _should_use_stationary_power(t: Optional[Union[int, float]]) -> bool:
-    """Return ``True`` when ``t`` indicates the stationary regime."""
-
-    if t is None:
-        return True
-
-    if isinstance(t, (np.integer, int)):
-        return int(t) == 0
-
-    if isinstance(t, (np.floating, float)):
-        if float(t) == 0.0:
-            return True
-        return math.isinf(float(t)) and float(t) > 0.0
-
-    return False
 
 
 def _compute_stationary_distribution(
@@ -292,6 +495,9 @@ def create_hamming_graph_binary(sequences: list[BinarySequence], *, _compute_ham
         class. 
     """
     _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
+    _validate_sequence_collection(sequences)
+    if not all(isinstance(sequence, BinarySequence) for sequence in sequences):
+        raise TypeError("`sequences` must contain only BinarySequence instances.")
 
     A = _build_hamming_csr_binary(sequences)
     G = nx.from_scipy_sparse_array(A) 
@@ -503,6 +709,7 @@ def create_hamming_graph_multiallele(sequences: list[BaseNumpySequence], *, _com
     """
 
     _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
+    _validate_sequence_collection(sequences)
 
     A = _build_hamming_csr_multiallele_masked(sequences)
     G = nx.from_scipy_sparse_array(A)
@@ -554,6 +761,7 @@ def create_hamming_graph(sequences: List[BaseNumpySequence],
     """
     
     _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
+    _validate_sequence_collection(sequences)
 
     # Safety check all sequences are binary classes.
     is_binary = all(isinstance(s, BinarySequence) for s in sequences)
@@ -587,13 +795,21 @@ def _one_hot_matrix_amino(seqs: List[BaseNumpySequence]) -> np.ndarray:
     X : np.ndarray
         The one hot encoded matrix.    
     """
-    # assume all share the same alphabet order (e.g. PROT_20)
-    A = list(seqs[0].alphabet)
-    amap = {str(a): i for i, a in enumerate(A)}
-    L = len(seqs[0])
-    n = len(seqs)
-    X = np.zeros((n, L * len(A)), dtype=np.float32)
-    W = len(A)
+    n, L = _validate_sequence_collection(seqs)
+    if n == 0:
+        return np.empty((0, 0), dtype=np.float32)
+
+    # Use a shared alphabet in stable first-appearance order. Individual
+    # sequence objects may expose narrower inferred alphabets even when the
+    # collection as a whole is aligned.
+    alphabet: list[str] = []
+    for sequence in seqs:
+        for symbol in map(str, sequence.to_array()):
+            if symbol not in alphabet:
+                alphabet.append(symbol)
+    amap = {symbol: i for i, symbol in enumerate(alphabet)}
+    X = np.zeros((n, L * len(alphabet)), dtype=np.float32)
+    W = len(alphabet)
     for r, s in enumerate(seqs):
         arr = s.to_array()
         for p, sym in enumerate(arr):
@@ -631,6 +847,7 @@ def _find_knn_balltree(X : np.ndarray,
                        k : int,
                        tiebuffer : int = 0,
                        *,
+                       include_self: bool = False,
                        metric: str | None = None) -> Tuple[np.ndarray, np.ndarray]:
     """
     Helper function to find nearest neighbors by BallTree.
@@ -656,16 +873,29 @@ def _find_knn_balltree(X : np.ndarray,
     dists, inds : np.ndarray
         Tuple of distances and indices.
     """
+    raw = np.asarray(X)
+    if raw.ndim != 2:
+        raise ValueError("`X` must be 2-D with shape (n_samples, n_features).")
+    validated = _validate_embedding_matrix(raw, n_sequences=raw.shape[0], name="X")
+    # Preserve integer-coded sequence matrices so automatic metric selection
+    # continues to recognize categorical/Hamming inputs.
+    X = raw if np.issubdtype(raw.dtype, np.number) else validated
+    k = _validate_integer(k, name="k", minimum=1)
+    tiebuffer = _validate_integer(tiebuffer, name="tiebuffer", minimum=0)
+    include_self = _validate_boolean(include_self, name="include_self")
+    n = X.shape[0]
+    if n == 0:
+        empty = np.empty((0, 0), dtype=np.float64)
+        return empty, empty.astype(np.int64)
     sklearn_neighbors = require_optional(
         "sklearn.neighbors",
         extra="knn",
         purpose="BallTree nearest-neighbour graph construction",
     )
-    n = X.shape[0]
     metric = _resolve_balltree_metric(X, metric)
     nn = sklearn_neighbors.NearestNeighbors(algorithm='auto', metric=metric)
     nn.fit(X)
-    kq = min(k + 1 + tiebuffer, n)
+    kq = min(k + (0 if include_self else 1) + tiebuffer, n)
     dists, inds = nn.kneighbors(X, n_neighbors=kq, return_distance=True)
     return dists, inds
 
@@ -721,20 +951,44 @@ def _find_knn_faiss(X: np.ndarray,
         Tuple of distances and indices.
 
     """
+    raw = np.asarray(X)
+    if raw.ndim != 2:
+        raise ValueError("`X` must be 2-D with shape (n_samples, n_features).")
+    X = _validate_embedding_matrix(raw, n_sequences=raw.shape[0], name="X")
+    k = _validate_integer(k, name="k", minimum=1)
+    tiebuffer = _validate_integer(tiebuffer, name="tiebuffer", minimum=0)
+    hnsw_M = _validate_integer(hnsw_M, name="hnsw_M", minimum=1)
+    include_self = _validate_boolean(include_self, name="include_self")
+    use_gpu = _validate_boolean(use_gpu, name="use_gpu")
+    if index_type not in _FAISS_INDEX_TYPES:
+        raise ValueError(
+            f"Unsupported FAISS index_type {index_type!r}. Expected one of "
+            f"{sorted(_FAISS_INDEX_TYPES)}."
+        )
+    if metric not in _FAISS_METRICS:
+        raise ValueError(
+            f"Unsupported FAISS metric {metric!r}. Expected 'ip' or 'l2'."
+        )
+    if use_gpu and index_type != "flat":
+        raise ValueError("`use_gpu=True` is supported only with index_type='flat'.")
+
+    X = np.ascontiguousarray(X, dtype=np.float32)
+    n, d = X.shape
+    if n == 0:
+        empty = np.empty((0, 0), dtype=np.float32)
+        return empty, empty.astype(np.int64)
     faiss = require_optional(
         "faiss",
         extra="faiss",
         purpose="FAISS nearest-neighbour graph construction",
     )
-    n, d = X.shape
-
     # Set the FAISS metric so easy conversion back to hamming distance.
     if metric == "ip":
         faiss_metric = faiss.METRIC_INNER_PRODUCT
     elif metric == "l2":
         faiss_metric = faiss.METRIC_L2
-    else:
-        raise ValueError(f"Expected `faiss_metric` to be in [`ip`, `l2`, found {faiss_metric}]")
+    else:  # guarded before importing the backend
+        raise AssertionError("unreachable FAISS metric")
 
     # FAISS index
     if index_type == "flat":
@@ -757,15 +1011,20 @@ def _find_knn_faiss(X: np.ndarray,
                 )
             
     elif index_type == "ivf":
-        nlist = max(256, int(np.sqrt(n)))
-        quant = faiss.IndexFlatIP(d)
-        index = faiss.IndexIVFFlat(quant, d, nlist, faiss.METRIC_INNER_PRODUCT)
+        # Keep every coarse centroid trainable on small explicit-IVF inputs.
+        nlist = min(n, max(1, int(np.sqrt(n))))
+        quant = faiss.IndexFlatIP(d) if metric == "ip" else faiss.IndexFlatL2(d)
+        index = faiss.IndexIVFFlat(quant, d, nlist, faiss_metric)
         index.train(X)
         index.nprobe = min(64, nlist)
     else:
         raise ValueError(f"Expected `index_type` to be in [`flat`, `hnsw`, `ivf`], found {index_type}")
 
     if use_gpu:
+        if not hasattr(faiss, "StandardGpuResources"):
+            raise RuntimeError(
+                "`use_gpu=True` requires a GPU-enabled FAISS installation."
+            )
         res = faiss.StandardGpuResources()
         index = faiss.index_cpu_to_gpu(res, 0, index)
 
@@ -779,6 +1038,7 @@ def _find_knn_faiss(X: np.ndarray,
 
 def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
                                k: int,
+                               include_self: bool = False,
                                tie_policy: Literal['all', 'min_index', 'random'] = 'all',
                                tiebuffer: int = 128,
                                seed: int = 42,
@@ -820,7 +1080,12 @@ def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
     X, _ = _encode_multiallele(sequences)  
     L = X.shape[1]
 
-    dists, inds = _find_knn_balltree(X, k=k, tiebuffer=tiebuffer)
+    dists, inds = _find_knn_balltree(
+        X,
+        k=k,
+        tiebuffer=tiebuffer,
+        include_self=include_self,
+    )
 
     rng = np.random.default_rng(seed)
     rows, cols, vals = [], [], []
@@ -953,7 +1218,8 @@ def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
     L = len(sequences[0])
 
     D, I = _find_knn_faiss(X, k=k, index_type=index_type, metric=metric,
-                           use_gpu=use_gpu, hnsw_M=hnsw_M, tiebuffer=tiebuffer)
+                           use_gpu=use_gpu, hnsw_M=hnsw_M,
+                           include_self=include_self, tiebuffer=tiebuffer)
 
     # Convert FAISS distances to Hamming counts.
     # ip: D = inner product; matches = D; hamming = L - matches
@@ -1050,7 +1316,8 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
         The sequences to construct the graph from. 
     
     k : int
-        The number of neighbors to connect each node to. 
+        Positive number of non-self neighbours to connect. Values greater
+        than the available population are capped at ``n - 1``.
     
     backend : str, default=`auto`
         The computational backend to use. Options are:
@@ -1086,7 +1353,7 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
         The hnsw dimension size.
     
     tiebuffer : int, default=128
-        The number of hits kept in buffer to eliminate ties.
+        Non-negative number of additional candidates retained for ties.
     
     tie_policy : str, default=`all`
         The tie policy for when there are more than k equidistant
@@ -1111,10 +1378,34 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
     """
     _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
 
-    n = len(sequences)
+    n, sequence_length = _validate_sequence_collection(sequences)
+    k, backend = _validate_neighbour_configuration(
+        n_sequences=n,
+        k=k,
+        tiebuffer=tiebuffer,
+        backend=backend,
+        index_type=index_type,
+        faiss_metric=faiss_metric,
+        include_self=include_self,
+        use_gpu=use_gpu,
+        hnsw_M=hnsw_M,
+        tie_policy=tie_policy,
+    )
+    if seed is not None and (
+        isinstance(seed, (bool, np.bool_)) or not isinstance(seed, (int, np.integer))
+    ):
+        raise TypeError("`seed` must be an integer or None.")
 
-    if backend == 'auto':
-        backend = 'faiss' if n >= 5000 else 'balltree'
+    if n <= 1:
+        graph = nx.Graph()
+        for index, sequence in enumerate(sequences):
+            graph.add_node(index, sequence=sequence)
+        _attach_knn_edge_semantics(
+            graph,
+            sequence_length=sequence_length,
+            constructor=f"knn-{backend}",
+        )
+        return graph
 
     if backend == 'faiss':
         G = _create_knn_graph_faiss(
@@ -1130,7 +1421,8 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
         )
     elif backend == 'balltree':
         G = _create_knn_graph_balltree(sequences,
-                                          k, 
+                                          k,
+                                          include_self=include_self,
                                           tie_policy=tie_policy,
                                           tiebuffer=tiebuffer,
                                           seed=seed)
@@ -1160,11 +1452,13 @@ def create_tda_graph(sequences: List[BaseNumpySequence],
         Sequences to connect.
     
     embeddings : np.ndarray
-        The sequence embeddings, indexed according to sequence order.
+        Finite two-dimensional sequence embeddings indexed according to
+        sequence order.
 
     n_components : int, default=3
-        The number of principle components to use for alpha complex
-        creation.
+        Positive requested number of principal components. The effective
+        value is clipped to the sample count, feature count, and centered
+        geometric rank.
     
     reweight_simplex_edges : bool, default=`False`
         Bool to reweight graph edges by triangle simplexes.
@@ -1178,6 +1472,52 @@ def create_tda_graph(sequences: List[BaseNumpySequence],
         The constructed graph with `BaseNumpySequence` features stored
         under `sequence`.
     """
+    n_sequences, _ = _validate_sequence_collection(sequences)
+    embeddings = _validate_embedding_matrix(
+        embeddings,
+        n_sequences=n_sequences,
+    )
+    requested_components = _validate_integer(
+        n_components,
+        name="n_components",
+        minimum=1,
+    )
+    reweight_simplex_edges = _validate_boolean(
+        reweight_simplex_edges,
+        name="reweight_simplex_edges",
+    )
+
+    G = nx.Graph()
+    for index, sequence in enumerate(sequences):
+        G.add_node(index, sequence=sequence)
+    _declare_tda_graph_semantics(G)
+    G.graph["tda_requested_components"] = requested_components
+    G.graph["tda_duplicate_policy"] = "reject"
+
+    if n_sequences == 0:
+        G.graph["tda_effective_components"] = 0
+        return G
+    if n_sequences == 1:
+        G.graph["tda_effective_components"] = 0
+        return G
+
+    if np.unique(embeddings, axis=0).shape[0] != n_sequences:
+        raise ValueError(
+            "`embeddings` contains duplicate points; TDA construction requires "
+            "one distinct point per sequence."
+        )
+
+    centered_rank = int(np.linalg.matrix_rank(embeddings - embeddings.mean(axis=0)))
+    if centered_rank < 1:
+        raise ValueError("`embeddings` is geometrically degenerate after centering.")
+    effective_components = min(
+        requested_components,
+        n_sequences - 1,
+        embeddings.shape[1],
+        centered_rank,
+    )
+    G.graph["tda_effective_components"] = effective_components
+
     gudhi = require_optional(
         "gudhi",
         extra="tda",
@@ -1188,15 +1528,9 @@ def create_tda_graph(sequences: List[BaseNumpySequence],
         extra="tda",
         purpose="topological graph construction",
     )
-    if len(sequences) != embeddings.shape[0]:
-        raise ValueError("Number of sequences must match the number of embeddings.")
-
-    if embeddings.shape[0] == 0:
-        return nx.Graph()
-
     # Reduce dimensionality with PCA.
     # Alpha complex scales with dimension.
-    pca = sklearn_decomposition.PCA(n_components=n_components)
+    pca = sklearn_decomposition.PCA(n_components=effective_components)
     low_dim_data = pca.fit_transform(embeddings)
     alpha_complex = gudhi.AlphaComplex(points=low_dim_data)
     simplex_tree = alpha_complex.create_simplex_tree()
@@ -1216,11 +1550,6 @@ def create_tda_graph(sequences: List[BaseNumpySequence],
     simplex_tree_for_graph = alpha_complex_for_graph.create_simplex_tree(max_alpha_square=chosen_alpha_square)
     edge_generator = simplex_tree_for_graph.get_skeleton(1)
 
-    G = nx.Graph()
-    
-    for i, seq in enumerate(sequences):
-        G.add_node(i, sequence=seq)
-
     for simplex, _ in edge_generator:
         if len(simplex) == 2:
             node1, node2 = simplex[0], simplex[1]
@@ -1235,16 +1564,7 @@ def create_tda_graph(sequences: List[BaseNumpySequence],
                 tda_distance=float(dist),
             )
 
-    declare_edge_semantics(
-        G,
-        constructor="tda-alpha-complex",
-        distance_key="distance",
-        distance_units="pca_euclidean",
-        affinity_key="affinity",
-        conductance_key="weight",
-        legacy_aliases={"tda_distance": "distance"},
-        notes="Conductance is 1 / (1 + PCA-space Euclidean distance).",
-    )
+    _declare_tda_graph_semantics(G)
             
     if reweight_simplex_edges:
         G = _reweight_graph_by_simplices(G=G,
@@ -1325,7 +1645,8 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         Sequences to connect.
     
     embeddings : np.ndarray
-        The sequence embeddings, indexed according to sequence order.
+        Finite two-dimensional sequence embeddings indexed according to
+        sequence order.
 
     k : int, default=`5`
         Nearest neighbors to scale the rbf gamma parameter.
@@ -1372,7 +1693,8 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         an explicit matrix power.
 
     connectivity_threshold : float, default=`1e-04`
-        The threshold the define discrete connectivity.
+        Finite probability threshold in ``[0, 1]`` used to define discrete
+        connectivity.
 
     _compute_hamming_edges : bool, default=False
         Reserved compatibility flag. Release builds disable the optional
@@ -1387,21 +1709,49 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         The constructed graph with `BaseNumpySequence` features stored
         under `sequence`.
     """
+    _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
+    n_points, _ = _validate_sequence_collection(sequences)
+    requested_k = k
+    k, backend = _validate_neighbour_configuration(
+        n_sequences=n_points,
+        k=k,
+        tiebuffer=tiebuffer,
+        backend=backend,
+        index_type=index_type,
+        faiss_metric=faiss_metric,
+        include_self=include_self,
+        use_gpu=use_gpu,
+        hnsw_M=hnsw_M,
+    )
+    use_stationary, t_int = _validate_diffusion_power(t)
+    threshold = _validate_connectivity_threshold(connectivity_threshold)
+
+    if embeddings is None:
+        if n_points:
+            embeddings, _ = _encode_multiallele(sequences)
+        else:
+            embeddings = None
+    if embeddings is not None:
+        embeddings = _validate_embedding_matrix(
+            embeddings,
+            n_sequences=n_points,
+        )
+
+    G = nx.Graph()
+    for index, sequence in enumerate(sequences):
+        G.add_node(index, sequence=sequence)
+    _declare_diffusion_graph_semantics(G, constructor="embedding-diffusion")
+    if n_points <= 1:
+        return G
+
     sklearn_pairwise = require_optional(
         "sklearn.metrics.pairwise",
         extra="knn",
         purpose="diffusion embedding graph construction",
     )
-    _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
 
-    if len(sequences) == 0:
-        return nx.Graph()
-    if embeddings is None:
-        embeddings, _ = _encode_multiallele(sequences)
-
-    n_points = embeddings.shape[0]
-    k_for_scale = min(k, n_points - 1)
-    if n_points > 1 and k >= n_points and k_for_scale == n_points - 1:
+    k_for_scale = k
+    if int(requested_k) >= n_points and k_for_scale == n_points - 1:
         # When k overshoots a small dataset, avoid using the farthest neighbour
         # to set the RBF bandwidth; otherwise distant points flatten the kernel
         # and collapse clustered structure (e.g., fully connected graphs).
@@ -1409,35 +1759,36 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
     
     # Use balltree algorithm (will fail as shape of embeddings >>>)
     if backend == 'balltree':
-        distances, _ = _find_knn_balltree(embeddings, k, tiebuffer)
+        _, neighbour_indices = _find_knn_balltree(
+            embeddings,
+            k,
+            tiebuffer,
+            include_self=include_self,
+        )
     
     # Use FAISS algorithm (approx or exact).
     elif backend == 'faiss':
-        distances, _ = _find_knn_faiss(embeddings,
+        _, neighbour_indices = _find_knn_faiss(embeddings,
                                        k,
                                        index_type=index_type,
                                        metric=faiss_metric,
                                        use_gpu=use_gpu,
                                        hnsw_M=hnsw_M,
+                                       include_self=include_self,
                                        tiebuffer=tiebuffer) 
-                                    
-    # Select backend algorithm based on size of embeddings.
-    elif backend == 'auto':
-        if embeddings.shape[0] < 5000:
-            distances, _ = _find_knn_balltree(embeddings, k, tiebuffer)
-        else:
-            distances, _ = _find_knn_faiss(embeddings,
-                                           k,
-                                           index_type=index_type,
-                                           metric=faiss_metric,
-                                           use_gpu=use_gpu,
-                                           hnsw_M=hnsw_M,
-                                           tiebuffer=tiebuffer) 
 
-    
-    # The scale for each point is the distance to its k-th neighbor
-    sigma = distances[:, k_for_scale]
-    pos = sigma[sigma > 0]
+    # Evaluate scale in a common Euclidean unit after the requested backend
+    # has selected and ordered candidates. This avoids interpreting FAISS
+    # inner-product scores or squared-L2 scores as ordinary distances.
+    sigma = np.zeros(n_points, dtype=np.float64)
+    for row in range(n_points):
+        candidates = np.asarray(neighbour_indices[row], dtype=np.int64)
+        candidates = candidates[(candidates >= 0) & (candidates != row)]
+        if candidates.size:
+            scale_index = min(k_for_scale, candidates.size) - 1
+            neighbour = int(candidates[scale_index])
+            sigma[row] = float(np.linalg.norm(embeddings[row] - embeddings[neighbour]))
+    pos = sigma[np.isfinite(sigma) & (sigma > 0)]
 
     if pos.size == 0:
         median_sigma_sq = 1.0
@@ -1455,23 +1806,14 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
     row_sums[row_sums == 0] = 1.0
     transition_matrix = kernel_matrix / row_sums
 
-    use_stationary = _should_use_stationary_power(t)
     if use_stationary:
         stationary = _compute_stationary_distribution(transition_matrix).astype(np.float64, copy=False)
         diffused_matrix = np.repeat(stationary[np.newaxis, :], len(sequences), axis=0)
     else:
-        if isinstance(t, (np.floating, float)) and not float(t).is_integer():
-            raise ValueError("`t` must be an integer when diffusion power is finite.")
-        t_int = int(t) if t is not None else 0
-        if t_int < 1:
-            raise ValueError("`t` must be >= 1 when diffusion power is finite.")
         diffused_matrix = np.linalg.matrix_power(transition_matrix, t_int)
     
-    G = nx.Graph()
-    G.add_nodes_from(range(len(sequences)))
-    
     # Get the upper triangle to avoid duplicate edges
-    rows, cols = np.where(np.triu(diffused_matrix > connectivity_threshold, k=1))
+    rows, cols = np.where(np.triu(diffused_matrix > threshold, k=1))
     
     for i, j in zip(rows, cols):
         affinity = float(diffused_matrix[i, j])
@@ -1483,17 +1825,7 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
             kernel_weight=affinity,
         )
 
-    declare_edge_semantics(
-        G,
-        constructor="embedding-diffusion",
-        affinity_key="affinity",
-        conductance_key="weight",
-        legacy_aliases={"kernel_weight": "affinity"},
-        notes="Conductance is the retained undirected diffusion affinity.",
-    )
-        
-    for i, seq in enumerate(sequences):
-        G.nodes[i]['sequence'] = seq
+    _declare_diffusion_graph_semantics(G, constructor="embedding-diffusion")
     
     # Optionally compute expected Hamming distances if available
     if _compute_hamming_edges and all(
@@ -1805,7 +2137,8 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         The list of sequence in the landscape. 
 
     embeddings : np.ndarray
-        Sequence embeddings indexed by the entry in `sequences`.
+        Finite two-dimensional sequence embeddings indexed by the entry in
+        ``sequences``.
 
     replacement_matrix : np.ndarray, optional
         Reversible instantaneous amino-acid rate generator in PROT_20 order.
@@ -1860,7 +2193,8 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         row-wise softmax normalization.
 
     connectivity_threshold : float, default=1e-4
-        Minimum symmetrized diffusion probability retained as an edge.
+        Finite probability threshold in ``[0, 1]``. Symmetrized diffusion
+        values above this threshold are retained as edges.
 
     cpus : int, default=1
         Target number of worker CPUs for Ray alignment tasks. Each task
@@ -1888,18 +2222,55 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         The constructed graph.
     """
     _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
+    n_sequences, _ = _validate_sequence_collection(sequences)
+    k, backend = _validate_neighbour_configuration(
+        n_sequences=n_sequences,
+        k=k,
+        tiebuffer=tiebuffer,
+        backend=backend,
+        index_type=index_type,
+        faiss_metric=faiss_metric,
+        include_self=include_self,
+        use_gpu=use_gpu,
+        hnsw_M=hnsw_M,
+    )
+    use_stationary, t_int = _validate_diffusion_power(t)
+    thr = _validate_connectivity_threshold(connectivity_threshold)
+    num_cpus = _validate_integer(cpus, name="cpus", minimum=1)
+    if isinstance(tau, (bool, np.bool_)):
+        raise TypeError("`tau` must be a finite real number greater than zero.")
+    try:
+        tau = float(tau)
+    except (TypeError, ValueError) as error:
+        raise TypeError("`tau` must be a finite real number greater than zero.") from error
+    if not np.isfinite(tau) or tau <= 0.0:
+        raise ValueError("`tau` must be finite and greater than zero.")
 
     if embeddings is None:
-        embeddings, _ = _encode_multiallele(sequences)
-        
-     # Type check alphabet first
+        if n_sequences:
+            embeddings, _ = _encode_multiallele(sequences)
+        else:
+            embeddings = None
+    if embeddings is not None:
+        embeddings = _validate_embedding_matrix(
+            embeddings,
+            n_sequences=n_sequences,
+        )
+
+    # Type check alphabet before optional backend or phylogenetic work.
     for seq in sequences:
         if seq.alphabet != PROT_20:
             raise ValueError("Sequence alphabet must be PROT_20 for all entries.")
 
-    n_sequences = len(sequences)
-    if n_sequences == 0:
-        return nx.Graph()
+    graph = nx.Graph()
+    for index, sequence in enumerate(sequences):
+        graph.add_node(index, sequence=sequence)
+    _declare_diffusion_graph_semantics(
+        graph,
+        constructor="evolutionary-diffusion",
+    )
+    if n_sequences <= 1:
+        return graph
 
     if replacement_matrix is None:
         from ..phylo._sub_matrices import lg
@@ -1911,25 +2282,18 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         evolutionary_time=evolutionary_time,
         equilibrium_frequencies=equilibrium_frequencies,
     )
-    if not np.isfinite(tau) or tau <= 0.0:
-        raise ValueError("`tau` must be finite and greater than zero.")
-
-    if k > n_sequences - 1:
-        k = n_sequences - 1
-
-        # Use balltree algorithm (will fail as shape of embeddings >>>)
     _logger = logging.getLogger('fitness_landscape')
-    try:
-        num_cpus = int(cpus)
-    except (TypeError, ValueError):
-        raise ValueError("`cpus` must be an integer >= 1.") from None
-    if num_cpus < 1:
-        raise ValueError("`cpus` must be an integer >= 1.")
     _t_knn0 = time.perf_counter(); _c_knn0 = time.process_time()
     balltree_metric = _resolve_balltree_metric(embeddings)
     metric_used = None
     if backend == 'balltree':
-        _, neighbor_indices = _find_knn_balltree(embeddings, k, tiebuffer, metric=balltree_metric)
+        _, neighbor_indices = _find_knn_balltree(
+            embeddings,
+            k,
+            tiebuffer,
+            include_self=include_self,
+            metric=balltree_metric,
+        )
         metric_used = balltree_metric
     
     # Use FAISS algorithm (approx or exact).
@@ -1940,23 +2304,9 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                                        metric=faiss_metric,
                                        use_gpu=use_gpu,
                                        hnsw_M=hnsw_M,
+                                       include_self=include_self,
                                        tiebuffer=tiebuffer) 
         metric_used = faiss_metric
-                                    
-    # Select backend algorithm based on size of embeddings.
-    elif backend == 'auto':
-        if embeddings.shape[0] < 5000:
-            _, neighbor_indices = _find_knn_balltree(embeddings, k, tiebuffer, metric=balltree_metric)
-            metric_used = balltree_metric
-        else:
-            _, neighbor_indices = _find_knn_faiss(embeddings,
-                                           k,
-                                           index_type=index_type,
-                                           metric=faiss_metric,
-                                           use_gpu=use_gpu,
-                                           hnsw_M=hnsw_M,
-                                           tiebuffer=tiebuffer) 
-            metric_used = faiss_metric
     _logger.info('kNN prefilter done: backend=%s metric=%s k=%d n=%d wall=%.2fs cpu=%.2fs', backend, metric_used, k, n_sequences, time.perf_counter()-_t_knn0, time.process_time()-_c_knn0)
 
     pairs_to_align = set()
@@ -2027,13 +2377,6 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     Tmat = _row_softmax_csr(edge_scores, tau=tau)
     _logger.info('Row-softmax transition matrix: nnz=%d wall=%.2fs cpu=%.2fs', Tmat.nnz, time.perf_counter()-_t_norm0, time.process_time()-_c_norm0)
 
-    use_stationary = _should_use_stationary_power(t)
-
-    if connectivity_threshold is None:
-        thr = 1e-4
-    else:
-        thr = float(connectivity_threshold)
-
     if use_stationary:
         _logger.info('Using stationary distribution for diffusion connectivity (t=%s).', t)
         stationary = _compute_stationary_distribution(Tmat).astype(np.float64, copy=False)
@@ -2047,12 +2390,6 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
             edge_weights = np.empty(0, dtype=np.float32)
         _logger.info('Stationary distribution thresholding produced edges=%d', edge_weights.size)
     else:
-        if isinstance(t, (np.floating, float)) and not float(t).is_integer():
-            raise ValueError("`t` must be an integer when diffusion power is finite.")
-        t_int = int(t) if t is not None else 0
-        if t_int < 1:
-            raise ValueError("`t` must be >= 1 when diffusion power is finite.")
-
         _t_pow0 = time.perf_counter(); _c_pow0 = time.process_time()
         P = Tmat.copy()
         for step in range(t_int - 1):
@@ -2083,8 +2420,6 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         _logger.info('Symmetrize + threshold: nnz=%d wall=%.2fs cpu=%.2fs', U.nnz, time.perf_counter()-_t_sym0, time.process_time()-_c_sym0)
 
     _t_graph0 = time.perf_counter(); _c_graph0 = time.process_time()
-    graph = nx.Graph()
-    graph.add_nodes_from(range(n_sequences))
     # add edges with attribute
     if len(edge_weights):
         for i, j, w in zip(rows, cols, edge_weights):
@@ -2097,17 +2432,10 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                 kernel_weight=affinity,
             )
 
-    declare_edge_semantics(
+    _declare_diffusion_graph_semantics(
         graph,
         constructor="evolutionary-diffusion",
-        affinity_key="affinity",
-        conductance_key="weight",
-        legacy_aliases={"kernel_weight": "affinity"},
-        notes="Conductance is the retained undirected evolutionary-diffusion affinity.",
     )
-
-    for i, seq in enumerate(sequences):
-        graph.nodes[i]['sequence'] = seq
 
     # Optionally compute expected Hamming distances if available
     _logger.info('Graph nodes/edges added: nodes=%d edges=%d wall=%.2fs cpu=%.2fs', graph.number_of_nodes(), graph.number_of_edges(), time.perf_counter()-_t_graph0, time.process_time()-_c_graph0)

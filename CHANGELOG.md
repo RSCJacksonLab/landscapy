@@ -35,6 +35,10 @@ All notable changes to Landscapy are documented here.
   preserved graph labels alongside explicit sequence-row indices in results.
 - Standardized edge distance, normalized-distance, affinity, transition, and
   conductance semantics across constructors, analyses, and portable bundles.
+- Added shared graph-constructor validation for aligned sequences, embedding
+  matrices, nearest-neighbour options, diffusion parameters, and small-sample
+  TDA behavior; FAISS IVF now honors its requested metric and uses a trainable
+  centroid count.
 
 ### Removed
 
