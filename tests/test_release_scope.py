@@ -16,15 +16,15 @@ from fitness_landscape.phylo import ASRConstructor
 from fitness_landscape.utils import geodesic_distance_matrix
 
 
-def test_release_api_excludes_deferred_features():
+def test_feature_api_excludes_other_deferred_features():
     assert not hasattr(fitness_landscape, "DirectedFitnessLandscape")
     assert not hasattr(fitness_landscape.analysis, "cross_spectral_coherence")
-    assert not hasattr(fitness_landscape.analysis, "calculate_local_bottleneck")
+    assert callable(fitness_landscape.analysis.calculate_local_bottleneck)
     assert not hasattr(fitness_landscape.analysis, "compute_persistent_homology")
     assert not hasattr(FitnessLandscape, "plot")
 
     assert importlib.util.find_spec("fitness_landscape.core.digraph") is None
-    assert importlib.util.find_spec("fitness_landscape.analysis.bottleneck") is None
+    assert importlib.util.find_spec("fitness_landscape.analysis.bottleneck") is not None
     assert importlib.util.find_spec("fitness_landscape.analysis.coupling") is None
     assert importlib.util.find_spec(
         "fitness_landscape.analysis.persistent_homology"

@@ -2,7 +2,6 @@
 
 from importlib import import_module
 
-
 _EXPORTS = {
     "find_greedy_accessible_paths": "adaptive_walk",
     "analyze_path_accessibility": "adaptive_walk",
@@ -31,6 +30,10 @@ _EXPORTS = {
     "fit_t_grid_posterior": "diffusion_scale",
     "fit_t_profile_likelihood": "diffusion_scale",
     "fit_t_bootstrap": "diffusion_scale",
+    "local_cheeger_sweep": "bottleneck",
+    "calculate_local_bottleneck": "bottleneck",
+    "first_dirichlet_eigenpair": "bottleneck",
+    "rank_throat_edges": "bottleneck",
     "procrustes": "graph_induction_alignment",
     "edge_prf_on_observed": "graph_induction_alignment",
     "sp_rmse": "graph_induction_alignment",
