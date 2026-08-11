@@ -9,7 +9,6 @@ from .sequence import (
 from .landscape import (
     FitnessLandscape,
     AnnotationQueryResult,
-    DirectedFitnessLandscape,
 )
 
 from .fitness import (
@@ -30,13 +29,6 @@ from .graph import (
     create_phylo_graph
 )
 
-from .digraph import (
-    create_evol_diffusion_digraph,
-    create_particle_filter_digraph,
-    create_phylo_digraph,
-    create_trajectory_digraph,
-)
-
 __all__ = [
     'BaseNumpySequence',
     'BinarySequence',
@@ -45,7 +37,6 @@ __all__ = [
     'sequence_distance',
     'FitnessLandscape',
     'AnnotationQueryResult',
-    'DirectedFitnessLandscape',
     'NumericFitness',
     'CategoricalFitness',
     'ProbabilisticCategoricalFitness',
@@ -56,8 +47,4 @@ __all__ = [
     'create_diffusion_emb_graph',
     'create_evol_diffusion_graph',
     'create_phylo_graph',
-    'create_evol_diffusion_digraph',
-    'create_particle_filter_digraph',
-    'create_phylo_digraph',
-    'create_trajectory_digraph',
 ]

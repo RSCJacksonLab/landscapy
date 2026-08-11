@@ -1,6 +1,5 @@
 import networkx as nx
 
-import fitness_landscape.core.digraph as digraph_mod
 import fitness_landscape.core.graph as graph_mod
 from fitness_landscape._const import PROT_20
 from fitness_landscape.core.sequence import BaseNumpySequence, BinarySequence
@@ -21,7 +20,7 @@ class _FakeASRConstructor:
             moltype="protein",
             sequence_id="tip",
         )
-        graph = nx.Graph() if graph_type == "undirected" else nx.DiGraph()
+        graph = nx.Graph()
         graph.add_node("root", sequence=sequence)
         graph.add_node("tip", sequence=sequence)
         graph.add_edge("root", "tip")
@@ -48,12 +47,3 @@ def test_create_phylo_graph_ignores_hamming_edge_flag(monkeypatch):
     graph = graph_mod.create_phylo_graph("unused", _compute_hamming_edges=True)
 
     assert graph.number_of_edges() == 1
-
-
-def test_create_phylo_digraph_ignores_hamming_edge_flag(monkeypatch):
-    monkeypatch.setattr(digraph_mod, "ASRConstructor", _FakeASRConstructor)
-    monkeypatch.setattr(digraph_mod, "compute_edge_mutations_star", _fail_if_called)
-
-    digraph = digraph_mod.create_phylo_digraph("unused", _compute_hamming_edges=True)
-
-    assert digraph.number_of_edges() == 1
