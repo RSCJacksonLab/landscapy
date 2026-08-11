@@ -816,7 +816,7 @@ class ASRConstructor:
                 soft_seq = SoftSequence(
                     aa_posterior=post,
                     gap_posterior=gap,
-                    alphabet=ALPHABET_21,
+                    alphabet=PROT_20,
                     hard_rule="argmax",
                 )
                 post = soft_seq.remove_gap_arr()
