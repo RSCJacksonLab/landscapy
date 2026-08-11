@@ -24,6 +24,9 @@ All notable changes to Landscapy are documented here.
   manifests.
 - Standardized the documented 0.9 public API on NumPy-style parameter and
   return contracts, with a scoped `numpydoc` CI gate.
+- Made sequence storage immutable, rejected invalid binary and soft-posterior
+  inputs before coercion, and preserved sequence subclasses and identifiers
+  across mutation and factory construction.
 
 ### Removed
 

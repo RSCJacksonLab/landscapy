@@ -16,6 +16,26 @@ else:
 _SeqConvertible = Union["BaseNumpySequence", _SeqLike[int], np.ndarray, _C3Sequence]
 
 
+def _require_positive_length(length: int) -> int:
+    """Return a validated positive sequence length."""
+    if isinstance(length, (bool, np.bool_)) or not isinstance(length, (int, np.integer)):
+        raise TypeError("length must be an integer")
+    if length <= 0:
+        raise ValueError("length must be positive")
+    return int(length)
+
+
+def _validated_alphabet(alphabet: Iterable, *, name: str = "alphabet") -> list:
+    """Return a non-empty alphabet with no duplicate values."""
+    values = list(alphabet)
+    if not values:
+        raise ValueError(f"{name} must not be empty")
+    for index, value in enumerate(values):
+        if any(value == previous for previous in values[:index]):
+            raise ValueError(f"{name} values must be unique")
+    return values
+
+
 def _is_cogent3_sequence(value: object) -> bool:
     if not type(value).__module__.startswith("cogent3."):
         return False
@@ -85,26 +105,33 @@ class BaseNumpySequence:
 
         is_c3_seq = _is_cogent3_sequence(sequence) and not isinstance(sequence, BaseNumpySequence)
 
-        self._np: np.ndarray = _to_numpy(sequence)
+        self._np: np.ndarray = np.array(_to_numpy(sequence), copy=True)
+        if self._np.size == 0:
+            raise ValueError("sequence must not be empty")
         self._c3_seq = sequence if is_c3_seq else None
 
         # Correctly handle sequence ID from cogent3 objects
-        if is_c3_seq and hasattr(sequence, 'name'):
+        if sequence_id is not None:
+            self.id = sequence_id
+            self._has_explicit_id = True
+        elif is_c3_seq and hasattr(sequence, 'name'):
             self.id = sequence.name
+            self._has_explicit_id = sequence.name is not None
         else:
-            self.id = sequence_id if sequence_id is not None else str(self._np)
+            self.id = str(self._np)
+            self._has_explicit_id = False
         
         # If an alphabet is explicitly provided, ALWAYS use it.
         if alphabet is not None:
-            self.alphabet = list(map(str, alphabet))
+            self._alphabet = tuple(map(str, _validated_alphabet(alphabet)))
         
         # If no alphabet is given, try to get it from the cogent3 object's moltype.
         elif is_c3_seq:
-            self.alphabet = list(self._c3_seq.moltype.alphabet)
+            self._alphabet = tuple(map(str, self._c3_seq.moltype.alphabet))
         
         # Infer the alphabet from the sequence data itself.
         else:
-            self.alphabet = sorted(list(set(map(str, self._np))))
+            self._alphabet = tuple(sorted(set(map(str, self._np))))
 
         # Standardize gap character ONLY for string arrays, preserving numeric arrays.
         # Ensure dtype can hold "gap" (not truncated to 'g').
@@ -136,6 +163,10 @@ class BaseNumpySequence:
             except (ValueError, TypeError, KeyError):
                 self._c3_seq = None
 
+        # Sequence objects are hashable and are used as landscape lookup keys.
+        # Keep the owned storage immutable after all constructor normalization.
+        self._np.setflags(write=False)
+
     def __len__(self):
         return len(self._np)
 
@@ -151,6 +182,11 @@ class BaseNumpySequence:
         return f"{self.__class__.__name__}({self._np.tolist()})"
 
     @property
+    def alphabet(self) -> list:
+        """Return a defensive copy of the ordered sequence alphabet."""
+        return list(self._alphabet)
+
+    @property
     def ungapped_arr(self) -> np.ndarray:
         """Return one-hot probabilities with the gap column removed."""
         one_hot = np.asarray(self.to_one_hot(), dtype=np.float64)  # (L, |A|)
@@ -164,13 +200,17 @@ class BaseNumpySequence:
     
     @property
     def sequence(self) -> np.ndarray:
-        """Return the underlying sequence array without copying."""
-        return self._np
+        """Return a read-only view of the sequence array."""
+        view = self._np.view()
+        view.setflags(write=False)
+        return view
 
     @property
     def ndarray(self) -> np.ndarray:
-        """Return the underlying sequence array without copying."""
-        return self._np
+        """Return a read-only view of the sequence array."""
+        view = self._np.view()
+        view.setflags(write=False)
+        return view
 
     def to_array(self) -> np.ndarray:
         """Return a copy of the sequence array.
@@ -255,9 +295,22 @@ class BaseNumpySequence:
         else:
             positions = list(positions)
 
+        if any(isinstance(position, (bool, np.bool_)) for position in positions):
+            raise TypeError("mutation positions must be integers")
+        if any(not isinstance(position, (int, np.integer)) for position in positions):
+            raise TypeError("mutation positions must be integers")
+        positions = [int(position) for position in positions]
+        if any(position < 0 or position >= len(self) for position in positions):
+            raise IndexError("mutation position out of range")
+
         if values is None:
-            # Ensure mutated value is a string to match alphabet type
-            values = [rng.choice([a for a in self.alphabet if a != str(new_np[p])]) for p in positions]
+            choices = [
+                [a for a in self.alphabet if a != str(new_np[position])]
+                for position in positions
+            ]
+            if any(not available for available in choices):
+                raise ValueError("mutation requires at least two alphabet values")
+            values = [rng.choice(available) for available in choices]
         elif not isinstance(values, (list, tuple, np.ndarray)):
             values = [values]
 
@@ -267,9 +320,21 @@ class BaseNumpySequence:
         for p, v in zip(positions, values):
             new_np[p] = v
 
-        # Get the moltype from the internal cogent3 sequence object
+        return self._construct_mutated(new_np)
+
+    def _mutation_sequence_id(self) -> str | None:
+        """Return the identifier retained by a mutated sequence."""
+        return self.id if self._has_explicit_id else None
+
+    def _construct_mutated(self, sequence: np.ndarray) -> "BaseNumpySequence":
+        """Construct a mutation while preserving base-sequence metadata."""
         current_moltype = self._c3_seq.moltype if self._c3_seq else None
-        return self.__class__(new_np, alphabet=self.alphabet, moltype=current_moltype)
+        return self.__class__(
+            sequence,
+            sequence_id=self._mutation_sequence_id(),
+            alphabet=self.alphabet,
+            moltype=current_moltype,
+        )
     
     def to_one_hot(self,
                    mapping: Union[Mapping[str, int], None] = None) -> np.ndarray:
@@ -594,7 +659,16 @@ class BaseNumpySequence:
         BaseNumpySequence
             The constructed BaseNumpySequence object.
         """
-        idx = np.asarray(ints, dtype=int).ravel()
+        raw = np.asarray(ints)
+        if raw.size == 0:
+            raise ValueError("integer sequence must not be empty")
+        try:
+            numeric = raw.astype(float)
+        except (TypeError, ValueError) as error:
+            raise ValueError("integer sequence values must be finite integers") from error
+        if not np.all(np.isfinite(numeric)) or not np.all(numeric == np.floor(numeric)):
+            raise ValueError("integer sequence values must be finite integers")
+        idx = numeric.astype(int).ravel()
         
         # Auto compute alphabet if not provided.
         if alphabet is not None:
@@ -642,8 +716,9 @@ class BaseNumpySequence:
             The constructed BaseNumpySequence object.            
             
         """
+        length = _require_positive_length(length)
         rng = np.random.default_rng(seed)
-        A = list(alphabet)
+        A = _validated_alphabet(alphabet)
         arr = np.array(rng.choice(A, size=length), dtype=object)
         
         return cls(arr,
@@ -659,6 +734,8 @@ class BinarySequence(BaseNumpySequence):
     ----------
     sequence : BaseNumpySequence, sequence of int, or ndarray
         Binary values in positional order.
+    sequence_id : str, optional
+        Stable identifier for the sequence.
 
     Raises
     ------
@@ -666,12 +743,34 @@ class BinarySequence(BaseNumpySequence):
         If any value is not zero or one.
     """
     def __init__(self,
-                 sequence: _SeqConvertible) -> None:
-        arr = _to_numpy(sequence).astype(int)
-        if not set(arr).issubset({0, 1}):
+                 sequence: _SeqConvertible,
+                 sequence_id: str | None = None) -> None:
+        raw = np.asarray(_to_numpy(sequence))
+        if raw.size == 0:
+            raise ValueError("sequence must not be empty")
+        try:
+            numeric = raw.astype(float)
+        except (TypeError, ValueError) as error:
+            raise ValueError("BinarySequence accepts only finite 0/1 symbols") from error
+        if not np.all(np.isfinite(numeric)) or not np.all(
+            (numeric == 0.0) | (numeric == 1.0)
+        ):
             raise ValueError("BinarySequence accepts only 0/1 symbols")
-        
-        super().__init__(arr, alphabet=['0', '1'], moltype=None)
+        arr = numeric.astype(np.int8)
+
+        super().__init__(
+            arr,
+            sequence_id=sequence_id,
+            alphabet=['0', '1'],
+            moltype=None,
+        )
+
+    def _construct_mutated(self, sequence: np.ndarray) -> "BinarySequence":
+        """Construct a binary mutation while preserving an explicit ID."""
+        return self.__class__(
+            sequence,
+            sequence_id=self._mutation_sequence_id(),
+        )
 
     @classmethod
     def from_bits(cls,
@@ -695,8 +794,7 @@ class BinarySequence(BaseNumpySequence):
         BaseNumpySequence
             The constructed BaseNumpySequence object.  
         """
-        arr = np.asarray(bits, dtype=int).ravel()
-        return cls(arr)
+        return cls(bits, sequence_id=sequence_id)
 
     @classmethod
     def from_integer_bits(cls,
@@ -730,10 +828,11 @@ class BinarySequence(BaseNumpySequence):
         """
         if value < 0:
             raise ValueError("value must be non-negative")
+        length = _require_positive_length(length)
         bits = np.array(list(np.binary_repr(value, width=length)), dtype=int)
         if not msb_first:
             bits = bits[::-1]
-        return cls(bits)
+        return cls(bits, sequence_id=sequence_id)
 
     @classmethod
     def random(cls,
@@ -766,9 +865,12 @@ class BinarySequence(BaseNumpySequence):
         BaseNumpySequence
             The constructed BaseNumpySequence object.  
         """
+        length = _require_positive_length(length)
+        if not np.isfinite(p_one) or not 0.0 <= p_one <= 1.0:
+            raise ValueError("p_one must be finite and between zero and one")
         rng = np.random.default_rng(seed)
         arr = rng.random(length) < p_one
-        return cls(arr.astype(int))
+        return cls(arr.astype(int), sequence_id=sequence_id)
 
 
 class MultialleleSequence(BaseNumpySequence):
@@ -780,6 +882,8 @@ class MultialleleSequence(BaseNumpySequence):
         Alleles in positional order.
     alphabet : iterable
         Permitted allele values.
+    sequence_id : str, optional
+        Stable identifier for the sequence.
 
     Raises
     ------
@@ -789,13 +893,28 @@ class MultialleleSequence(BaseNumpySequence):
 
     def __init__(self,
                  sequence: _SeqConvertible,
-                 alphabet: Iterable):
+                 alphabet: Iterable,
+                 sequence_id: str | None = None):
         arr = _to_numpy(sequence)
+        if arr.size == 0:
+            raise ValueError("sequence must not be empty")
+        alphabet = _validated_alphabet(alphabet)
         if not set(arr).issubset(set(alphabet)):
             raise ValueError("MultialleleSequence accepts only symbols from the alphabet")
-        super().__init__(arr,
-                         alphabet=alphabet,
-                         moltype=None)
+        super().__init__(
+            arr,
+            sequence_id=sequence_id,
+            alphabet=alphabet,
+            moltype=None,
+        )
+
+    def _construct_mutated(self, sequence: np.ndarray) -> "MultialleleSequence":
+        """Construct a multiallelic mutation with its alphabet and ID."""
+        return self.__class__(
+            sequence,
+            alphabet=self.alphabet,
+            sequence_id=self._mutation_sequence_id(),
+        )
         
     @classmethod
     def random(cls,
@@ -823,10 +942,11 @@ class MultialleleSequence(BaseNumpySequence):
         MultialleleSequence
             Sampled sequence.
         """
+        length = _require_positive_length(length)
         rng = np.random.default_rng(seed)
-        A = list(alphabet)
+        A = _validated_alphabet(alphabet)
         arr = np.array(rng.choice(A, size=length), dtype=object)
-        return cls(arr, alphabet=A)
+        return cls(arr, alphabet=A, sequence_id=sequence_id)
 
     @classmethod
     def from_string(cls,
@@ -851,59 +971,156 @@ class MultialleleSequence(BaseNumpySequence):
         MultialleleSequence
             Constructed sequence.
         """
-        return cls(list(s), alphabet=alphabet)
+        return cls(list(s), alphabet=alphabet, sequence_id=sequence_id)
 
 
 class SoftSequence(BaseNumpySequence):
-    """
-    A posterior-probability “soft” sequence.
+    """Represent a sequence as normalized categorical posteriors.
 
     Parameters
     ----------
-    posterior : np.ndarray
-        Shape (L, A). Rows are sites, columns are alphabet symbols.
-    alphabet : Iterable
-        The ordered alphabet corresponding to columns of `posterior`.
+    aa_posterior : np.ndarray
+        Finite, non-negative array of shape ``(L, A)``. Each row must
+        sum to one within an absolute tolerance of ``1e-8``.
+    alphabet : iterable
+        Non-empty, unique ordered alphabet corresponding to posterior columns.
     hard_rule : {'argmax', 'sample'}, default 'argmax'
         How to derive the proxy hard sequence used by existing code.
-    seed : int
-        The random initialisation seed. 
+    gap_posterior : np.ndarray, optional
+        Finite array of shape ``(L, 1)`` containing gap probabilities, or a
+        normalized ``(L, 2)`` matrix ordered as gap and non-gap. When provided,
+        append a gap channel to the conditional amino-acid posterior.
+    seed : int, optional
+        Random-number-generator seed.
+    sequence_id : str, optional
+        Stable identifier retained when the sequence is resampled or mutated.
+
+    Raises
+    ------
+    ValueError
+        If posterior or alphabet invariants are violated.
     """
+    _NORMALIZATION_ATOL = 1e-8
+
     def __init__(self,
                  aa_posterior: np.ndarray,
                  *,
                  alphabet: Iterable,
                  hard_rule: str = "argmax",
                  gap_posterior: np.ndarray = None,
-                 seed: int = None):
+                 seed: int = None,
+                 sequence_id: str | None = None):
 
-        self.alphabet = list(alphabet) # The core, ungapped alphabet
+        core_alphabet = _validated_alphabet(alphabet)
+        aa_posterior = self._validate_posterior(
+            aa_posterior,
+            width=len(core_alphabet),
+            name="aa_posterior",
+        )
         self._rng = np.random.default_rng(seed)
         self._seed = seed
-        
+
         # Determine the alphabet to be used for the hard sequence proxy
-        hard_sequence_alphabet = self.alphabet
-        
+        hard_sequence_alphabet = core_alphabet
+
         if gap_posterior is not None:
-            if aa_posterior.shape[0] != gap_posterior.shape[0]:
-                raise ValueError('gap and amino acid length must be the same')
-            
-            self.posterior = np.asarray(self.compute_conditional_gap_dist(aa_post_dist=aa_posterior,
-                                                                          gap_post_dist=gap_posterior))
+            if "gap" in core_alphabet or "-" in core_alphabet:
+                raise ValueError("alphabet must not already contain a gap channel")
+            gap_posterior = self._validate_gap_posterior(
+                gap_posterior,
+                length=aa_posterior.shape[0],
+            )
+            posterior = self.compute_conditional_gap_dist(
+                aa_post_dist=aa_posterior,
+                gap_post_dist=gap_posterior,
+            )
             # Use an extended alphabet that includes the gap character
-            hard_sequence_alphabet = self.alphabet + ['gap']
+            hard_sequence_alphabet = core_alphabet + ['gap']
         else:
-            self.posterior = np.asarray(aa_posterior, dtype=float)
-                
+            posterior = aa_posterior.copy()
+
         if hard_rule == "argmax":
-            hard = self.posterior.argmax(axis=1)
+            hard = posterior.argmax(axis=1)
         elif hard_rule == "sample":
             # Use the full posterior for sampling
-            hard = [self._rng.choice(self.posterior.shape[1], p=row) for row in self.posterior]
+            hard = [self._rng.choice(posterior.shape[1], p=row) for row in posterior]
         else:
             raise ValueError("hard_rule must be 'argmax' or 'sample'")
 
-        super().__init__([hard_sequence_alphabet[i] for i in hard], alphabet=hard_sequence_alphabet)
+        self._posterior = np.array(posterior, dtype=float, copy=True)
+        self._posterior.setflags(write=False)
+        super().__init__(
+            [hard_sequence_alphabet[i] for i in hard],
+            sequence_id=sequence_id,
+            alphabet=hard_sequence_alphabet,
+        )
+
+    @classmethod
+    def _validate_posterior(
+        cls,
+        posterior: np.ndarray,
+        *,
+        width: int,
+        name: str,
+    ) -> np.ndarray:
+        """Return a defensive copy of a validated probability matrix."""
+        try:
+            result = np.array(posterior, dtype=float, copy=True)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{name} must contain numeric probabilities") from error
+        if result.ndim != 2:
+            raise ValueError(f"{name} must be 2D with shape (L, A)")
+        if result.shape[0] == 0:
+            raise ValueError(f"{name} must contain at least one site")
+        if result.shape[1] != width:
+            raise ValueError(f"{name} width must match alphabet length")
+        if not np.all(np.isfinite(result)):
+            raise ValueError(f"{name} must contain only finite values")
+        if np.any(result < 0.0):
+            raise ValueError(f"{name} must contain non-negative values")
+        if not np.allclose(
+            result.sum(axis=1),
+            1.0,
+            rtol=0.0,
+            atol=cls._NORMALIZATION_ATOL,
+        ):
+            raise ValueError(f"{name} rows must sum to one")
+        return result
+
+    @staticmethod
+    def _validate_gap_posterior(
+        gap_posterior: np.ndarray,
+        *,
+        length: int,
+    ) -> np.ndarray:
+        """Return a validated ``(L, 1)`` gap-probability matrix."""
+        try:
+            result = np.array(gap_posterior, dtype=float, copy=True)
+        except (TypeError, ValueError) as error:
+            raise ValueError("gap_posterior must contain numeric probabilities") from error
+        if result.shape not in {(length, 1), (length, 2)}:
+            raise ValueError("gap_posterior must have shape (L, 1) or (L, 2)")
+        if not np.all(np.isfinite(result)):
+            raise ValueError("gap_posterior must contain only finite values")
+        if np.any((result < 0.0) | (result > 1.0)):
+            raise ValueError("gap_posterior values must lie between zero and one")
+        if result.shape[1] == 2:
+            if not np.allclose(
+                result.sum(axis=1),
+                1.0,
+                rtol=0.0,
+                atol=SoftSequence._NORMALIZATION_ATOL,
+            ):
+                raise ValueError("two-state gap_posterior rows must sum to one")
+            result = result[:, :1]
+        return result
+
+    @property
+    def posterior(self) -> np.ndarray:
+        """Return a read-only view of the posterior matrix."""
+        view = self._posterior.view()
+        view.setflags(write=False)
+        return view
 
     @property
     def ungapped_arr(self) -> np.ndarray:
@@ -912,8 +1129,8 @@ class SoftSequence(BaseNumpySequence):
         marginalised out. If the posterior already has no gap channel,
         return it as-is.
         """
-        P = np.asarray(self.posterior, dtype=float)
-        L, C = P.shape
+        P = self._posterior
+        _, C = P.shape
 
         # If a gap symbol exists in this sequence's alphabet, assume the
         # posterior includes it (same order) and renormalise by (1 - p_gap).
@@ -929,7 +1146,7 @@ class SoftSequence(BaseNumpySequence):
             return aa / denom
 
         # No explicit gap channel — posterior already (L, A)
-        return P
+        return P.copy()
 
     def remove_gap_arr(self, *, gap_threshold: float = 0.5) -> np.ndarray:
         """
@@ -967,10 +1184,36 @@ class SoftSequence(BaseNumpySequence):
         """
         Generate a new hard proxy by sampling each posterior row.
         """
-        return SoftSequence(self.posterior,
-                            alphabet=self.alphabet,
-                            hard_rule="sample",
-                            seed=self._seed)
+        return self.__class__(
+            self._posterior,
+            alphabet=self.alphabet,
+            hard_rule="sample",
+            seed=self._seed,
+            sequence_id=self._mutation_sequence_id(),
+        )
+
+    def _construct_mutated(self, sequence: np.ndarray) -> "SoftSequence":
+        """Construct a soft mutation by making changed sites deterministic."""
+        posterior = self._posterior.copy()
+        alphabet = self.alphabet
+        for index, (old_value, new_value) in enumerate(zip(self._np, sequence)):
+            if str(old_value) == str(new_value):
+                continue
+            try:
+                allele_index = alphabet.index(str(new_value))
+            except ValueError as error:
+                raise ValueError(
+                    f"mutation value {new_value!r} is not in the alphabet"
+                ) from error
+            posterior[index] = 0.0
+            posterior[index, allele_index] = 1.0
+        return self.__class__(
+            posterior,
+            alphabet=alphabet,
+            hard_rule="argmax",
+            seed=self._seed,
+            sequence_id=self._mutation_sequence_id(),
+        )
 
     @classmethod
     def from_posteriors(cls,
@@ -979,7 +1222,8 @@ class SoftSequence(BaseNumpySequence):
                         alphabet: Iterable = PROT_20,
                         gap_posterior: np.ndarray | None = None,
                         hard_rule: Literal["argmax", "sample"] = "argmax",
-                        seed: int = None) -> "SoftSequence":
+                        seed: int = None,
+                        sequence_id: str | None = None) -> "SoftSequence":
         """
         Alias around __init__ for clarity / parity with other classes.
 
@@ -1006,7 +1250,8 @@ class SoftSequence(BaseNumpySequence):
                    alphabet=alphabet,
                    gap_posterior=gap_posterior,
                    hard_rule=hard_rule,
-                   seed=seed)
+                   seed=seed,
+                   sequence_id=sequence_id)
 
     @staticmethod
     def compute_conditional_gap_dist(aa_post_dist: np.ndarray,       
@@ -1068,7 +1313,7 @@ def make_sequence(sequence: _SeqConvertible,
     if isinstance(sequence, BaseNumpySequence) and alphabet is None:
         return sequence
 
-    seq_id = getattr(sequence, 'name', None)
+    seq_id = getattr(sequence, 'id', getattr(sequence, 'name', None))
     seq_np = _to_numpy(sequence)
     
     # If an alphabet wasn't passed, but the original object had one, use it.
@@ -1076,7 +1321,7 @@ def make_sequence(sequence: _SeqConvertible,
         alphabet = sequence.alphabet
 
     if binary is True or (binary is None and set(seq_np).issubset({0, 1})):
-        return BinarySequence(seq_np)
+        return BinarySequence(seq_np, sequence_id=seq_id)
     
     return BaseNumpySequence(seq_np, sequence_id=seq_id, alphabet=alphabet, moltype=moltype)
 
