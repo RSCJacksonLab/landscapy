@@ -44,5 +44,8 @@ returned directly without invoking PCA or GUDHI.
 Finite diffusion powers must be integers greater than or equal to one.
 `None`, zero, and positive infinity select the documented stationary regime;
 negative values, non-integral values, NaN, and negative infinity are invalid.
-Connectivity thresholds must be finite probabilities in `[0, 1]`.
+Connectivity thresholds must be finite dimensionless amplitudes in `[0, 1]`.
 Evolutionary-diffusion temperature `tau` must be finite and strictly positive.
+The graph edge weight is evaluated from the symmetric kernel defined in the
+[reversible diffusion contract](diffusion_semantics.md); thresholds are applied
+after that symmetrization.

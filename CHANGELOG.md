@@ -39,6 +39,9 @@ All notable changes to Landscapy are documented here.
   matrices, nearest-neighbour options, diffusion parameters, and small-sample
   TDA behavior; FAISS IVF now honors its requested metric and uses a trainable
   centroid count.
+- Replaced order-dependent diffusion edge weights and stationary marginals
+  with a reversible lazy transition and symmetric stationary-measure kernel;
+  stationary limits are now evaluated within communicating components.
 
 ### Removed
 
