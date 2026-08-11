@@ -370,7 +370,7 @@ def create_nk_multi_landscape(N: int,
                                     values=replicates,
                                     metadata={'N' : N,
                                               'K' : K,
-                                              'alphabet_size' : alphabet_size,
+                                              'alphabet_size' : len(alphabet),
                                               'type' : 'multi-allele'})
     }
     

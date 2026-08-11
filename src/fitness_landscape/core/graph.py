@@ -10,7 +10,6 @@ import gudhi
 from sklearn.decomposition import PCA
 from sklearn.metrics.pairwise import euclidean_distances, rbf_kernel
 from sklearn.neighbors import NearestNeighbors
-from sklearn.metrics.pairwise import euclidean_distances
 from pathlib import Path
 from cogent3.core.alignment import Alignment
 from .._const import PROT_20

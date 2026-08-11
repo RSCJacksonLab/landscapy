@@ -3,7 +3,6 @@ from typing import List, Tuple, Dict, Literal
 from ..core.landscape import FitnessLandscape
 from ..transforms.walsh_hadamard import walsh_coefficients
 from sklearn.linear_model import LinearRegression, Lasso, Ridge, ElasticNet
-from itertools import combinations
 from itertools import combinations, product
 
 

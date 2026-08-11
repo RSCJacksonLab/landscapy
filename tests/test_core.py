@@ -16,7 +16,6 @@ from fitness_landscape.core.fitness import (
 import torch
 import pandas as pd
 from torch_geometric.data import Data
-from fitness_landscape.core.fitness import NumericFitness, CategoricalFitness, ProbabilisticCategoricalFitness
 from pathlib import Path
 from unittest.mock import patch
 from cogent3 import get_moltype
@@ -481,7 +480,7 @@ def test_landscape_getitem(basic_landscape):
     assert isinstance(seq, BaseNumpySequence)
     assert isinstance(fitness, float)
 
-def test_sequence_distance_errors():
+def test_sequence_distance_rejects_mismatched_lengths_and_metrics():
     """Tests error handling in sequence distance calculations."""
     seq1 = BaseNumpySequence([0, 1])
     seq2 = BaseNumpySequence([0, 1, 2])
@@ -535,7 +534,7 @@ def test_sequence_creation_and_properties():
     seq3 = BaseNumpySequence(['X', 'Y', 'Z'], moltype="invalid_moltype")
     assert seq3._c3_seq is None
 
-def test_sequence_distance_errors():
+def test_sequence_distance_reports_specific_errors():
     """Covers error handling in the distance method."""
     seq_a = BaseNumpySequence([1, 2])
     seq_b = BaseNumpySequence([1, 2, 3])
@@ -1203,12 +1202,6 @@ def test_hamming_multiallele_all_identical_sequences_yields_no_edges():
     G = create_hamming_graph(sequences=seqs, _backend="masked")
     assert G.number_of_nodes() == 5
     assert G.number_of_edges() == 0
-
-def test_knn_balltree_all_ties_reaches_degree_at_least_L_on_hypercube():
-    seqs = _toy_binary_seqs_L4()  # L = 4
-    G = create_knn_graph(sequences=seqs, k=2, backend="balltree", tie_policy="all")
-    L = len(seqs[0])
-    assert min(dict(G.degree()).values()) >= L  # union with all ties
 
 def test_knn_balltree_all_ties_reaches_degree_at_least_L_on_hypercube():
     seqs = _toy_binary_seqs_L4()  # L = 4
