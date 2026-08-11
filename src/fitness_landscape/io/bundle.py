@@ -12,6 +12,7 @@ import tempfile
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
+from functools import cmp_to_key
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
@@ -268,9 +269,23 @@ def _write_portable_bundle_dir(
     _write_json(nodes_path, nodes_payload)
     files_written.append(nodes_path)
 
-    sequence_payload = _build_sequence_payload(canonical_sequence_objects)
     sequences_path = bundle_dir / SEQUENCES_FILENAME
-    _write_npy(sequences_path, sequence_payload["hard_matrix"])
+    if any(isinstance(seq, SoftSequence) for seq in canonical_sequence_objects):
+        sequence_payload = _build_sequence_payload(canonical_sequence_objects)
+        _write_npy(sequences_path, sequence_payload["hard_matrix"])
+        sequence_payload["array_dtype"] = str(sequence_payload["hard_matrix"].dtype)
+    else:
+        array_dtype, token_kind = _write_hard_sequence_file(
+            sequences_path,
+            canonical_sequence_objects,
+        )
+        sequence_payload = {
+            "representation": "hard",
+            "token_kind": token_kind,
+            "array_dtype": array_dtype,
+            "hard_matrix": None,
+            "soft_tensor": None,
+        }
     files_written.append(sequences_path)
 
     if sequence_payload["soft_tensor"] is not None:
@@ -373,7 +388,7 @@ def _write_portable_bundle_dir(
             "path": SEQUENCES_FILENAME,
             "representation": sequence_payload["representation"],
             "token_kind": sequence_payload["token_kind"],
-            "array_dtype": str(sequence_payload["hard_matrix"].dtype),
+            "array_dtype": sequence_payload["array_dtype"],
             "soft_posteriors_path": (
                 SOFT_SEQUENCES_FILENAME if soft_sequences_path is not None else None
             ),
@@ -434,10 +449,24 @@ def _build_sequence_payload(sequences: Sequence[BaseNumpySequence]) -> dict[str,
 
 
 def _build_hard_sequence_matrix(sequences: Sequence[BaseNumpySequence]) -> tuple[np.ndarray, str]:
-    rows = [np.asarray(seq.to_array()).reshape(-1) for seq in sequences]
+    rows = [_sequence_array_view(seq) for seq in sequences]
     lengths = {row.shape[0] for row in rows}
     if len(lengths) != 1:
         raise BundleValidationError("All sequences must share the same length.")
+
+    # Avoid expanding every token into Python objects for homogeneous NumPy
+    # sequences.  That legacy path has memory proportional to tens of bytes
+    # per token and can exhaust RAM while writing otherwise compact arrays.
+    # Keep the coercive fallback below for mixed/object representations.
+    dtype_kinds = {row.dtype.kind for row in rows}
+    if dtype_kinds <= {"b"}:
+        return np.stack(rows).astype(bool, copy=False), "bool"
+    if dtype_kinds and dtype_kinds <= {"i", "u"}:
+        return np.stack(rows).astype(np.int64, copy=False), "int"
+    if dtype_kinds <= {"f"}:
+        return np.stack(rows).astype(np.float64, copy=False), "float"
+    if dtype_kinds and dtype_kinds <= {"S", "U"}:
+        return np.stack(rows).astype(str, copy=False), "string"
 
     scalar_values = [_coerce_scalar_token(value) for row in rows for value in row.tolist()]
     token_kind = _infer_scalar_kind(scalar_values)
@@ -455,6 +484,55 @@ def _build_hard_sequence_matrix(sequences: Sequence[BaseNumpySequence]) -> tuple
         )
 
     return matrix, token_kind
+
+
+def _write_hard_sequence_file(
+    path: Path,
+    sequences: Sequence[BaseNumpySequence],
+    *,
+    row_block_size: int = 64,
+) -> tuple[str, str]:
+    """Write homogeneous hard sequences without a full in-memory stack."""
+    rows = [_sequence_array_view(sequence) for sequence in sequences]
+    lengths = {row.shape[0] for row in rows}
+    if len(lengths) != 1:
+        raise BundleValidationError("All sequences must share the same length.")
+
+    dtype_kinds = {row.dtype.kind for row in rows}
+    if dtype_kinds <= {"b"}:
+        target_dtype = np.dtype(bool)
+        token_kind = "bool"
+    elif dtype_kinds and dtype_kinds <= {"i", "u"}:
+        target_dtype = np.dtype(np.int64)
+        token_kind = "int"
+    elif dtype_kinds <= {"f"}:
+        target_dtype = np.dtype(np.float64)
+        token_kind = "float"
+    elif dtype_kinds and dtype_kinds <= {"S", "U"}:
+        source_dtypes = [np.dtype(value) for value in sorted({row.dtype.str for row in rows})]
+        common_dtype = np.result_type(*source_dtypes)
+        target_dtype = np.empty(0, dtype=common_dtype).astype(str).dtype
+        token_kind = "string"
+    else:
+        matrix, token_kind = _build_hard_sequence_matrix(sequences)
+        _write_npy(path, matrix)
+        return str(matrix.dtype), token_kind
+
+    shape = (len(rows), next(iter(lengths)))
+    output = np.lib.format.open_memmap(
+        path,
+        mode="w+",
+        dtype=target_dtype,
+        shape=shape,
+    )
+    for start in range(0, len(rows), int(row_block_size)):
+        stop = min(len(rows), start + int(row_block_size))
+        output[start:stop] = np.stack(rows[start:stop]).astype(target_dtype, copy=False)
+    output.flush()
+    mmap_handle = getattr(output, "_mmap", None)
+    if mmap_handle is not None:
+        mmap_handle.close()
+    return str(target_dtype), token_kind
 
 
 def _write_graph_edges(
@@ -687,7 +765,6 @@ def _build_canonical_node_records(
     for original_position, node_key in enumerate(original_node_order):
         sequence_index = node_to_sequence_index[node_key]
         sequence = landscape.sequences[sequence_index]
-        sequence_tokens = [_coerce_scalar_token(value) for value in sequence.to_array().tolist()]
         node_sort_key = _portable_sort_key(node_key)
         records.append(
             {
@@ -696,19 +773,55 @@ def _build_canonical_node_records(
                 "sequence_index": sequence_index,
                 "sequence": sequence,
                 "sequence_id": _normalize_sequence_id(sequence),
-                "sequence_sort_key": _stable_json_dumps(sequence_tokens, indent=None),
                 "node_sort_key": node_sort_key if node_sort_key is not None else f"ordinal:{original_position:08d}",
             }
         )
 
-    records.sort(
-        key=lambda record: (
-            record["sequence_sort_key"],
-            record["sequence_id"] or "",
-            record["node_sort_key"],
-            record["original_position"],
+    # Comparing the first differing token is equivalent to comparing the
+    # stable JSON list strings previously materialised for every sequence, but
+    # uses only an alignment-length boolean scratch array per comparison. The
+    # former representation created one Python object per residue.
+    def compare_records(left: Mapping[str, Any], right: Mapping[str, Any]) -> int:
+        left_values = _sequence_array_view(left["sequence"])
+        right_values = _sequence_array_view(right["sequence"])
+        common_length = min(left_values.shape[0], right_values.shape[0])
+        unequal = left_values[:common_length] != right_values[:common_length]
+        if np.any(unequal):
+            position = int(np.argmax(unequal))
+            left_token = _stable_json_dumps(
+                _coerce_scalar_token(left_values[position]), indent=None
+            )
+            right_token = _stable_json_dumps(
+                _coerce_scalar_token(right_values[position]), indent=None
+            )
+            if left_token != right_token:
+                return -1 if left_token < right_token else 1
+        elif left_values.shape[0] != right_values.shape[0]:
+            # Preserve legacy JSON-list ordering for the invalid mixed-length
+            # case; bundle validation will subsequently reject it.
+            left_key = _stable_json_dumps(
+                [_coerce_scalar_token(value) for value in left_values.tolist()], indent=None
+            )
+            right_key = _stable_json_dumps(
+                [_coerce_scalar_token(value) for value in right_values.tolist()], indent=None
+            )
+            return -1 if left_key < right_key else 1
+
+        left_tail = (
+            left["sequence_id"] or "",
+            left["node_sort_key"],
+            left["original_position"],
         )
-    )
+        right_tail = (
+            right["sequence_id"] or "",
+            right["node_sort_key"],
+            right["original_position"],
+        )
+        if left_tail == right_tail:
+            return 0
+        return -1 if left_tail < right_tail else 1
+
+    records.sort(key=cmp_to_key(compare_records))
     return records
 
 
@@ -728,6 +841,26 @@ def _match_nodes_to_sequence_indices(
         raise BundleValidationError(
             "Portable bundle serialization currently requires one sequence per graph node."
         )
+
+    # Graph constructors normally attach the exact sequence objects owned by
+    # the landscape. Resolve that common case by identity so portable writing
+    # does not allocate one tuple and one Python scalar per residue.
+    by_identity = {id(sequence): idx for idx, sequence in enumerate(landscape.sequences)}
+    identity_mapping: dict[Any, int] = {}
+    identity_used: set[int] = set()
+    for node_key in node_order:
+        node_sequence = landscape.graph.nodes[node_key].get("sequence")
+        if not isinstance(node_sequence, BaseNumpySequence):
+            raise BundleValidationError(
+                f"Graph node {node_key!r} does not expose a BaseNumpySequence under 'sequence'."
+            )
+        sequence_index = by_identity.get(id(node_sequence))
+        if sequence_index is None or sequence_index in identity_used:
+            break
+        identity_mapping[node_key] = sequence_index
+        identity_used.add(sequence_index)
+    else:
+        return identity_mapping
 
     by_key_and_id: dict[tuple[tuple[Any, ...], str | None], list[int]] = defaultdict(list)
     by_key: dict[tuple[Any, ...], list[int]] = defaultdict(list)
@@ -1222,7 +1355,15 @@ def _decode_attribute_value(value: Any, *, codec: str) -> Any:
 
 
 def _sequence_lookup_key(sequence: BaseNumpySequence) -> tuple[Any, ...]:
-    return tuple(_coerce_scalar_token(item) for item in np.asarray(sequence.to_array()).tolist())
+    return tuple(_coerce_scalar_token(item) for item in _sequence_array_view(sequence).tolist())
+
+
+def _sequence_array_view(sequence: BaseNumpySequence) -> np.ndarray:
+    """Return a read-only-by-convention sequence view when one is exposed."""
+    values = getattr(sequence, "ndarray", None)
+    if values is None:
+        values = sequence.to_array()
+    return np.asarray(values).reshape(-1)
 
 
 def _normalize_sequence_id(sequence: BaseNumpySequence) -> str | None:

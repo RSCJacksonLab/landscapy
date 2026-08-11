@@ -902,6 +902,7 @@ def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
         hamming_all = (L - D).astype(np.float32)
     else:
         hamming_all = (0.5 * D).astype(np.float32)
+    del X, D
 
     # Build graph and keep min hamming per edge.
     G = nx.Graph()
@@ -956,16 +957,9 @@ def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
                 min_hamming[(u, v)] = dij
                 G.add_edge(u, v)
 
-    # If all nodes carry amino soft arrays, compute expected Hamming via alignment.
-    # This will stamp: weight (expected mutation count), distance (normalized),
-    # sim (-log(distance)), etc., overriding any FAISS-derived placeholders below.
-    has_soft_20 = all(
-        hasattr(seq, "ungapped_arr") and getattr(seq, "ungapped_arr", None) is not None
-        and getattr(seq, "ungapped_arr").shape[1] == 20
-        for seq in sequences
-    )
+    del I, hamming_all
 
-    if not all(hasattr(seq, "ungapped_arr") and seq.alphabet==PROT_20 for _, seq in G.nodes(data='sequence')):
+    if not all(seq.alphabet == PROT_20 for _, seq in G.nodes(data='sequence')):
         # Stamp FAISS-derived attributes as *Hamming counts*
         if min_hamming:
             counts = { (u, v): float(h) for (u, v), h in min_hamming.items() }

@@ -296,7 +296,8 @@ class FitnessLandscape:
                  embeddings: Mapping[str, np.ndarray] | np.ndarray | None = None,
                  emb_arr_key: str = 'emb_arr',
                  active_embedding_domain: str | None = None,
-                 embedding_metadata: Mapping[str, Mapping[str, Any]] | None = None):
+                 embedding_metadata: Mapping[str, Mapping[str, Any]] | None = None,
+                 _build_sequence_indexes: bool = True):
         
         # Initialize Core Attributes with pre-computed objects
         self.sequences = sequences
@@ -329,14 +330,21 @@ class FitnessLandscape:
         # Finalize Setup and Annotate Graph
         # Safe canonical node ordering.
         self._node_order = list(graph.nodes())  
-        self._seq_to_nodes = self._build_seq_multimap()  # duplicate-safe
+        if not _build_sequence_indexes and (self.fitness_layers or self.annotation_layers):
+            raise ValueError(
+                "_build_sequence_indexes=False is only valid without fitness or annotation layers."
+            )
+        self._seq_to_nodes = (
+            self._build_seq_multimap() if _build_sequence_indexes else {}
+        )  # duplicate-safe
         self._nodes_by_index = {i: n for i, n in enumerate(self._node_order)}  # 0..N-1 -> node key
         self._annotate_graph_nodes_with_fitness()
         self._annotate_graph_nodes_with_annotations()
         if self.get_embedding() is not None:
             self._annotate_graph_nodes_with_embeddings()
-        self._records = self._build_sequence_index() 
-        self._enforce_unique_sequences()
+        self._records = self._build_sequence_index() if _build_sequence_indexes else {}
+        if _build_sequence_indexes:
+            self._enforce_unique_sequences()
         
         if self.fitness_layers:
             self._active_view_name = (
