@@ -32,6 +32,8 @@ def calculate_epistasis_walsh(landscape: FitnessLandscape,
     
     order : int
         The order of interactions to test up to. 
+    **kwargs
+        Reserved for compatibility. No keyword is currently consumed.
     
     Returns
     -------
@@ -130,8 +132,34 @@ def calculate_epistasis_regression(landscape: FitnessLandscape,
                                     regularization: Literal['l1', 'l2', 'elastic_net'] = None,
                                     alpha: float = 1.0,
                                     **kwargs) -> Dict:
-    """
-    Function to measure epistasis with linear modelling using one-hot encoding.
+    """Estimate binary epistasis with an effect-coded linear model.
+
+    Parameters
+    ----------
+    landscape : FitnessLandscape
+        Landscape whose active scalar fitness signal is modelled. Sequences
+        must be binary and share a length.
+    order : int
+        Highest interaction order included in the design matrix.
+    regularization : {None, 'l1', 'l2', 'elastic_net'}, optional
+        Regression penalty. ``None`` uses ordinary least squares.
+    alpha : float, default=1.0
+        Penalty strength for regularized models.
+    **kwargs
+        Additional model settings. ``l1_ratio`` is consumed by the elastic-net
+        estimator; other keys are ignored.
+
+    Returns
+    -------
+    dict
+        Coefficients grouped by interaction order, model type, coefficient
+        statistics, and in-sample coefficient of determination ``r2_score``.
+
+    Notes
+    -----
+    Binary states are coded as ``0 -> +1`` and ``1 -> -1``. Interaction
+    columns are products of these main-effect columns, and the intercept is the
+    empirical mean fitness.
     """
     # Sequences (M x N) as 0/1
     X01 = np.vstack([s.to_array().astype(int) for s in landscape.sequences])
@@ -246,6 +274,8 @@ def calculate_epistasis_ensemble(landscape: FitnessLandscape,
     
     order : int
         The order of epistasis to test up to. 
+    **kwargs
+        Reserved for compatibility. No keyword is currently consumed.
     
     Returns
     -------
@@ -354,6 +384,8 @@ def calculate_epistasis_reference_free(landscape: FitnessLandscape,
     
     order : int
         The order of interaction to test up to. 
+    **kwargs
+        Reserved for compatibility. No keyword is currently consumed.
     
     Returns
     -------

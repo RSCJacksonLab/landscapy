@@ -53,9 +53,19 @@ def _to_numpy(x: _SeqConvertible) -> np.ndarray:
     return np.asarray(x).ravel()
 
 class BaseNumpySequence:
-    """
-    Base class for sequences represented as numpy arrays and
-    interfacing with cogent3 sequences.
+    """Represent a biological or symbolic sequence as a NumPy array.
+
+    Parameters
+    ----------
+    sequence : BaseNumpySequence, sequence of scalar, ndarray, or cogent3.Sequence
+        Sequence values in positional order.
+    sequence_id : str, optional
+        Stable identifier for the sequence. If omitted, a representation of the
+        sequence values is used.
+    alphabet : iterable, optional
+        Ordered set of permitted symbols. If omitted, infer it from ``sequence``.
+    moltype : str or cogent3.core.moltype.MolType, optional
+        Cogent3 molecular type used to construct an interoperable sequence.
 
     Attributes
     ----------
@@ -142,6 +152,7 @@ class BaseNumpySequence:
 
     @property
     def ungapped_arr(self) -> np.ndarray:
+        """Return one-hot probabilities with the gap column removed."""
         one_hot = np.asarray(self.to_one_hot(), dtype=np.float64)  # (L, |A|)
 
         if "gap" in self.alphabet or "-" in self.alphabet:
@@ -153,16 +164,46 @@ class BaseNumpySequence:
     
     @property
     def sequence(self) -> np.ndarray:
+        """Return the underlying sequence array without copying."""
         return self._np
 
     @property
     def ndarray(self) -> np.ndarray:
+        """Return the underlying sequence array without copying."""
         return self._np
 
     def to_array(self) -> np.ndarray:
+        """Return a copy of the sequence array.
+
+        Returns
+        -------
+        ndarray
+            Independent one-dimensional sequence array.
+        """
         return self._np.copy()
 
     def distance(self, other: _SeqConvertible, *, metric: Literal["hamming", "euclidean"] = "hamming") -> float:
+        """Compute Hamming or Euclidean distance to another sequence.
+
+        Parameters
+        ----------
+        other : BaseNumpySequence, sequence of scalar, ndarray, or cogent3.Sequence
+            Sequence with the same length as this sequence.
+        metric : {'hamming', 'euclidean'}, default='hamming'
+            Distance definition. Hamming distance counts unequal sites; Euclidean
+            distance is defined only for values convertible to floating point.
+
+        Returns
+        -------
+        float
+            Distance between the two sequences.
+
+        Raises
+        ------
+        ValueError
+            If lengths differ, the metric is unsupported, or Euclidean distance
+            is requested for non-numeric values.
+        """
         other_arr = _to_numpy(other)
         if other_arr.shape != self._np.shape:
             raise ValueError("Sequences must be the same length")
@@ -183,6 +224,26 @@ class BaseNumpySequence:
             seed: int = None) -> "BaseNumpySequence":
         """
         Create a mutated copy of the sequence.
+
+        Parameters
+        ----------
+        positions : int or iterable of int, optional
+            Sites to mutate. If omitted, select one site uniformly at random.
+        values : iterable, optional
+            Replacement values corresponding to ``positions``. If omitted,
+            sample a different symbol from the sequence alphabet at each site.
+        seed : int, optional
+            Seed for random site or symbol selection.
+
+        Returns
+        -------
+        BaseNumpySequence
+            Mutated sequence of the same concrete class.
+
+        Raises
+        ------
+        ValueError
+            If the numbers of positions and replacement values differ.
         """
         rng = np.random.default_rng(seed)
         new_np = self._np.copy()
@@ -317,10 +378,10 @@ class BaseNumpySequence:
         return np.array([_lookup(s) for s in self.ndarray], dtype=int)
 
     def to_str(self) -> str:
-        """
-        Method to convert the seuqnece to a string.
+        """Convert the sequence to a concatenated string.
 
-        returns:
+        Returns
+        -------
         str
             The sequence in string format.
         """
@@ -329,8 +390,22 @@ class BaseNumpySequence:
     def remove_gap_arr(self,
                        *,
                        gap_threshold: float = 0.5) -> np.ndarray:
-        """
+        """Remove sites whose gap posterior exceeds a threshold.
 
+        Parameters
+        ----------
+        gap_threshold : float, default=0.5
+            Maximum retained posterior probability of a gap.
+
+        Returns
+        -------
+        ndarray
+            Renormalized non-gap posterior rows for retained sites.
+
+        Raises
+        ------
+        ValueError
+            If the one-hot width differs from the alphabet size.
         """
         gap_idx = self.alphabet.index("gap") if "gap" in self.alphabet else len(self.alphabet) - 1
         post = self.to_one_hot() # (L, |A|)
@@ -366,10 +441,10 @@ class BaseNumpySequence:
         alphabet : Iterable, default=`PROT_20`
             The alphabet. Defaults to the canonical 20 amino acids.
         
-        moltype: str, default=`None`
+        moltype : str, optional
             The (optional) moltype.
         
-        sequence_id: str, default=`None`
+        sequence_id : str, optional
             The (optional) sequence ID. If `None`, the sequence is used
             as the id. 
 
@@ -403,10 +478,10 @@ class BaseNumpySequence:
         alphabet : Iterable, default=`PROT_20`
             The alphabet. Defaults to the canonical 20 amino acids.
         
-        moltype: str, default=`None`
+        moltype : str, optional
             The (optional) moltype.
         
-        sequence_id: str, default=`None`
+        sequence_id : str, optional
             The (optional) sequence ID. If `None`, the sequence is used
             as the id. 
 
@@ -435,7 +510,7 @@ class BaseNumpySequence:
         seq : Sequence
             The cogent3 Sequence object. 
         
-        sequence_id: str, default=`None`
+        sequence_id : str, optional
             The (optional) sequence ID. If `None`, the sequence is used
             as the id. 
 
@@ -468,7 +543,7 @@ class BaseNumpySequence:
             The alphabet. Defaults to computation on the fly based on
             the size of the array.
         
-        sequence_id: str, default=`None`
+        sequence_id : str, optional
             The (optional) sequence ID. If `None`, the sequence is used
             as the id. 
 
@@ -510,9 +585,10 @@ class BaseNumpySequence:
             The alphabet. Defaults to computation on the fly based on
             the size on the maximum int.
         
-        sequence_id: str, default=`None`
+        sequence_id : str, optional
             The (optional) sequence ID. If `None`, the sequence is used
-            as the id. 
+            as the id.
+
         Returns
         -------
         BaseNumpySequence
@@ -558,7 +634,8 @@ class BaseNumpySequence:
         
         sequence_id : str, default=`None`
             The (optional) sequence ID. If `None`, the sequence is used
-            as the id. 
+            as the id.
+
         Returns
         -------
         BaseNumpySequence
@@ -576,8 +653,17 @@ class BaseNumpySequence:
 
 # BinarySequence can now be much simpler
 class BinarySequence(BaseNumpySequence):
-    """
-    Binary sequence class that accepts only 0/1 symbols.
+    """Represent a sequence whose symbols are restricted to zero and one.
+
+    Parameters
+    ----------
+    sequence : BaseNumpySequence, sequence of int, or ndarray
+        Binary values in positional order.
+
+    Raises
+    ------
+    ValueError
+        If any value is not zero or one.
     """
     def __init__(self,
                  sequence: _SeqConvertible) -> None:
@@ -635,7 +721,8 @@ class BinarySequence(BaseNumpySequence):
         
         sequence_id : str, default=`None`
             The (optional) sequence ID. If `None`, the sequence is used
-            as the id. 
+            as the id.
+
         Returns
         -------
         BaseNumpySequence
@@ -685,8 +772,19 @@ class BinarySequence(BaseNumpySequence):
 
 
 class MultialleleSequence(BaseNumpySequence):
-    """
-    A sequence with multiple alleles at each position.
+    """Represent a sequence over an explicitly supplied alphabet.
+
+    Parameters
+    ----------
+    sequence : BaseNumpySequence, sequence of scalar, or ndarray
+        Alleles in positional order.
+    alphabet : iterable
+        Permitted allele values.
+
+    Raises
+    ------
+    ValueError
+        If ``sequence`` contains a value outside ``alphabet``.
     """
 
     def __init__(self,
@@ -706,6 +804,25 @@ class MultialleleSequence(BaseNumpySequence):
                alphabet: Iterable,
                seed: int | None = None,
                sequence_id: str | None = None) -> "MultialleleSequence":
+        """Generate a uniformly sampled multiallelic sequence.
+
+        Parameters
+        ----------
+        length : int
+            Number of sites.
+        alphabet : iterable
+            Values sampled independently at each site.
+        seed : int, optional
+            Random-number-generator seed.
+        sequence_id : str, optional
+            Sequence identifier. Reserved for API consistency; the current
+            constructor derives the identifier from sequence values.
+
+        Returns
+        -------
+        MultialleleSequence
+            Sampled sequence.
+        """
         rng = np.random.default_rng(seed)
         A = list(alphabet)
         arr = np.array(rng.choice(A, size=length), dtype=object)
@@ -717,6 +834,23 @@ class MultialleleSequence(BaseNumpySequence):
                     *,
                     alphabet: Iterable,
                     sequence_id: str | None = None) -> "MultialleleSequence":
+        """Construct a multiallelic sequence from a string.
+
+        Parameters
+        ----------
+        s : str
+            String whose characters become sites.
+        alphabet : iterable
+            Permitted character values.
+        sequence_id : str, optional
+            Sequence identifier. Reserved for API consistency; the current
+            constructor derives the identifier from sequence values.
+
+        Returns
+        -------
+        MultialleleSequence
+            Constructed sequence.
+        """
         return cls(list(s), alphabet=alphabet)
 
 

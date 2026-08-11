@@ -22,6 +22,8 @@ All notable changes to Landscapy are documented here.
 - Renamed phylogenetic `construct_dag()` to the undirected-only
   `construct_topology()` and removed directed graph state from portable bundle
   manifests.
+- Standardized the documented 0.9 public API on NumPy-style parameter and
+  return contracts, with a scoped `numpydoc` CI gate.
 
 ### Removed
 

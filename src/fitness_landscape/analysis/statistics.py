@@ -39,6 +39,8 @@ def analyze_fitness_distribution(landscape: FitnessLandscape,
     ----------
     landscape : FitnessLandscape
         Fitness landscape to analyze.
+    **kwargs
+        Reserved for compatibility. No keyword is currently consumed.
         
     Returns
     -------
@@ -326,7 +328,8 @@ def permutation_test(*,
         Function that takes a landscape and layer name, and returns a
         1D array of values for that layer.
 
-    
+    statistic_func : callable, optional
+        Two-sample statistic. By default, compute ``mean(a) - mean(b)``.
     n_permutations : int, default=1000
         Number of random permutations of group labels to perform.
 
@@ -334,19 +337,9 @@ def permutation_test(*,
         Significance threshold for determining whether observed
         statistics differ from the permutation null distribution.
 
-    equal_var : bool, default=False
-        Placeholder for compatibility with `hypothesis_testing`.
-        Does not affect permutation tests, unless the provided
-        `statistic_func` explicitly uses it.
-
-    run_tests : Tuple[str], optional
-        Optional names of test variants to run in parallel. 
-        If provided, must correspond to keys in a registry of
-        `statistic_func` implementations.
-
-    alternative : {"two_sided", "greater", "less"}, default="two_sided"
+    alternative : {"two-sided", "greater", "less"}, default="two-sided"
         Defines the alternative hypothesis for p-value computation:
-        - `"two_sided"` : p-value is proportion of permuted statistics
+        - `"two-sided"` : p-value is proportion of permuted statistics
           at least as extreme as the observed (absolute) statistic.
         - `"greater"` : p-value is proportion of permuted statistics
           greater than or equal to the observed statistic.
@@ -492,14 +485,20 @@ def subsample_analysis(landscape: FitnessLandscape,
     n_samples : int, default=100
         The number of subsamples to draw. 
     
-    subsample_node_prop: float, default=0.9
+    subsample_node_prop : float, default=0.9
         The proportion of nodes in `landscape` that are subsampled in
         each induced subgraph. 
     
-    subsample_edge_prop: float, default=0.9
+    subsample_edge_prop : float, default=0.9
         The proportion of edges in `landscape` that are subsampled in
         each induced subgraph. 
     
+    seed : int, optional
+        Seed used to derive an independent seed for each subsample.
+
+    layer_name : str, optional
+        Fitness layer activated on each subsampled landscape before analysis.
+
     use_ray : bool, default=True
         Whether to use Ray for parallel processing. If False, runs
         serially.
@@ -507,6 +506,13 @@ def subsample_analysis(landscape: FitnessLandscape,
     num_workers : int, optional
         Number of parallel workers to use with Ray. If None, uses all
         available CPUs. Ignored if `use_ray` is False.
+
+    Returns
+    -------
+    dict
+        Raw per-sample results and, when results are numeric or numeric
+        dictionaries, empirical means, sample standard deviations, and 95%
+        percentile intervals.
     """
     rng = np.random.default_rng(seed)
     results: list[Any] = []

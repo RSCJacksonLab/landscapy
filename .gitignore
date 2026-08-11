@@ -185,8 +185,8 @@ testing/
 # Temporarily remove examples
 examples/
 
-# Temporarily remove docs
-docs/
+# Documentation sources are release artifacts; generated docs remain ignored
+# by the docs/_build rule above.
 
 # Remove paper figures
 paper_figures/

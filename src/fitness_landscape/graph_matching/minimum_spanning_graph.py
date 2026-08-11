@@ -521,10 +521,10 @@ def reconstruct_latent_graph_with_steiner(G_obs: nx.Graph,
         Edge attribute name for weights.
     length_transform : {'neglog','reciprocal'}, default='neglog'
         Similarity→length transform for geodesics.
-    max_iter_smacof : int, default=150
-        Max iterations for sparse SMACOF.
     _keep_steiner_in_graph : bool, default=`True`
         Boolean to keep the steiner points in the latent graph.
+    max_iter_smacof : int, default=150
+        Max iterations for sparse SMACOF.
 
     Returns
     -------
@@ -721,7 +721,7 @@ def reconstruct_latent_graph_midpoint(G_obs: nx.Graph,
     k_gap : int, default=10,
         The k value for pairwise embedding comparisons. 
     
-    k_edge : int, default=20,
+    k_edges : int, default=20,
         The k value to use for heuristic search pairwise comparisons.
 
     Returns

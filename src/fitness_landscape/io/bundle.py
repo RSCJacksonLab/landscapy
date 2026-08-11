@@ -69,6 +69,35 @@ def save_bundle_dir(
     include_legacy_pickle: bool = False,
     overwrite: bool = False,
 ) -> Path:
+    """Write a canonical portable landscape directory.
+
+    Parameters
+    ----------
+    landscape : FitnessLandscape
+        Undirected landscape to serialize.
+    path : str or pathlib.Path
+        Destination directory.
+    metadata : mapping, optional
+        User metadata stored separately from the structural manifest.
+    include_embeddings : bool, default=True
+        Include embedding arrays and their provenance.
+    include_legacy_pickle : bool, default=False
+        Add an unsafe compatibility pickle under ``legacy/``.
+    overwrite : bool, default=False
+        Replace an existing destination.
+
+    Returns
+    -------
+    pathlib.Path
+        Written directory.
+
+    Raises
+    ------
+    FileExistsError
+        If the destination exists and ``overwrite`` is false.
+    BundleValidationError
+        If the landscape cannot be represented by the portable schema.
+    """
     destination = Path(path)
     parent = destination.parent
     parent.mkdir(parents=True, exist_ok=True)
@@ -92,7 +121,28 @@ def save_bundle_dir(
     return destination
 
 
-def load_bundle_dir(path: str | Path):
+def load_bundle_dir(path: str | Path) -> "FitnessLandscape":
+    """Load a canonical portable landscape directory.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Existing bundle directory.
+
+    Returns
+    -------
+    FitnessLandscape
+        Reconstructed undirected landscape.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``path`` is not a directory.
+    BundleValidationError
+        If the manifest or payload schema is unsupported or inconsistent.
+    ChecksumMismatchError
+        If a payload checksum differs from the manifest.
+    """
     bundle_dir = Path(path)
     if not bundle_dir.is_dir():
         raise FileNotFoundError(f"Bundle directory not found: {bundle_dir}")
@@ -159,6 +209,37 @@ def export_lsbundle(
     backend: str = PORTABLE_BACKEND,
     overwrite: bool = False,
 ) -> Path:
+    """Export a landscape to a deterministic ``.lsbundle`` archive.
+
+    Parameters
+    ----------
+    landscape : FitnessLandscape
+        Landscape to serialize.
+    path : str or pathlib.Path
+        Destination archive path.
+    metadata : mapping, optional
+        User metadata stored with the artifact.
+    backend : {'portable', 'pickle'}, default='portable'
+        Serialization backend. ``'portable'`` is the release format;
+        ``'pickle'`` exists only for explicit legacy interoperability and is
+        unsafe to deserialize from untrusted sources.
+    overwrite : bool, default=False
+        Replace an existing destination.
+
+    Returns
+    -------
+    pathlib.Path
+        Written archive.
+
+    Raises
+    ------
+    FileExistsError
+        If the destination exists and ``overwrite`` is false.
+    ValueError
+        If ``backend`` is unsupported.
+    BundleValidationError
+        If a portable archive cannot represent the landscape.
+    """
     destination = Path(path)
     if destination.exists():
         if not overwrite:

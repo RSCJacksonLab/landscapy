@@ -22,6 +22,8 @@ def find_greedy_accessible_paths(landscape: FitnessLandscape,
         Starting sequence.
     end_sequence : Sequence
         Ending sequence.        
+    **kwargs
+        Reserved for compatibility. No keyword is currently consumed.
     
     Returns
     -------
@@ -118,6 +120,8 @@ def analyze_path_accessibility(landscape: FitnessLandscape,
     ----------
     landscape : FitnessLandscape
         Fitness landscape to analyze.
+    **kwargs
+        Reserved for compatibility. No keyword is currently consumed.
     
     Returns
     -------
@@ -231,6 +235,8 @@ def calculate_basin_of_attraction_greedy(landscape: FitnessLandscape,
         Fitness landscape to analyze.
     local_optimum : Sequence
         Local optimum sequence.
+    **kwargs
+        Reserved for compatibility. No keyword is currently consumed.
         
     Returns
     -------
@@ -356,6 +362,8 @@ def calculate_basin_of_attraction_stochastic(landscape: FitnessLandscape,
     acceptance_threshold : float, optional
         The minimum probability required for a sequence to be included
         in the basin.
+    **kwargs
+        Reserved for compatibility. No keyword is currently consumed.
 
     Returns
     -------

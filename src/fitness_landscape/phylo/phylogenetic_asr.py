@@ -42,9 +42,26 @@ from .._const import (
 from ..utils import sanitize_alignment
 
 class ASRConstructor:
-    """
-    Class to manage phylogenetic tree inference and reconstruction of
-    internal node probability distributions.
+    """Infer an undirected phylogeny and ancestral sequence posteriors.
+
+    Parameters
+    ----------
+    alignment : cogent3.Alignment or pathlib.Path
+        Protein alignment or FASTA path.
+    phylogenetic_tree : cogent3.core.tree.PhyloNode or pathlib.Path, optional
+        Precomputed tree or Newick path. If omitted, infer a tree.
+    model_fitting : bool, default=False
+        Select a substitution model by AICc when supported by the backend.
+    replacement_matrix : list of str, default=['NQ.pfam']
+        Candidate protein substitution models.
+    phylo_backend : {'iqtree', 'cogent_nj'}, default='cogent_nj'
+        Tree-inference backend used when no tree is supplied.
+    _dist_calc : {'paralinear', 'pdist', 'hamming'}, default='pdist'
+        Pairwise-distance calculator for neighbour joining.
+    reconstruct_ancestral_states : bool, default=True
+        Fit ancestral amino-acid posterior distributions for internal nodes.
+    _log_progress : bool, default=False
+        Emit progress logs for long-running inference steps.
 
     Attributes
     ----------
@@ -147,10 +164,10 @@ class ASRConstructor:
         Method to construct a phylogenetiphyloc tree using the piqtree
         Python binding.
         
-        Parameters:
-        -----------
-        model : List
-            The substitution models to use.
+        Parameters
+        ----------
+        replacement_matrix : list of str, default=['NQ.pfam']
+            Substitution models considered by the selected backend.
 
         model_fitting : bool, default=`True`
             Whether to fit the ML model by AICC.
@@ -158,11 +175,11 @@ class ASRConstructor:
         _model_override : str, default=`None`
             A IQTREE convention model string to override the model. 
 
-        _dist_cal : str, default=`pdist`
+        _dist_calc : {'paralinear', 'pdist', 'hamming'}, default='pdist'
             The distance calculation to use in computing neighbors and 
             distance matrices for neighbor-joining algorithms.
 
-        phylo_backend : str, default=`iqtree`
+        phylo_backend : {'iqtree', 'cogent_nj'}, default='cogent_nj'
             The phylogenetic reconstruction backend to use. 
 
         """
@@ -461,10 +478,24 @@ class ASRConstructor:
             _logger.info('ASR.build_tree: complete')
 
     def reconstruct_ancestral_states(self, model_name: str = "WG01") -> None:
-        """
+        """Run maximum-likelihood ancestral-state reconstruction.
+
         Run maximum-likelihood ancestral state reconstruction using cogent3's
         composable ``model`` / ``ancestral_states`` applications. Raises an
         informative exception if model fitting or posterior extraction fails.
+
+        Parameters
+        ----------
+        model_name : str, default='WG01'
+            Preferred Cogent3 protein substitution model. Configured tree
+            models and common protein-model fallbacks are tried if it fails.
+
+        Raises
+        ------
+        ValueError
+            If no tree or tip sequences are available.
+        RuntimeError
+            If every substitution model fails or posterior output is invalid.
         """
         import logging as _logging
 

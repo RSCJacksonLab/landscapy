@@ -82,9 +82,6 @@ def walsh_coefficients(landscape: FitnessLandscape,
     order : int, default=`None`
         Maximum order of coefficients to compute.
     
-    backend : str, default=`numpy`
-        Computational backend ('numpy', 'torch').
-        
     Returns
     -------
     dict

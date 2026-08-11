@@ -92,9 +92,17 @@ class BaseFitnessLayer(ABC):
 
     
 class NumericFitness(BaseFitnessLayer):
-    """
-    Fitness layer that represents numeric fitness values as scalars and
-    distributions based on replicate data.
+    """Represent scalar or replicated numeric fitness measurements.
+
+    Parameters
+    ----------
+    name : str
+        Layer name.
+    values : sequence of float, sequence of sequence of float, ndarray, or torch.Tensor
+        One scalar per sequence or one collection of replicate measurements per
+        sequence.
+    metadata : dict, optional
+        Free-form layer metadata.
 
     Attributes
     ----------
@@ -179,6 +187,7 @@ class NumericFitness(BaseFitnessLayer):
 
     @property
     def dtype(self) -> Literal['numeric']:
+        """Return the layer kind, ``'numeric'``."""
         return 'numeric'
 
     def get_tensor(self) -> torch.Tensor:
@@ -222,21 +231,18 @@ class NumericFitness(BaseFitnessLayer):
         return np.array([aggregate_func(r) for r in self._replicates])
 
     def get_value(self,
-                  sequence_index: int) -> Dict[str, float]:
-        """
-        Returns the full set of values for a single sequence.
+                  sequence_index: int) -> List[float]:
+        """Return replicate values for one sequence.
         
         Parameters
         ----------
         sequence_index : int
-            The index of the sequence for which to retrieve the
-            probability distribution.
+            Positional sequence index.
 
         Returns
         -------
-        Dict[str, float]
-            A dictionary mapping each category to its probability for
-            the specified sequence.
+        list of float
+            Replicate measurements for the sequence.
         """
         return self._replicates[sequence_index]
     
@@ -296,7 +302,7 @@ class NumericFitness(BaseFitnessLayer):
         metadata : Dict, optional
             Additional metadata associated with the fitness layer.
         
-            coerce_numeric : bool, default=`True`
+        coerce_numeric : bool, default=True
             If `True`, will convert all values to float.
     
         Returns
@@ -337,14 +343,14 @@ class NumericFitness(BaseFitnessLayer):
         tensor : np.ndarray OR torch.Tensor
             a 2-D array of shape (num_sequences, num_replicates).
         
-        metadata : Dict, optional
-            Additional metadata associated with the fitness layer.
-        
         pad_strategy : str, default=`keep`
             Strategy for handling missing values. Options are:
             - "keep": Keep all values, including NaNs.
             - "trim_tail_nans": Trim only trailing NaNs from each sequence,
               keeping leading/middle NaNs (safer for padding artifacts).
+
+        metadata : Dict, optional
+            Additional metadata associated with the fitness layer.
 
         Returns
         -------
@@ -375,8 +381,25 @@ class NumericFitness(BaseFitnessLayer):
                        length: int,
                        fill: float | None = float("nan"),
                        metadata: Dict | None = None) -> "NumericFitness":
-        """
-        Build from {index -> scalar or replicate list}. Missing indices get `fill` (replicate of one).
+        """Build a numeric layer from values indexed by sequence position.
+
+        Parameters
+        ----------
+        name : str
+            Layer name.
+        mapping : mapping of int to float or list of float
+            Scalar or replicate values keyed by zero-based sequence index.
+        length : int
+            Total number of sequences in the output layer.
+        fill : float, optional
+            Value assigned to missing indices. ``None`` is represented as NaN.
+        metadata : dict, optional
+            Free-form layer metadata.
+
+        Returns
+        -------
+        NumericFitness
+            Constructed numeric layer.
         """
         vals: List[List[float]] = []
         for i in range(length):
@@ -461,8 +484,18 @@ class NumericFitness(BaseFitnessLayer):
 
 
 class CategoricalFitness(BaseFitnessLayer):
-    """
-    Fitness layer that represents categorical fitness values.
+    """Represent one categorical fitness value per sequence.
+
+    Parameters
+    ----------
+    name : str
+        Layer name.
+    values : list of str
+        Category assigned to each sequence.
+    categories : list of str, optional
+        Ordered allowed categories. If omitted, sorted unique values are used.
+    metadata : dict, optional
+        Free-form layer metadata.
 
     Attributes
     ----------
@@ -498,6 +531,7 @@ class CategoricalFitness(BaseFitnessLayer):
 
     @property
     def dtype(self) -> Literal['categorical']:
+        """Return the layer kind, ``'categorical'``."""
         return 'categorical'
 
     def get_tensor(self) -> torch.Tensor:
@@ -551,21 +585,18 @@ class CategoricalFitness(BaseFitnessLayer):
         return np.array([_rank_map[v] for v in self._values], dtype=int)
     
     def get_value(self,
-                  sequence_index: int) -> Dict[str, float]:
-        """
-        Returns the full set of values for a single sequence.
+                  sequence_index: int) -> str:
+        """Return the category assigned to one sequence.
         
         Parameters
         ----------
         sequence_index : int
-            The index of the sequence for which to retrieve the
-            probability distribution.
+            Positional sequence index.
 
         Returns
         -------
-        Dict[str, float]
-            A dictionary mapping each category to its probability for
-            the specified sequence.
+        str
+            Assigned category.
         """
         return self._values[sequence_index]
     
@@ -662,6 +693,33 @@ class CategoricalFitness(BaseFitnessLayer):
                        default: str | None = None,
                        categories: List[str] | None = None,
                        metadata: Dict | None = None) -> "CategoricalFitness":
+        """Build a categorical layer from values indexed by sequence position.
+
+        Parameters
+        ----------
+        name : str
+            Layer name.
+        mapping : mapping of int to str
+            Categories keyed by zero-based sequence index.
+        length : int
+            Total number of sequences in the output layer.
+        default : str, optional
+            Category assigned to indices absent from ``mapping``.
+        categories : list of str, optional
+            Ordered allowed categories. If omitted, infer them from values.
+        metadata : dict, optional
+            Free-form layer metadata.
+
+        Returns
+        -------
+        CategoricalFitness
+            Constructed categorical layer.
+
+        Raises
+        ------
+        ValueError
+            If an index is missing and ``default`` is not provided.
+        """
         vals: List[str] = []
         for i in range(length):
             v = mapping.get(i, default)
@@ -720,9 +778,19 @@ class CategoricalFitness(BaseFitnessLayer):
         return cls(name=name, values=vals, categories=cats, metadata=metadata)
 
 class ProbabilisticCategoricalFitness(BaseFitnessLayer):
-    """
-    Categorical fitness layer that represents probabilities
-    of each category for each sequence.
+    """Represent a categorical probability distribution per sequence.
+
+    Parameters
+    ----------
+    name : str
+        Layer name.
+    probabilities : ndarray
+        Matrix with shape ``(n_sequences, n_categories)``. Rows must sum to
+        one.
+    categories : list of str
+        Ordered category names corresponding to matrix columns.
+    metadata : dict, optional
+        Free-form layer metadata.
 
     Attributes
     ----------
@@ -754,6 +822,7 @@ class ProbabilisticCategoricalFitness(BaseFitnessLayer):
 
     @property
     def dtype(self) -> Literal['categorical']:
+        """Return the layer kind, ``'categorical'``."""
         return 'categorical'
 
     def get_tensor(self) -> torch.Tensor:
@@ -935,14 +1004,14 @@ class ProbabilisticCategoricalFitness(BaseFitnessLayer):
             each sequence. Each row corresponds to a sequence and each
             column corresponds to a category.
 
-        alpha : float, default=`0.0`
-            Laplace smoothing parameter. If greater than 0, adds `alpha`
-            to each count before normalizing to probabilities.
-
         categories : List[str]
             A list of unique categories that values can take. The order
             of categories must match the columns of the probabilities
             matrix.
+
+        alpha : float, default=`0.0`
+            Laplace smoothing parameter. If greater than 0, adds `alpha`
+            to each count before normalizing to probabilities.
             
         metadata : Dict, optional
             Additional metadata associated with the fitness layer.

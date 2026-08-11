@@ -99,7 +99,7 @@ def build_Q(tril_values: np.ndarray,
     lower triangle (flat) array. 
 
     Parameters
-    -----------
+    ----------
     tril_values : np.ndarray
         The lower triangle values. 
     

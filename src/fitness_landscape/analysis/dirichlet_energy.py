@@ -117,9 +117,23 @@ def _collect_edges(landscape: Union[FitnessLandscape, nx.Graph],
     return selected_edges
 
 def local_dirichlet_energy_contribution(landscape: FitnessLandscape) -> Dict[int, float]:
-    """
-    Calculates the local contribution of each node to the total
-    Dirichlet energy.
+    """Calculate each node's local contribution to Dirichlet energy.
+
+    Parameters
+    ----------
+    landscape : FitnessLandscape
+        Landscape with an active scalar fitness layer and an undirected graph.
+
+    Returns
+    -------
+    dict of int to float
+        Half the sum of squared fitness differences over each node's incident
+        edges. Summing these values counts each undirected edge once overall.
+
+    Raises
+    ------
+    TypeError
+        If ``landscape`` is invalid or has no graph.
     """
     if not isinstance(landscape, FitnessLandscape) or landscape.graph is None:
         raise TypeError("Input must be a FitnessLandscape with an initialized graph.")

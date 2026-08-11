@@ -24,9 +24,20 @@ AutoTokenizer = transformers.AutoTokenizer
 
 
 class ESMEmbedder:
-    """
-    Class for embedding protein sequences using ESM models.
+    """Embed hard or relaxed protein sequences with a Hugging Face ESM model.
+
     Supports both relaxed sequences and one-hot encoded sequences.
+
+    Parameters
+    ----------
+    model_name : str, default='facebook/esm2_t6_8M_UR50D'
+        Hugging Face ESM masked-language-model identifier.
+    device : str, optional
+        Torch device. If omitted, select CUDA when available, otherwise CPU.
+    alphabet : list, optional
+        Ordered tokens corresponding to relaxed-sequence columns.
+    batch_size : int, default=1
+        Default inference batch size.
 
     Attributes
     ----------
@@ -133,6 +144,10 @@ class ESMEmbedder:
             Array of shape [L, alphabet_size] or [B, L, alphabet_size] 
             containing distribution of AAs at each position.
 
+        attention_mask : torch.Tensor, optional
+            Boolean or integer mask with shape ``[B, L]`` after special tokens
+            are included.
+
         Returns
         -------
             torch.Tensor
@@ -163,9 +178,25 @@ class ESMEmbedder:
     def batch_iterator(self,
                    sequences: Union[np.ndarray, torch.Tensor, List[Union[str, np.ndarray, torch.Tensor]]],
                    batch_size: Optional[int] = None):
-        """
-        Batch iterator for sequences of strings, numpy arrays, or torch tensors.
-        Handles sorting for efficiency and yields batches of padded sequences, attention masks, original lengths, and batch indices.
+        """Yield padded, length-sorted batches while retaining input order.
+
+        Parameters
+        ----------
+        sequences : ndarray, torch.Tensor, or list
+            One sequence or a list of strings/relaxed sequence matrices.
+        batch_size : int, optional
+            Batch size. If omitted, use the constructor setting.
+
+        Yields
+        ------
+        padded_batch : torch.Tensor
+            Relaxed-token tensor with shape ``[B, L_max + 2, alphabet_size]``.
+        attention_mask : torch.Tensor
+            Valid-token mask including start/end tokens.
+        original_lengths : list of int
+            Residue counts excluding start/end tokens.
+        batch_indices : tuple of int
+            Original input positions for restoring order.
         """
 
         if not isinstance(sequences, list):
@@ -326,18 +357,40 @@ class ESMEmbedder:
     def embed_sequences(self,
                         sequences: List[str],
                         batch_size: Optional[int] = None) -> np.ndarray:
-            """
-            Alias for embed_relaxed_seqs for embedding string sequences.
-            """
-            return self.embed_relaxed_seqs(sequences, batch_size)
+        """Embed protein strings into per-sequence feature vectors.
+
+        Parameters
+        ----------
+        sequences : list of str
+            Protein sequences.
+        batch_size : int, optional
+            Inference batch size.
+
+        Returns
+        -------
+        ndarray
+            Mean-pooled final-hidden-state matrix with one row per input.
+        """
+        return self.embed_relaxed_seqs(sequences, batch_size)
         
     def extract_features(self,
                        sequences: List[str],
                        batch_size: int = 32) -> np.ndarray:
+        """Embed protein strings into per-sequence feature vectors.
+
+        Parameters
+        ----------
+        sequences : list of str
+            Protein sequences.
+        batch_size : int, default=32
+            Inference batch size.
+
+        Returns
+        -------
+        ndarray
+            Mean-pooled final-hidden-state matrix with one row per input.
         """
-        Alias for embed_relaxed_seqs for consistency.
-        """
-        return self.extract_features(sequences, batch_size)
+        return self.embed_relaxed_seqs(sequences, batch_size)
 
     def save_embeddings(self, 
                         embeddings: np.ndarray, 
@@ -345,7 +398,7 @@ class ESMEmbedder:
         """
         Save embeddings.
         
-        Parameters:
+        Parameters
         ----------
         embeddings : np.ndarray
             Embeddings to save.
@@ -360,13 +413,13 @@ class ESMEmbedder:
         """
         Load saved embeddings.
         
-        Parameters:
+        Parameters
         ----------
         embedding_path : Path
             Path to load the embeddings from
             
-        Returns:
-        --------
+        Returns
+        -------
         np.ndarray
             Loaded embeddings
         """
