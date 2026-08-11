@@ -11,6 +11,13 @@ from .dirichlet_energy import (
     calculate_ruggedness_dirichlet_energy,
     local_dirichlet_energy_contribution)
 
+from .bottleneck import (
+    local_cheeger_sweep,
+    calculate_local_bottleneck,
+    first_dirichlet_eigenpair,
+    rank_throat_edges,
+)
+
 from .graph_induction_alignment import (
     procrustes,
     edge_prf_on_observed,
@@ -94,6 +101,10 @@ __all__ = [
     'fit_t_grid_posterior',
     'fit_t_profile_likelihood',
     'fit_t_bootstrap',
+    'local_cheeger_sweep',
+    'calculate_local_bottleneck',
+    'first_dirichlet_eigenpair',
+    'rank_throat_edges',
     'procrustes',
     'edge_prf_on_observed',
     'sp_rmse',
