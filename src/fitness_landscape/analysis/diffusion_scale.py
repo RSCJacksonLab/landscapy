@@ -3,10 +3,20 @@ import numpy as np
 from scipy.optimize import minimize_scalar
 from scipy.special import logsumexp
 from scipy.stats import chi2
-from typing import Tuple, Union, Literal, Optional
+from typing import Literal, Optional, Tuple, TypedDict, Union
 from ..transforms.eigenmode import eigenmode_decomposition
 from ..transforms.graph_fourier import graph_fourier_transform
 from ..core.landscape import FitnessLandscape
+
+
+class DiffusionScaleResult(TypedDict):
+    """Result schema for diffusion-scale estimation."""
+
+    t_map: float
+    t_lower_confidence_interval: float
+    t_upper_confidence_interval: float
+    t_logposterior_map: float
+    variance_approximate: float
 
 def _precompute_GMRF_stats(G: nx.Graph,
                            signal: np.ndarray,
@@ -663,8 +673,62 @@ def _compute_variances(eigenvectors: np.ndarray,
     
     return Sigma_H0
 
+
+def _resolve_diffusion_scale_signal(
+    landscape: FitnessLandscape,
+    fitness_layer: str | None,
+) -> np.ndarray:
+    """Return a finite scalar signal without changing the active layer."""
+    if fitness_layer is None:
+        layer_name = landscape.active_layer_name
+        if layer_name is None:
+            raise ValueError(
+                "Diffusion-scale analysis requires an active fitness layer or "
+                "an explicit fitness_layer."
+            )
+        layer = landscape.active_layer
+    else:
+        layer_name = fitness_layer
+        layer = landscape.get_layer(fitness_layer, allow_active_default=False)
+
+    try:
+        scalar_values = np.asarray(layer.to_scalar(), dtype=float)
+    except (AttributeError, TypeError, ValueError, OverflowError) as error:
+        raise ValueError(
+            f"Fitness layer {layer_name!r} must be scalarizable to numeric values."
+        ) from error
+
+    expected_rows = len(landscape.sequences)
+    if scalar_values.ndim != 1 or scalar_values.shape[0] != expected_rows:
+        actual_shape = scalar_values.shape
+        raise ValueError(
+            f"Fitness layer {layer_name!r} must provide one scalar per sequence; "
+            f"got shape {actual_shape}, expected ({expected_rows},)."
+        )
+
+    node_order = list(landscape.graph.nodes())
+    if len(node_order) != expected_rows:
+        raise ValueError(
+            "Diffusion-scale analysis requires one graph node per sequence; "
+            f"found {len(node_order)} nodes and {expected_rows} sequences."
+        )
+
+    signal = np.asarray(
+        [
+            scalar_values[landscape.sequence_index_for_node(node)]
+            for node in node_order
+        ],
+        dtype=float,
+    )
+    if not np.all(np.isfinite(signal)):
+        raise ValueError(
+            f"Fitness layer {layer_name!r} contains missing or non-finite values; "
+            "diffusion-scale analysis requires a complete finite signal."
+        )
+    return signal
+
 def compute_ruggedness_diffusion_scale(landscape: FitnessLandscape,
-                                       fitness_layer: str = None,
+                                       fitness_layer: str | None = None,
                                        t_min: float = 0.01,
                                        t_max: float = 100.0,
                                        epsilon: float = 1e-8,
@@ -675,7 +739,7 @@ def compute_ruggedness_diffusion_scale(landscape: FitnessLandscape,
                                        random_state: Optional[int] = None,
                                        _eigenvalues: Optional[np.ndarray] = None,
                                        _eigenvectors: Optional[np.ndarray] = None,
-                                       ) -> dict:
+                                       ) -> DiffusionScaleResult:
     """Estimate the heat-kernel diffusion scale of a fitness signal.
 
     Parameters
@@ -683,7 +747,9 @@ def compute_ruggedness_diffusion_scale(landscape: FitnessLandscape,
     landscape : FitnessLandscape
         Landscape to analyse.
     fitness_layer : str, optional
-        Layer to activate before fitting. If omitted, use the active layer.
+        Layer to fit without changing the landscape's active view. If omitted,
+        use the active layer. The selected layer must yield one finite numeric
+        scalar per sequence; missing values are not supported.
 
     t_min : float
         The prior lower bound on t. 
@@ -717,16 +783,11 @@ def compute_ruggedness_diffusion_scale(landscape: FitnessLandscape,
     
     Returns
     -------
-    dict
-        The results dictionary with
-        - t_map : the maximum a posteriori diffusion scale.
-        - t_lower_confidence_interval : the lower confidence bound on
-        the diffusion scale.
-        - t_upper_confidence_interval : the upper confidence bound on
-        the diffusion scale.
-        - t_logposterior_map : the log posterior likelihood of the 
-        maximum a posteriori diffusion scale value.
-        - var_approx : the approximated variance in the signal.
+    DiffusionScaleResult
+        Dictionary containing ``t_map``,
+        ``t_lower_confidence_interval``,
+        ``t_upper_confidence_interval``, ``t_logposterior_map``, and
+        ``variance_approximate``.
 
     Notes
     -----
@@ -737,17 +798,11 @@ def compute_ruggedness_diffusion_scale(landscape: FitnessLandscape,
     intervals for ``grid`` and ``laplace``, a likelihood-ratio confidence
     interval for ``profile``, and percentile uncertainty for ``bootstrap``.
     """
-    # Use current active fitness layer.
-    if fitness_layer is None:
-        signal = landscape.get_node_signal()
-    # View a key valued fitness layer instead.
-    else:
-        _ = landscape.view(fitness_layer)
-        signal = landscape.get_node_signal()
-    
     # Make sure not directed graph.
     if not isinstance(landscape.graph, nx.Graph):
         raise ValueError(f"Expected `landscape.graph` to be `nx.Graph`, found `{type(landscape.graph)}`")
+
+    signal = _resolve_diffusion_scale_signal(landscape, fitness_layer)
 
     if method == "laplace":
         t_map, ci_lower, ci_upper, logpost_map, var_approx = fit_t_bayesian_laplace(
@@ -803,11 +858,11 @@ def compute_ruggedness_diffusion_scale(landscape: FitnessLandscape,
         )
 
     return {
-        't_map': t_map,
-        't_lower_confidence_interval': ci_lower,
-        't_upper_confidence_interval': ci_upper,
-        't_logposterior_map': logpost_map,
-        'variance_approximate': var_approx,
+        't_map': float(t_map),
+        't_lower_confidence_interval': float(ci_lower),
+        't_upper_confidence_interval': float(ci_upper),
+        't_logposterior_map': float(logpost_map),
+        'variance_approximate': float(var_approx),
         }
     
 def _expected_local_global_dirichlet_energy(G: nx.Graph,

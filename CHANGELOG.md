@@ -45,6 +45,8 @@ All notable changes to Landscapy are documented here.
 - Corrected random-walk Laplacian eigenmodes by solving the similar symmetric
   normalized operator and mapping real right modes back to the transition
   operator, including explicit stationary modes for isolated nodes.
+- Made diffusion-scale layer selection non-mutating, node-aligned, and strict
+  about scalar shape and finite numeric values.
 
 ### Removed
 
