@@ -1,20 +1,18 @@
 from __future__ import annotations
 
-from typing import Union
-
 import networkx as nx
 import numpy as np
 
 from ..utils import cosine_similarity_matrix as _cosine_sim
 
 
-def normalize_adj_matrix(G: Union[nx.Graph, nx.DiGraph]) -> np.ndarray:
+def normalize_adj_matrix(G: nx.Graph) -> np.ndarray:
     """
     Construct a row-stochastic adjacency/transition matrix for ``G``.
     For sink rows (no outgoing mass), replace with uniform 1/n.
     """
-    if not isinstance(G, (nx.Graph, nx.DiGraph)):
-        raise TypeError("G must be a NetworkX Graph or DiGraph")
+    if not isinstance(G, nx.Graph) or G.is_directed():
+        raise TypeError("G must be an undirected NetworkX Graph")
     nodes = list(G.nodes())
     if not nodes:
         return np.zeros((0, 0), dtype=float)
@@ -24,7 +22,7 @@ def normalize_adj_matrix(G: Union[nx.Graph, nx.DiGraph]) -> np.ndarray:
     mask = row_sum > 0
     A_norm = np.zeros_like(A)
     if np.any(mask):
-        A_norm[mask[:, 0]] = A[mask[:, 0]] / row_sum[mask]
+        A_norm[mask[:, 0]] = A[mask[:, 0]] / row_sum[mask[:, 0]]
     if np.any(~mask):
         A_norm[~mask[:, 0]] = 1.0 / n
     return A_norm
@@ -36,8 +34,8 @@ def cosine_similarity_matrix(F1: np.ndarray, F2: np.ndarray) -> np.ndarray:
 
 
 def isorank_with_features(  # noqa: D401
-    G1: Union[nx.Graph, nx.DiGraph],
-    G2: Union[nx.Graph, nx.DiGraph],
+    G1: nx.Graph,
+    G2: nx.Graph,
     F1: np.ndarray,
     F2: np.ndarray,
     *,

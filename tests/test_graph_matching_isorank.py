@@ -16,12 +16,15 @@ def test_normalize_adj_matrix_validates_input_and_handles_empty_and_sink_rows():
     empty = normalize_adj_matrix(nx.Graph())
     assert empty.shape == (0, 0)
 
-    graph = nx.DiGraph()
+    with pytest.raises(TypeError, match="undirected"):
+        normalize_adj_matrix(nx.DiGraph([(0, 1)]))
+
+    graph = nx.Graph()
     graph.add_nodes_from([0, 1, 2])
     graph.add_edge(0, 1)
 
     mat = normalize_adj_matrix(graph)
-    np.testing.assert_allclose(mat[1], np.array([1 / 3, 1 / 3, 1 / 3]))
+    np.testing.assert_allclose(mat[1], np.array([1.0, 0.0, 0.0]))
     np.testing.assert_allclose(mat[2], np.array([1 / 3, 1 / 3, 1 / 3]))
 
 

@@ -255,14 +255,14 @@ def leaf_spanning_tree(G: nx.Graph,
         output has multiple components, the largest component is
         returned.
     """
-    if not isinstance(G, nx.Graph):
-        G = G.to_undirected()
+    if not isinstance(G, nx.Graph) or G.is_directed():
+        raise TypeError("leaf_spanning_tree requires an undirected graph")
     # Filter leaves that exist in G
     L = [u for u in leaves if u in G]
     if len(L) == 0:
         return nx.Graph()
     T = steiner_tree(G, L, weight=weight)
-    U = T.to_undirected()
+    U = T.copy()
     if U.number_of_nodes() == 0:
         return nx.Graph()
     if not nx.is_connected(U):
@@ -297,7 +297,9 @@ def suppress_degree2(T: nx.Graph,
     nx.Graph
         An undirected graph with degree-2 internal nodes suppressed.
     """
-    U = T.to_undirected().copy()
+    if not isinstance(T, nx.Graph) or T.is_directed():
+        raise TypeError("suppress_degree_two requires an undirected graph")
+    U = T.copy()
     changed = True
     while changed:
         changed = False
@@ -428,14 +430,8 @@ def tree_rf_dissimilarity(G_truth: Union[FitnessLandscape, nx.Graph],
         - 'n_splits_truth' (int): Number of non-trivial splits in truth tree.
         - 'n_splits_recon' (int): Number of non-trivial splits in recon tree.
     """
-    # Resolve nx.Graphs
-    A = G_truth.graph if isinstance(G_truth, FitnessLandscape) else G_truth
-    B = G_recon.graph if isinstance(G_recon, FitnessLandscape) else G_recon
-    if A is None or B is None:
-        raise ValueError("Both inputs must be networkx graphs or FitnessLandscape with .graph")
-
-    Au = A.to_undirected()
-    Bu = B.to_undirected()
+    Au = _ensure_graph(G_truth)
+    Bu = _ensure_graph(G_recon)
 
     if leaves is None:
         truth_leaves = set(get_leaves(Au))
@@ -555,10 +551,8 @@ def evaluate_reconstruction(G_lat_truth: Union[FitnessLandscape, nx.Graph],
 def _ensure_graph(obj: Union[FitnessLandscape, nx.Graph]) -> nx.Graph:
     if isinstance(obj, FitnessLandscape):
         obj = obj.graph
-    if isinstance(obj, nx.DiGraph):
-        return obj.to_undirected()
-    if not isinstance(obj, nx.Graph):
-        raise TypeError("Expected FitnessLandscape or networkx Graph/Digraph")
+    if not isinstance(obj, nx.Graph) or obj.is_directed():
+        raise TypeError("Expected FitnessLandscape or an undirected networkx Graph")
     return obj
 
 def _sequence_key(seq: Union[BaseNumpySequence, np.ndarray, Sequence]) -> Tuple:
@@ -1724,8 +1718,8 @@ def evaluate_isorank_alignment(Ga: Union[FitnessLandscape, nx.Graph],
     mapping = {nodes_A[i]: nodes_B[j] for i, j in zip(r_idx, c_idx)}
 
     # Edge precision/recall/F1 on matched nodes (undirected)
-    Au = A.to_undirected()
-    Bu = B.to_undirected()
+    Au = A
+    Bu = B
     matched_A = set(nodes_A[i] for i in r_idx)
     matched_B = set(nodes_B[j] for j in c_idx)
     E_pred = set()
