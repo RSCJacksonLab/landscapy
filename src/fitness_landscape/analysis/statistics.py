@@ -3,11 +3,32 @@ import numpy as np
 import scipy.stats as stats
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Mapping, Sequence
 from ..core.landscape import FitnessLandscape
-from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.metrics import mean_squared_error, r2_score
+from .._optional import ray_runtime, require_optional
+
+sklearn_linear = require_optional(
+    "sklearn.linear_model",
+    extra="analysis",
+    purpose="regression-based landscape statistics",
+)
+sklearn_selection = require_optional(
+    "sklearn.model_selection",
+    extra="analysis",
+    purpose="regression-based landscape statistics",
+)
+sklearn_metrics = require_optional(
+    "sklearn.metrics",
+    extra="analysis",
+    purpose="regression-based landscape statistics",
+)
+LinearRegression = sklearn_linear.LinearRegression
+Ridge = sklearn_linear.Ridge
+Lasso = sklearn_linear.Lasso
+ElasticNet = sklearn_linear.ElasticNet
+train_test_split = sklearn_selection.train_test_split
+cross_val_score = sklearn_selection.cross_val_score
+mean_squared_error = sklearn_metrics.mean_squared_error
+r2_score = sklearn_metrics.r2_score
 from ..utils import sample_observed_induced_connected
-import ray
 
 def analyze_fitness_distribution(landscape: FitnessLandscape,
                                  **kwargs) -> Dict:
@@ -407,7 +428,6 @@ def _summarize_arr(arr: np.ndarray, alpha: float = 0.05) -> Dict[str, float]:
         "alpha": alpha,
     }
 
-@ray.remote
 def _analyze_worker(subL, layer_name, analysis_func):
     if layer_name is not None:
         subL.view(layer_name)
@@ -430,14 +450,20 @@ def _parallel_analyze_landscapes(landscape_samples: List[FitnessLandscape],
             out.append(analysis_func(subL))
         return out
 
-    if not ray.is_initialized():
-        ray.init(num_cpus=num_workers, ignore_reinit_error=True)
-        
-    # Put function and objects into the object store once
-    func_ref = ray.put(analysis_func)
-    obj_refs = [ray.put(sl) for sl in landscape_samples]
-    futures = [_analyze_worker.remote(sl_ref, layer_name, func_ref) for sl_ref in obj_refs]
-    return ray.get(futures)
+    if not landscape_samples:
+        return []
+
+    workers = len(landscape_samples) if num_workers is None else int(num_workers)
+    workers = max(1, min(workers, len(landscape_samples)))
+    with ray_runtime(workers, purpose="parallel landscape statistics") as ray:
+        analyze_worker_remote = ray.remote(_analyze_worker)
+        func_ref = ray.put(analysis_func)
+        obj_refs = [ray.put(sl) for sl in landscape_samples]
+        futures = [
+            analyze_worker_remote.remote(sl_ref, layer_name, func_ref)
+            for sl_ref in obj_refs
+        ]
+        return ray.get(futures)
 
 def subsample_analysis(landscape: FitnessLandscape,
                        analysis_func: Callable[FitnessLandscape, Any],

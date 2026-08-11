@@ -2,7 +2,17 @@ import numpy as np
 from typing import List, Tuple, Dict, Literal
 from ..core.landscape import FitnessLandscape
 from ..transforms.walsh_hadamard import walsh_coefficients
-from sklearn.linear_model import LinearRegression, Lasso, Ridge, ElasticNet
+from .._optional import require_optional
+
+sklearn_linear = require_optional(
+    "sklearn.linear_model",
+    extra="analysis",
+    purpose="regression-based epistasis analysis",
+)
+LinearRegression = sklearn_linear.LinearRegression
+Lasso = sklearn_linear.Lasso
+Ridge = sklearn_linear.Ridge
+ElasticNet = sklearn_linear.ElasticNet
 from itertools import combinations, product
 
 

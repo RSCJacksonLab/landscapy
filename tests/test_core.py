@@ -520,7 +520,7 @@ def test_landscape_attach_mismatched_length(basic_landscape):
 def test_sequence_creation_and_properties():
     """Covers __init__ branches for moltype and cogent3 sequences."""
     # Test initialization with a cogent3 sequence object
-    c3_seq = get_moltype("text").make_seq("ABC", name="seq1")
+    c3_seq = get_moltype("text").make_seq(seq="ABC", name="seq1")
     seq1 = BaseNumpySequence(c3_seq)
     assert np.array_equal(seq1.to_array(), ['A', 'B', 'C'])
     assert seq1.id == "seq1"
@@ -639,7 +639,10 @@ def test_create_phylo_graph_registers_auto_annotations(monkeypatch):
             assert graph_type == "undirected"
             return fake_graph.copy()
 
-    monkeypatch.setattr("fitness_landscape.core.graph.ASRConstructor", DummyCtor)
+    monkeypatch.setattr(
+        "fitness_landscape.phylo.phylogenetic_asr.ASRConstructor",
+        DummyCtor,
+    )
 
     graph = create_phylo_graph(sequences="dummy_alignment", model_fitting=False, replacement_matrix=["LG"])
     auto = graph.graph.get("_auto_annotations")
@@ -785,8 +788,8 @@ def test_landscape_from_phylogeny_infers_missing_nodes(monkeypatch):
     def stub_make_aligned_seqs(mapping: dict[str, str], moltype: str | None = None):
         return StubAlignment(mapping)
 
-    monkeypatch.setattr('fitness_landscape.core.landscape.ASRConstructor', DummyCtor)
-    monkeypatch.setattr('fitness_landscape.core.landscape.make_aligned_seqs', stub_make_aligned_seqs)
+    monkeypatch.setattr('fitness_landscape.phylo.phylogenetic_asr.ASRConstructor', DummyCtor)
+    monkeypatch.setattr('cogent3.make_aligned_seqs', stub_make_aligned_seqs)
 
     landscape = FitnessLandscape.from_phylogeny(
         tree=root,
@@ -857,8 +860,8 @@ def test_from_phylogeny_respects_reconstruct_flag(monkeypatch):
     def stub_make_aligned_seqs(mapping: dict[str, str], moltype: str | None = None):
         return StubAlignment(mapping)
 
-    monkeypatch.setattr('fitness_landscape.core.landscape.ASRConstructor', DummyCtor)
-    monkeypatch.setattr('fitness_landscape.core.landscape.make_aligned_seqs', stub_make_aligned_seqs)
+    monkeypatch.setattr('fitness_landscape.phylo.phylogenetic_asr.ASRConstructor', DummyCtor)
+    monkeypatch.setattr('cogent3.make_aligned_seqs', stub_make_aligned_seqs)
 
     FitnessLandscape.from_phylogeny(
         tree=root,
@@ -1588,7 +1591,7 @@ def test_base_from_string_and_iterable_defaults():
 
 def test_base_from_cogent3_preserves_moltype_and_alphabet():
     prot = get_moltype("protein")
-    c3 = prot.make_seq("ACDEFG")
+    c3 = prot.make_seq(seq="ACDEFG")
     s = BaseNumpySequence.from_cogent3(c3)
     assert s.to_str() == "ACDEFG"
     # Alphabet should come from cogent3 moltype

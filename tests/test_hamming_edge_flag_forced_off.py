@@ -1,6 +1,7 @@
 import networkx as nx
 
 import fitness_landscape.core.graph as graph_mod
+import fitness_landscape.phylo.phylogenetic_asr as phylo_mod
 from fitness_landscape._const import PROT_20
 from fitness_landscape.core.sequence import BaseNumpySequence, BinarySequence
 
@@ -41,7 +42,7 @@ def test_create_hamming_graph_binary_ignores_hamming_edge_flag(monkeypatch):
 
 
 def test_create_phylo_graph_ignores_hamming_edge_flag(monkeypatch):
-    monkeypatch.setattr(graph_mod, "ASRConstructor", _FakeASRConstructor)
+    monkeypatch.setattr(phylo_mod, "ASRConstructor", _FakeASRConstructor)
     monkeypatch.setattr(graph_mod, "compute_edge_mutations_star", _fail_if_called)
 
     graph = graph_mod.create_phylo_graph("unused", _compute_hamming_edges=True)

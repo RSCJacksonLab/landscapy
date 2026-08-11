@@ -9,15 +9,16 @@ import time
 from pathlib import Path
 from typing import Any, Optional, Sequence, Union
 
-import click
 import numpy as np
-from cogent3 import load_aligned_seqs
 
 from ._const import PROT_20
+from ._optional import require_optional
 from .core.graph import _encode_multiallele, create_evol_diffusion_graph, create_knn_graph, create_phylo_graph
 from .core.landscape import FitnessLandscape
 from .phylo._sub_matrices import lg, nq_pfam
 from .utils import _compute_embeddings_from_sequences, fasta_to_prot20_sequences, sanitize_alignment
+
+click = require_optional("click", extra="cli", purpose="the Landscapy command-line interface")
 
 
 @click.group()
@@ -830,7 +831,12 @@ def phylo_landscape(
     try:
         _t_aln0 = time.perf_counter()
         _c_aln0 = time.process_time()
-        aln = load_aligned_seqs(str(aln_path), moltype="protein")
+        cogent3 = require_optional(
+            "cogent3",
+            extra="phylogeny",
+            purpose="the phylogenetic landscape command",
+        )
+        aln = cogent3.load_aligned_seqs(str(aln_path), moltype="protein")
         n_tips = len(aln.names)
         aln_len = getattr(aln, "seq_len", None)
         if aln_len is None:

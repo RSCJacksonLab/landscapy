@@ -51,7 +51,7 @@ jobs:
       - name: Install package and test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install ".[dev,parquet]"
+          python -m pip install ".[dev,all]"
 
       - name: Run test suite
         run: |
@@ -91,3 +91,28 @@ jobs:
           python -m pip install --upgrade pip build twine
           python -m build
           python -m twine check dist/*
+
+  minimal-install:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel --outdir minimal-dist
+
+      - name: Install only required dependencies in a clean environment
+        run: |
+          python -m venv .minimal-venv
+          .minimal-venv/bin/python -m pip install minimal-dist/*.whl
+
+      - name: Exercise sequence, fitness, Hamming graph, and portable export
+        run: .minimal-venv/bin/python scripts/minimal_install_smoke.py

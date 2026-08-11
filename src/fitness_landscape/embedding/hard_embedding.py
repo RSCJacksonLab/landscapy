@@ -1,11 +1,19 @@
 import numpy as np
-import torch
+from .._optional import require_optional
+
+torch = require_optional("torch", extra="embeddings", purpose="protein language-model embeddings")
+transformers = require_optional(
+    "transformers",
+    extra="embeddings",
+    purpose="protein language-model embeddings",
+)
 
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
 from tqdm import tqdm
-from transformers import AutoTokenizer, EsmForMaskedLM
+AutoTokenizer = transformers.AutoTokenizer
+EsmForMaskedLM = transformers.EsmForMaskedLM
 
 SequenceLike = Union[str, np.ndarray, torch.Tensor, List[int]]
 

@@ -4,11 +4,8 @@ import pickle
 import numpy as np
 import pandas as pd
 import networkx as nx
-import torch
-from torch_geometric.data import Data
-from torch_geometric.utils import from_networkx
 from networkx.algorithms.minors import equivalence_classes
-from typing import List, Union, Dict, Any, Iterable, Literal, Protocol, runtime_checkable, Hashable, Tuple, Mapping, Callable, Optional, Sequence
+from typing import TYPE_CHECKING, List, Union, Dict, Any, Iterable, Literal, Protocol, runtime_checkable, Hashable, Tuple, Mapping, Callable, Optional, Sequence
 from dataclasses import dataclass
 from .sequence import BaseNumpySequence, SoftSequence, make_sequence
 from .graph import (
@@ -32,20 +29,19 @@ from .fitness import (
 from .annotation import AnnotationLayer
 from abc import ABC, abstractmethod
 from ..utils import _compute_embeddings_from_sequences, alignment_to_base_numpy_sequences
+from .._optional import require_optional
 import inspect
 from collections import defaultdict
-from cogent3 import load_aligned_seqs, load_tree
-from cogent3.core.alignment import Alignment, make_aligned_seqs
-try:
-    from cogent3.core.tree import PhyloNode
-except Exception:  # pragma: no cover - optional during typing only environments
-    PhyloNode = None  # type: ignore
 from pathlib import Path
 import warnings
 from .._const import PROT_20, ALPHABET_21
-from ..phylo.phylogenetic_asr import ASRConstructor
 from xml.etree.ElementTree import Element, SubElement, ElementTree
 
+if TYPE_CHECKING:
+    import torch
+    from cogent3.core.alignment import Alignment
+    from cogent3.core.tree import PhyloNode
+    from torch_geometric.data import Data
 
 
 GraphCtor = Callable[..., nx.Graph]
@@ -2148,9 +2144,19 @@ class FitnessLandscape:
             - token_ids (optional): LongTensor [N, Lmax] of token ids when tokenizer provided.
             - attention_mask (optional): LongTensor [N, Lmax] mask (1=real token, 0=pad).
         """
+        torch = require_optional(
+            "torch",
+            extra="ml",
+            purpose="PyTorch Geometric landscape export",
+        )
+        pyg_utils = require_optional(
+            "torch_geometric.utils",
+            extra="ml",
+            purpose="PyTorch Geometric landscape export",
+        )
         if not self.graph:
             raise ValueError("Graph not constructed.")
-        pyg_data = from_networkx(self.graph)
+        pyg_data = pyg_utils.from_networkx(self.graph)
         emb_array = self.get_embedding()
         if emb_array is not None:
             pyg_data.x = torch.tensor(emb_array, dtype=torch.float32)
@@ -2163,19 +2169,15 @@ class FitnessLandscape:
 
         # Optional: add tokenized sequences with padding
         if tokenizer is not None:
-            tok = None
-            try:
-                if isinstance(tokenizer, str):
-                    try:
-                        from transformers import AutoTokenizer  # lazy import
-                    except Exception:
-                        tok = None
-                    else:
-                        tok = AutoTokenizer.from_pretrained(tokenizer)
-                else:
-                    tok = tokenizer
-            except Exception:
-                tok = None
+            if isinstance(tokenizer, str):
+                transformers = require_optional(
+                    "transformers",
+                    extra="ml",
+                    purpose="tokenized landscape export",
+                )
+                tok = transformers.AutoTokenizer.from_pretrained(tokenizer)
+            else:
+                tok = tokenizer
 
             if tok is not None:
                 seq_texts: list[str] = []
@@ -2259,6 +2261,11 @@ class FitnessLandscape:
             - 'attention_mask': only when tokenized.
             - 'embedding': optional extra view when `include_embeddings=True`.
         """
+        torch = require_optional(
+            "torch",
+            extra="ml",
+            purpose="sequence tensor export",
+        )
         target_indices: list[int] = []
         if sequence_idx is not None:
             target_indices = [sequence_idx] if isinstance(sequence_idx, int) else list(sequence_idx)
@@ -2307,19 +2314,15 @@ class FitnessLandscape:
 
         # Tokenization path (padded)
         if mode == "tokens":
-            tok = None
-            try:
-                if isinstance(tokenizer, str):
-                    try:
-                        from transformers import AutoTokenizer  # defer import
-                    except Exception:
-                        tok = None
-                    else:
-                        tok = AutoTokenizer.from_pretrained(tokenizer)
-                else:
-                    tok = tokenizer
-            except Exception:
-                tok = None
+            if isinstance(tokenizer, str):
+                transformers = require_optional(
+                    "transformers",
+                    extra="ml",
+                    purpose="tokenized sequence export",
+                )
+                tok = transformers.AutoTokenizer.from_pretrained(tokenizer)
+            else:
+                tok = tokenizer
 
             if tok is None:
                 # Fallback to OHE/emb when tokenization failed
@@ -2446,6 +2449,11 @@ class FitnessLandscape:
             embedding_mode=mode,
         )
         self.embeddings[domain] = embeddings
+        torch = require_optional(
+            "torch",
+            extra="ml",
+            purpose="protein language-model embeddings",
+        )
         self._embedding_metadata[domain] = {
             "model_name": model_name,
             "embedding_mode": mode,
@@ -2710,7 +2718,12 @@ class FitnessLandscape:
             The constructed fitness landscape object.
         """
 
-        aln = load_aligned_seqs(alignment) if isinstance(alignment, Path) else alignment
+        cogent3 = require_optional(
+            "cogent3",
+            extra="phylogeny",
+            purpose="phylogenetic landscape construction",
+        )
+        aln = cogent3.load_aligned_seqs(alignment) if isinstance(alignment, Path) else alignment
         G = create_phylo_graph(aln, **phylo_kwargs)
         seqs = [data["sequence"] for _, data in G.nodes(data=True)]
 
@@ -2805,32 +2818,51 @@ class FitnessLandscape:
             sequences are taken directly from the FASTA records.
         """
 
+        cogent3 = require_optional(
+            "cogent3",
+            extra="phylogeny",
+            purpose="phylogenetic landscape construction",
+        )
+        cogent_tree = require_optional(
+            "cogent3.core.tree",
+            extra="phylogeny",
+            purpose="phylogenetic landscape construction",
+        )
+        cogent_alignment = require_optional(
+            "cogent3.core.alignment",
+            extra="phylogeny",
+            purpose="phylogenetic landscape construction",
+        )
+        phylo_node_type = cogent_tree.PhyloNode
+
         def _coerce_tree(obj: Union[str, Path, 'PhyloNode']):
-            if PhyloNode is not None and isinstance(obj, PhyloNode):
+            if isinstance(obj, phylo_node_type):
                 return obj
             if hasattr(obj, 'children') and hasattr(obj, 'name'):
                 return obj
             if isinstance(obj, Path):
-                return load_tree(str(obj))
+                return cogent3.load_tree(str(obj))
             if isinstance(obj, str):
                 candidate = Path(obj)
                 if candidate.exists():
-                    return load_tree(str(candidate))
-                return load_tree(obj)
+                    return cogent3.load_tree(str(candidate))
+                return cogent3.load_tree(obj)
             raise TypeError("tree must be a Newick string, Path, or PhyloNode")
 
+        alignment_type = cogent_alignment.Alignment
+
         def _coerce_alignment(obj: Union[str, Path, Alignment]) -> Alignment:
-            if isinstance(obj, Alignment):
+            if isinstance(obj, alignment_type):
                 return obj
             if hasattr(obj, 'names') and hasattr(obj, 'get_gapped_seq'):
                 return obj  # duck-typed Alignment-like object
             if isinstance(obj, Path):
-                return load_aligned_seqs(str(obj), moltype=moltype)
+                return cogent3.load_aligned_seqs(str(obj), moltype=moltype)
             if isinstance(obj, str):
                 candidate = Path(obj)
                 if candidate.exists():
-                    return load_aligned_seqs(str(candidate), moltype=moltype)
-                return load_aligned_seqs(obj, moltype=moltype)
+                    return cogent3.load_aligned_seqs(str(candidate), moltype=moltype)
+                return cogent3.load_aligned_seqs(obj, moltype=moltype)
             raise TypeError("fasta must be an Alignment, FASTA string, or Path")
 
         tree_obj = _coerce_tree(tree)
@@ -2921,7 +2953,9 @@ class FitnessLandscape:
                     "Ancestral reconstruction requires at least one tip sequence; "
                     "none were provided after filtering internal nodes."
                 )
-            aln_for_asr = make_aligned_seqs(asr_alignment_map, moltype=moltype)
+            aln_for_asr = cogent3.make_aligned_seqs(asr_alignment_map, moltype=moltype)
+            from ..phylo.phylogenetic_asr import ASRConstructor
+
             constructor = ASRConstructor(
                 aln_for_asr,
                 phylogenetic_tree=tree_obj,

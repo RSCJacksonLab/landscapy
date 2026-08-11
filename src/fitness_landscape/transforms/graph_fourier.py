@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 import numpy as np
 import scipy.sparse as sp
-import torch
 import networkx as nx
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
 from ..core.landscape import FitnessLandscape
@@ -12,7 +13,7 @@ def graph_fourier_transform(graph: Union[nx.Graph, FitnessLandscape],
                             k: int = None,
                             _eigenvectors: Optional[np.ndarray] = None,
                             _eigenvalues: Optional[np.ndarray] = None
-                            ) -> Union[torch.Tensor, np.ndarray]:
+                            ) -> np.ndarray:
     """
     Compute graph Fourier transform of a signal on the graph.
     

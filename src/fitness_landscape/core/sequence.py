@@ -1,14 +1,30 @@
 from __future__ import annotations
-from typing import Iterable, List, Sequence as _SeqLike, Union, Literal, Mapping
+from typing import TYPE_CHECKING, Any, Iterable, List, Sequence as _SeqLike, Union, Literal, Mapping
 from .._const import PROT_20
+from .._optional import require_optional
 import numpy as np
-from cogent3.core.sequence import Sequence as _C3Sequence
-from cogent3.core.moltype import MolType
-from cogent3 import get_moltype, load_unaligned_seqs
 from pathlib import Path
+
+if TYPE_CHECKING:
+    from cogent3.core.moltype import MolType
+    from cogent3.core.sequence import Sequence as _C3Sequence
+else:
+    MolType = Any
+    _C3Sequence = Any
 
 # Helper utilities
 _SeqConvertible = Union["BaseNumpySequence", _SeqLike[int], np.ndarray, _C3Sequence]
+
+
+def _is_cogent3_sequence(value: object) -> bool:
+    if not type(value).__module__.startswith("cogent3."):
+        return False
+    sequence_module = require_optional(
+        "cogent3.core.sequence",
+        extra="phylogeny",
+        purpose="Cogent3 sequence interoperability",
+    )
+    return isinstance(value, sequence_module.Sequence)
 
 def _to_numpy(x: _SeqConvertible) -> np.ndarray:
     """
@@ -29,7 +45,7 @@ def _to_numpy(x: _SeqConvertible) -> np.ndarray:
         return x._np
     
     # Handle cogent3 Sequence objects
-    if isinstance(x, _C3Sequence):
+    if _is_cogent3_sequence(x):
         return np.array(list(str(x)))
     # Ensure plain strings are split into characters rather than treated as scalars
     if isinstance(x, str):
@@ -57,7 +73,7 @@ class BaseNumpySequence:
                  alphabet: Union[Iterable, None] = None,
                  moltype: Union[str, MolType, None] = None) -> None:
 
-        is_c3_seq = isinstance(sequence, _C3Sequence) and not isinstance(sequence, BaseNumpySequence)
+        is_c3_seq = _is_cogent3_sequence(sequence) and not isinstance(sequence, BaseNumpySequence)
 
         self._np: np.ndarray = _to_numpy(sequence)
         self._c3_seq = sequence if is_c3_seq else None
@@ -94,11 +110,19 @@ class BaseNumpySequence:
 
         if moltype and not self._c3_seq:
             try:
+                get_moltype = require_optional(
+                    "cogent3",
+                    extra="phylogeny",
+                    purpose="MolType-backed sequence construction",
+                ).get_moltype
                 moltype_obj = get_moltype(moltype) if isinstance(moltype, str) else moltype
 
                 # Translate "gap" back to "-" for cogent3 compatibility
                 seq_str = "".join(map(str, self._np)).replace("gap", "-")
-                self._c3_seq = moltype_obj.make_seq(seq_str)
+                try:
+                    self._c3_seq = moltype_obj.make_seq(seq=seq_str)
+                except TypeError:
+                    self._c3_seq = moltype_obj.make_seq(data=seq_str)
             except (ValueError, TypeError, KeyError):
                 self._c3_seq = None
 
@@ -1049,9 +1073,14 @@ def read_from_fasta(filepath: Path,
         A list of BaseNumpySequence objects from the FASTA file.
     """
     # Use cogent3 to load the sequences from the FASTA file
-    seq_collection = load_unaligned_seqs(filepath, moltype=moltype)
+    cogent3 = require_optional(
+        "cogent3",
+        extra="phylogeny",
+        purpose="loading sequence files",
+    )
+    seq_collection = cogent3.load_unaligned_seqs(filepath, moltype=moltype)
 
-    moltype_obj = get_moltype(moltype)
+    moltype_obj = cogent3.get_moltype(moltype)
     alph = list(moltype_obj.alphabet)
 
     numpy_sequences = []

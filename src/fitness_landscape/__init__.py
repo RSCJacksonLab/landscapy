@@ -1,8 +1,6 @@
+from importlib import import_module
+
 from . import core
-from . import transforms
-from . import analysis
-from . import models
-from . import phylo
 from . import io
 
 from .core import (
@@ -44,21 +42,12 @@ __all__ = [
     'export_lsbundle',
 ]
 
-# Compatibility patch for cogent3 MolType.make_seq positional API changes
-try:
-    from cogent3.core.moltype import MolType
-except Exception:
-    MolType = None
+_LAZY_SUBMODULES = {"analysis", "models", "phylo", "transforms"}
 
-if MolType is not None:
-    _orig_make_seq = MolType.make_seq
-    def _compat_make_seq(self, *args, **kwargs):
-        # Newer cogent3 requires keyword-only; support old positional form
-        if args and 'seq' not in kwargs and 'data' not in kwargs:
-            # accommodate either 'seq' or 'data' keyword accepted by versions
-            try:
-                return _orig_make_seq(self, seq=args[0], **kwargs)
-            except TypeError:
-                return _orig_make_seq(self, data=args[0], **kwargs)
-        return _orig_make_seq(self, **kwargs)
-    MolType.make_seq = _compat_make_seq
+
+def __getattr__(name):
+    if name in _LAZY_SUBMODULES:
+        module = import_module(f"{__name__}.{name}")
+        globals()[name] = module
+        return module
+    raise AttributeError(name)

@@ -1,8 +1,14 @@
-import gudhi
+from .._optional import require_optional
+
+gudhi = require_optional(
+    "gudhi",
+    extra="analysis",
+    purpose="persistent-homology analysis",
+)
 import networkx as nx
 import numpy as np
 from collections import defaultdict
-from gudhi import SimplexTree
+SimplexTree = gudhi.SimplexTree
 from typing import Dict, Literal, Optional, Tuple
 from ..core.landscape import FitnessLandscape
 from ..utils import get_landscape_dist_mat

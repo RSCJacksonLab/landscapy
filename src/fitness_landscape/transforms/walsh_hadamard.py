@@ -1,5 +1,4 @@
 import numpy as np
-import torch
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
 from ..core.landscape import FitnessLandscape
 from ..core.sequence import BaseNumpySequence, BinarySequence, generate_sequences
