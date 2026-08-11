@@ -43,7 +43,8 @@ def calculate_ruggedness_autocorrelation_analytical(landscape: FitnessLandscape,
     """
  
     # Center signal on 0
-    raw_signal = landscape.get_signal()
+    node_order = list(landscape.graph.nodes())
+    raw_signal = landscape.get_node_signal(node_order)
     mean_centered_signal = raw_signal - np.mean(raw_signal)
 
     # Perform computation in fourier basis
@@ -57,7 +58,7 @@ def calculate_ruggedness_autocorrelation_analytical(landscape: FitnessLandscape,
     autocov_matrix = eigenvectors @ np.diag(power_spectrum) @ eigenvectors.T
     
     # Average over distances
-    dist_matrix = nx.floyd_warshall_numpy(landscape.graph)
+    dist_matrix = nx.floyd_warshall_numpy(landscape.graph, nodelist=node_order)
     max_dist = int(np.max(dist_matrix))
     autocorr_by_lag = [[] for _ in range(max_dist + 1)]
     num_nodes = landscape.graph.number_of_nodes()
@@ -133,18 +134,23 @@ def calculate_ruggedness_autocorrelation_stochastic(landscape: FitnessLandscape,
         
     all_autocorrs = []
     
+    node_order = list(landscape.graph.nodes())
+    if not node_order:
+        raise ValueError("Landscape graph contains no nodes.")
+    signal = landscape.get_signal()
+
     for _ in range(n_walks):
-        # Start each walk at a random node
-        current_node = rng.choice(list(landscape.graph.nodes()))
+        current_node = node_order[int(rng.integers(len(node_order)))]
         
         fitness_trajectory = []
         for _ in range(steps):
-            fitness_trajectory.append(landscape.get_fitness(landscape.sequences[current_node]))
+            sequence_index = landscape.sequence_index_for_node(current_node)
+            fitness_trajectory.append(signal[sequence_index])
             neighbors = list(landscape.graph.neighbors(current_node))
             if not neighbors:
                 # Handle nodes with no neighbors 
                 break
-            current_node = rng.choice(neighbors)
+            current_node = neighbors[int(rng.integers(len(neighbors)))]
         
         if len(fitness_trajectory) < 2:
             continue # Skip walks that are too short
@@ -273,12 +279,12 @@ def category_boundary_crossing_times(
     std_mat = np.full((n_cat, n_cat), np.nan, dtype=float)
     hits_mat = np.zeros((n_cat, n_cat), dtype=int)
 
-    neighbors: dict[Any, np.ndarray] = {}
+    neighbors: dict[Any, list[Any]] = {}
     neighbor_probabilities: dict[Any, Optional[np.ndarray]] = {}
     for node in node_order:
-        node_neighbors = np.asarray(list(landscape.graph.neighbors(node)), dtype=object)
+        node_neighbors = list(landscape.graph.neighbors(node))
         neighbors[node] = node_neighbors
-        if weight_key is None or node_neighbors.size == 0:
+        if weight_key is None or not node_neighbors:
             neighbor_probabilities[node] = None
             continue
         weights = np.asarray(
@@ -319,13 +325,14 @@ def category_boundary_crossing_times(
                         if cat_hit == b:
                             hits.append(steps)
                             break
-                    neigh = neighbors.get(current_node, np.asarray([], dtype=object))
-                    if neigh.size == 0:
+                    neigh = neighbors.get(current_node, [])
+                    if not neigh:
                         break
-                    current_node = rng.choice(
-                        neigh,
+                    neighbor_position = rng.choice(
+                        len(neigh),
                         p=neighbor_probabilities.get(current_node),
                     )
+                    current_node = neigh[int(neighbor_position)]
                     current_row = node_to_idx[current_node]
                     steps += 1
             if hits:

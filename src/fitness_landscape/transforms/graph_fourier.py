@@ -42,7 +42,7 @@ def graph_fourier_transform(graph: Union[nx.Graph, FitnessLandscape],
     """
     if isinstance(graph, FitnessLandscape):
         if signal is None:
-            signal = graph.get_signal()  # single pass over active layer
+            signal = graph.get_node_signal()
         graph = graph.graph
 
     if (_eigenvectors is None) != (_eigenvalues is None):

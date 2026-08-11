@@ -31,6 +31,8 @@ All notable changes to Landscapy are documented here.
   categories, defensive storage, and strict one-hot decoding.
 - Enforced canonical graph-node row alignment across sequences, layers,
   annotations, and every embedding domain, including duplicate-safe attachment.
+- Made publication-facing graph analyses independent of node-label type and
+  preserved graph labels alongside explicit sequence-row indices in results.
 
 ### Removed
 

@@ -522,14 +522,9 @@ def evaluate_reconstruction(G_lat_truth: Union[FitnessLandscape, nx.Graph],
         - edge weight statistics. 
         - Total edge weights of ground-truth and reconstructed graphs.
     """
-    if isinstance(G_lat_truth, FitnessLandscape):
-        G_lat_truth = G_lat_truth.graph
-
-    if isinstance(G_lat_recon, FitnessLandscape):
-        G_lat_recon = G_lat_recon.graph
-    
-    if isinstance(G_induced, FitnessLandscape):
-        G_induced = G_induced.graph
+    G_lat_truth = _ensure_graph(G_lat_truth)
+    G_lat_recon = _ensure_graph(G_lat_recon)
+    G_induced = _ensure_graph(G_induced)
     
     observed_nodes = list(G_induced.nodes())
 
