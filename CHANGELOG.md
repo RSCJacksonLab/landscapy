@@ -29,6 +29,8 @@ All notable changes to Landscapy are documented here.
   across mutation and factory construction.
 - Enforced finite non-negative categorical probabilities and counts, unique
   categories, defensive storage, and strict one-hot decoding.
+- Enforced canonical graph-node row alignment across sequences, layers,
+  annotations, and every embedding domain, including duplicate-safe attachment.
 
 ### Removed
 

@@ -342,12 +342,14 @@ class FitnessLandscape:
                 "FitnessLandscape requires an undirected networkx graph."
             )
 
-        # Initialize Core Attributes with pre-computed objects
-        self.sequences = sequences
+        # Initialize core attributes with pre-computed objects.  A validated
+        # node-to-sequence-row map is the single source of truth for all
+        # aligned landscape data.
+        self.sequences = list(sequences)
         self.graph = graph
-        self.fitness_layers = fitness_layers if fitness_layers is not None else {}
+        self.fitness_layers = dict(fitness_layers) if fitness_layers is not None else {}
         self.annotation_layers = (
-            annotation_layers if annotation_layers is not None else {}
+            dict(annotation_layers) if annotation_layers is not None else {}
         )
         if embeddings is None:
             self.embeddings: dict[str, np.ndarray] = {}
@@ -355,7 +357,9 @@ class FitnessLandscape:
             key = active_embedding_domain or "default"
             self.embeddings = {key: embeddings}
         else:
-            self.embeddings = {str(domain): np.asarray(arr) for domain, arr in embeddings.items()}
+            self.embeddings = {
+                str(domain): np.asarray(arr) for domain, arr in embeddings.items()
+            }
         if active_embedding_domain is not None and active_embedding_domain not in self.embeddings:
             raise KeyError(
                 f"Active embedding domain {active_embedding_domain!r} not found in provided embeddings."
@@ -370,9 +374,19 @@ class FitnessLandscape:
         }
         self._emb_arr_key = emb_arr_key
 
-        # Finalize Setup and Annotate Graph
-        # Safe canonical node ordering.
-        self._node_order = list(graph.nodes())  
+        # Finalize setup and annotate the graph only after every supplied
+        # object has passed alignment validation.
+        self._node_order = list(graph.nodes())
+        self._index_by_node = self._resolve_node_sequence_mapping()
+        self._nodes_by_index = {
+            index: node for node, index in self._index_by_node.items()
+        }
+        self._validate_data_against_graph(
+            self.sequences,
+            self.fitness_layers,
+            self.annotation_layers,
+            self.embeddings,
+        )
         if not _build_sequence_indexes and (self.fitness_layers or self.annotation_layers):
             raise ValueError(
                 "_build_sequence_indexes=False is only valid without fitness or annotation layers."
@@ -380,7 +394,6 @@ class FitnessLandscape:
         self._seq_to_nodes = (
             self._build_seq_multimap() if _build_sequence_indexes else {}
         )  # duplicate-safe
-        self._nodes_by_index = {i: n for i, n in enumerate(self._node_order)}  # 0..N-1 -> node key
         self._annotate_graph_nodes_with_fitness()
         self._annotate_graph_nodes_with_annotations()
         if self.get_embedding() is not None:
@@ -412,6 +425,81 @@ class FitnessLandscape:
             arr = tuple(data['sequence'].to_array())
             mm.setdefault(arr, []).append(n)
         return mm
+
+    def _resolve_node_sequence_mapping(self) -> dict[Hashable, int]:
+        """Resolve a one-to-one graph-node to sequence-row mapping."""
+        if len(self.sequences) != self.graph.number_of_nodes():
+            raise ValueError(
+                f"Data inconsistency: The number of provided sequences ({len(self.sequences)}) "
+                f"does not match the number of nodes in the graph ({self.graph.number_of_nodes()})."
+            )
+
+        by_identity: dict[int, list[int]] = defaultdict(list)
+        by_signature: dict[tuple[tuple[Any, ...], Any], list[int]] = defaultdict(list)
+        by_key: dict[tuple[Any, ...], list[int]] = defaultdict(list)
+        for index, sequence in enumerate(self.sequences):
+            key = tuple(sequence.to_array())
+            by_identity[id(sequence)].append(index)
+            by_signature[(key, getattr(sequence, "id", None))].append(index)
+            by_key[key].append(index)
+
+        used: set[int] = set()
+        mapping: dict[Hashable, int] = {}
+        for node_position, node in enumerate(self._node_order):
+            node_data = self.graph.nodes[node]
+            if "sequence" not in node_data:
+                raise ValueError(
+                    f"Data inconsistency: graph node {node!r} is missing its 'sequence' attribute."
+                )
+            graph_sequence = node_data["sequence"]
+            if not hasattr(graph_sequence, "to_array"):
+                raise ValueError(
+                    f"Data inconsistency: graph node {node!r} has an invalid 'sequence' attribute."
+                )
+
+            key = tuple(graph_sequence.to_array())
+            signature = (key, getattr(graph_sequence, "id", None))
+            candidates = [
+                index for index in by_identity.get(id(graph_sequence), []) if index not in used
+            ]
+            if not candidates:
+                candidates = [
+                    index for index in by_signature.get(signature, []) if index not in used
+                ]
+            if not candidates:
+                candidates = [index for index in by_key.get(key, []) if index not in used]
+            if not candidates:
+                raise ValueError(
+                    f"Data inconsistency: graph node {node!r} has no matching provided sequence."
+                )
+            if len(candidates) > 1:
+                if node_position in candidates:
+                    selected = node_position
+                else:
+                    raise ValueError(
+                        "Data inconsistency: graph-node sequence correspondence is ambiguous "
+                        f"for node {node!r}; use the provided sequence objects or unique identifiers."
+                    )
+            else:
+                selected = candidates[0]
+            mapping[node] = selected
+            used.add(selected)
+
+        if len(used) != len(self.sequences):
+            raise ValueError(
+                "Data inconsistency: not every provided sequence maps to exactly one graph node."
+            )
+        return mapping
+
+    @property
+    def node_to_sequence_index(self) -> dict[Hashable, int]:
+        """Return the canonical graph-node to sequence-index mapping."""
+        return dict(self._index_by_node)
+
+    @property
+    def sequence_index_to_node(self) -> dict[int, Hashable]:
+        """Return the canonical sequence-index to graph-node mapping."""
+        return dict(self._nodes_by_index)
     
     def _build_sequence_index(self) -> Dict[Tuple, int]:
         """
@@ -565,29 +653,22 @@ class FitnessLandscape:
         """
         Helper function to add all fitness layer data to graph nodes.
         """
-        if not self.graph or not self.fitness_layers:
+        if self.graph is None or not self.fitness_layers:
             return
             
         for name, layer in self.fitness_layers.items():
             # Raise error if sequences are missing labels
             layer._validate_length(len(self.sequences), name=f"during annotation ({name})")
 
-        for i, seq in enumerate(self.sequences):
-            key = tuple(seq.to_array())
-            nodes = self._seq_to_nodes.get(key, [])
-            if not nodes:
-                # Skip quietly, or raise error?
-                continue
-            
-            for node in nodes:
-                for name, layer in self.fitness_layers.items():
-                    self.graph.nodes[node][f"fitness_{name}"] = layer.get_value(i)
+        for index, node in self._nodes_by_index.items():
+            for name, layer in self.fitness_layers.items():
+                self.graph.nodes[node][f"fitness_{name}"] = layer.get_value(index)
 
     def _annotate_graph_nodes_with_annotations(self) -> None:
         """
         Helper function to add annotation layer data to graph nodes.
         """
-        if not self.graph or not self.annotation_layers:
+        if self.graph is None or not self.annotation_layers:
             return
 
         for name, layer in self.annotation_layers.items():
@@ -598,18 +679,13 @@ class FitnessLandscape:
         """
         Attach a single annotation layer to graph nodes.
         """
-        if not self.graph:
+        if self.graph is None:
             return
 
-        for idx, seq in enumerate(self.sequences):
-            key = tuple(seq.to_array())
-            nodes = self._seq_to_nodes.get(key, [])
-            if not nodes:
-                continue
+        for idx, node in self._nodes_by_index.items():
             record = layer.get_record(idx)
-            for node in nodes:
-                annotations = self.graph.nodes[node].setdefault("annotations", {})
-                annotations[layer.name] = dict(record)
+            annotations = self.graph.nodes[node].setdefault("annotations", {})
+            annotations[layer.name] = dict(record)
 
     def _prepare_annotation_frame(
         self,
@@ -816,14 +892,18 @@ class FitnessLandscape:
             return
         if emb_array.shape[0] != len(self._node_order):
             raise ValueError("Embeddings rows != number of graph nodes; cannot annotate safely.")
-        attrs = {node: {self._emb_arr_key: emb_array[i]}
-                for i, node in enumerate(self._node_order)}
+        attrs = {
+            node: {self._emb_arr_key: emb_array[index]}
+            for node, index in self._index_by_node.items()
+        }
         nx.set_node_attributes(self.graph, attrs)
 
     # Validation method.
     def _validate_data_against_graph(self,
                                      sequences: List[BaseNumpySequence],
-                                     fitness_layers: Dict[str, BaseFitnessLayer]):
+                                     fitness_layers: Dict[str, BaseFitnessLayer],
+                                     annotation_layers: Dict[str, AnnotationLayer] | None = None,
+                                     embeddings: Mapping[str, np.ndarray] | None = None):
         """
         Method to validate the provided sequences and fitness layers
         against the current graph structure. This ensures that the
@@ -837,6 +917,10 @@ class FitnessLandscape:
         fitness_layers : Dict[str, BaseFitnessLayer]
             Dictionary of fitness layers to validate against the
             graph.
+        annotation_layers : dict[str, AnnotationLayer], optional
+            Annotation layers that must use the same row order.
+        embeddings : mapping[str, ndarray], optional
+            Embedding domains that must use the same row order.
 
         Raises
         ------
@@ -846,55 +930,23 @@ class FitnessLandscape:
             of the graph nodes.
         
         """
-        if len(sequences) != self.graph.number_of_nodes():
-            raise ValueError(
-                f"Data inconsistency: The number of provided sequences ({len(sequences)}) "
-                f"does not match the number of nodes in the graph ({self.graph.number_of_nodes()})."
+        for name, layer in fitness_layers.items():
+            layer._validate_length(
+                len(sequences), name=f"during landscape construction ({name})"
             )
 
-        graph_sequences = {
-            node: tuple(data['sequence'].to_array())
-            for node, data in self.graph.nodes(data=True)
-        }
-        provided_sequences = {i: tuple(s.to_array()) for i, s in enumerate(sequences)}
-
-        if len(graph_sequences) != len(provided_sequences) or \
-           set(graph_sequences.values()) != set(provided_sequences.values()):
-            raise ValueError(
-                "Data inconsistency: The set of provided sequences does not match "
-                "the set of sequences stored in the graph nodes."
+        for name, layer in (annotation_layers or {}).items():
+            layer.validate_length(
+                len(sequences), context=f"during landscape construction ({name})"
             )
 
-        seq_to_node_map = {data['sequence']: node 
-                           for node, data in self.graph.nodes(data=True)}
-
-        for i, seq in enumerate(sequences):
-            node_idx = seq_to_node_map.get(tuple(seq.to_array()))
-            if node_idx is None:
-
-                continue
-
-            graph_node_data = self.graph.nodes[node_idx]
-
-            for layer_name, layer in fitness_layers.items():
-                attribute_name = f"fitness_{layer_name}"
-                
-                if attribute_name not in graph_node_data:
-                    raise ValueError(
-                        f"Data inconsistency: Fitness layer '{layer_name}' exists in the "
-                        f"provided dictionary but no corresponding '{attribute_name}' "
-                        f"attribute was found on node {node_idx} in the graph."
-                    )
-                
-                layer_value = layer.get_value(i)
-                graph_value = graph_node_data[attribute_name]
-                
-                if layer_value != graph_value:
-                    raise ValueError(
-                        f"Data inconsistency for layer '{layer_name}' at sequence index {i} "
-                        f"(node {node_idx}): The provided layer value ({layer_value}) does not "
-                        f"match the graph attribute value ({graph_value})."
-                    )
+        for domain, embedding in (embeddings or {}).items():
+            array = np.asarray(embedding)
+            if array.ndim == 0 or array.shape[0] != len(sequences):
+                rows = 0 if array.ndim == 0 else array.shape[0]
+                raise ValueError(
+                    f"Embedding domain {domain!r} has {rows} rows; expected {len(sequences)}."
+                )
 
     @property
     def active_layer(self) -> BaseFitnessLayer:
@@ -1029,9 +1081,10 @@ class FitnessLandscape:
         on_duplicates : Literal['error', 'first', 'all', 'aggregate'], default='error'
             How to handle duplicate sequences when mapping values.
             - 'error': Raise an error if duplicates are found.
-            - 'first': Use the first value for duplicates.
+            - 'first': Assign the value only to the first matching row.
             - 'all': Use the value for all duplicates.
-            - 'aggregate': Merge values for duplicates (only for numeric).
+            - 'aggregate': Assign one numeric replicate sample to every
+              duplicate without multiplying the observations.
         
         allow_missing : bool, default=False
             If `True`, allows sequences to not have a value assigned.
@@ -1054,14 +1107,9 @@ class FitnessLandscape:
             if layer_name in self.fitness_layers:
                 raise ValueError(f"A layer with the name '{layer_name}' already exists.")
             self.fitness_layers[layer_name] = layer
-            # annotate graph
-            if self.graph:
-                seq_to_node_map = {tuple(data['sequence'].to_array()): node_idx
-                                for node_idx, data in self.graph.nodes(data=True)}
-                for i, seq in enumerate(self.sequences):
-                    node_idx = seq_to_node_map.get(tuple(seq.to_array()))
-                    if node_idx is not None:
-                        self.graph.nodes[node_idx][f"fitness_{layer_name}"] = layer.get_value(i)
+            if self.graph is not None:
+                for index, node in self._nodes_by_index.items():
+                    self.graph.nodes[node][f"fitness_{layer_name}"] = layer.get_value(index)
             if self._active_view_name is None:
                 self._active_view_name = layer_name
             return
@@ -1102,7 +1150,17 @@ class FitnessLandscape:
 
             items = list(values)
 
-        key_to_val = {self._normalize_seq_key(k): v for k, v in items}
+        if on_duplicates not in {"error", "first", "all", "aggregate"}:
+            raise ValueError(f"Unknown `on_duplicates` option: {on_duplicates}")
+        if dtype == "categorical" and on_duplicates == "aggregate":
+            raise ValueError("on_duplicates='aggregate' is not supported for categorical data.")
+
+        key_to_val: dict[tuple, Any] = {}
+        for raw_key, value in items:
+            key = self._normalize_seq_key(raw_key)
+            if key in key_to_val:
+                raise ValueError(f"Multiple input values were provided for sequence {key}.")
+            key_to_val[key] = value
 
         # Create a per-index container
         if dtype == 'numeric':
@@ -1123,26 +1181,17 @@ class FitnessLandscape:
             
             if on_duplicates == 'error' and len(idx_list) > 1:
                 raise ValueError("Duplicate sequences found; set `on_duplicates` to `first`, `all`, or `aggregate`.")
-            
-            # Collect only first
-            if on_duplicates == 'first':
+
+            if on_duplicates == 'error':
                 idx_values[idx_list[0]] = list(reps)
-            
-            # Collect all
+            elif on_duplicates == 'first':
+                idx_values[idx_list[0]] = list(reps)
             elif on_duplicates == 'all':
                 for i in idx_list:
                     idx_values[i] = list(reps)
-            
-            # merge replicate lists across all matches
             elif on_duplicates == 'aggregate':
-            
-                merged = []
                 for i in idx_list:
-                    merged.extend(reps)
-                for i in idx_list:
-                    idx_values[i] = list(merged)
-            else:
-                raise ValueError(f"Unknown `on_duplicates` option: {on_duplicates}")
+                    idx_values[i] = list(reps)
 
         # Private helper.
         def _apply_categorical(idx_list: list[int],
@@ -1150,30 +1199,22 @@ class FitnessLandscape:
             
             if on_duplicates == 'error' and len(idx_list) > 1:
                 raise ValueError("Duplicate sequences found; set on_duplicates to 'first' or 'all'.")
-            
-            if on_duplicates == 'first':
+
+            if on_duplicates == 'error':
                 idx_values[idx_list[0]] = v
-            
+            elif on_duplicates == 'first':
+                idx_values[idx_list[0]] = v
             elif on_duplicates == 'all':
                 for i in idx_list:
                     idx_values[i] = v
-            
-            elif on_duplicates == 'aggregate':
-                raise ValueError("on_duplicates='aggregate' is not supported for categorical.")
-            
-            else:
-                raise ValueError(f"Unknown on_duplicates: {on_duplicates}")
 
         # Fill index containers
-        seen = set()
         for key, v in key_to_val.items():
             idxs = idx_map.get(key, [])
             if not idxs:
                 if allow_missing:
                     continue
                 raise KeyError(f"Sequence {key} not found in landscape.")
-            
-            seen.add(key)
             
             if dtype == 'numeric':
                 _apply_numeric(idxs, v)
@@ -1286,12 +1327,9 @@ class FitnessLandscape:
         del self.fitness_layers[layer_name]
 
         # If a graph exists, remove the corresponding node attributes
-        if self.graph:
+        if self.graph is not None:
             attribute_name = f"fitness_{layer_name}"
-
-        for i, seq in enumerate(self.sequences):
-            key = tuple(seq.to_array())
-            for node in self._seq_to_nodes.get(key, []):
+            for node in self._node_order:
                 self.graph.nodes[node].pop(attribute_name, None)
 
         # If the detached layer was the active one, update the active view
@@ -1558,11 +1596,10 @@ class FitnessLandscape:
         seen_nodes: set[Hashable] = set()
         node_ids: list[Hashable] = []
         for idx in seq_indices:
-            key = tuple(self.sequences[idx].to_array())
-            for node in self._seq_to_nodes.get(key, []):
-                if node not in seen_nodes:
-                    seen_nodes.add(node)
-                    node_ids.append(node)
+            node = self._nodes_by_index[idx]
+            if node not in seen_nodes:
+                seen_nodes.add(node)
+                node_ids.append(node)
 
         edges: list[tuple[Hashable, Hashable]] = []
         if include_edges and self.graph is not None and node_ids:
@@ -1639,13 +1676,12 @@ class FitnessLandscape:
         components_iter = nx.connected_components(self.graph)
 
         components = sorted((set(comp) for comp in components_iter), key=len, reverse=True)
-        node_index_map = {node: idx for idx, node in enumerate(self._node_order)}
         self._ensure_embedding_state()
         out: list[FitnessLandscape] = []
 
         for comp_nodes in components:
             ordered_nodes = [node for node in self._node_order if node in comp_nodes]
-            comp_indices = [node_index_map[node] for node in ordered_nodes]
+            comp_indices = [self._index_by_node[node] for node in ordered_nodes]
             comp_sequences = [self.sequences[i] for i in comp_indices]
             comp_graph = self.graph.subgraph(ordered_nodes).copy()
             comp_fitness = self._subset_fitness_layers(comp_indices)
@@ -1878,9 +1914,7 @@ class FitnessLandscape:
                     hash(lbl)
                 except Exception:
                     lbl = str(lbl)
-                key = tuple(self.sequences[idx].to_array())
-                for node in self._seq_to_nodes.get(key, []):
-                    label_map[node] = lbl
+                label_map[self._nodes_by_index[idx]] = lbl
             return label_map
 
         def _normalize_partition(part_obj: Any) -> list[set]:
@@ -1951,9 +1985,8 @@ class FitnessLandscape:
         partition_sets = _normalize_partition(part_source)
 
         block_indices: list[list[int]] = []
-        node_to_idx = {node: idx for idx, node in enumerate(self._node_order)}
         for block in partition_sets:
-            indices = [node_to_idx[n] for n in block if n in node_to_idx]
+            indices = [self._index_by_node[n] for n in block if n in self._index_by_node]
             block_indices.append(indices)
 
         edge_keys: set[str] = set(edge_attributes) if edge_attributes else set()
