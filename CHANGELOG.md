@@ -27,6 +27,8 @@ All notable changes to Landscapy are documented here.
 - Made sequence storage immutable, rejected invalid binary and soft-posterior
   inputs before coercion, and preserved sequence subclasses and identifiers
   across mutation and factory construction.
+- Enforced finite non-negative categorical probabilities and counts, unique
+  categories, defensive storage, and strict one-hot decoding.
 
 ### Removed
 

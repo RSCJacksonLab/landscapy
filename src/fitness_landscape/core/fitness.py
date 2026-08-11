@@ -26,6 +26,29 @@ def _is_torch_tensor(value: object) -> bool:
     return isinstance(value, _torch_module().Tensor)
 
 
+def _validated_categories(categories: Sequence[str]) -> list[str]:
+    """Return a non-empty defensive category list with unique values."""
+    values = list(categories)
+    if not values:
+        raise ValueError("categories must not be empty")
+    for index, value in enumerate(values):
+        if any(value == previous for previous in values[:index]):
+            raise ValueError("categories must contain unique values")
+    return values
+
+
+def _as_float_matrix(value: object, *, name: str) -> np.ndarray:
+    """Return a defensive two-dimensional floating-point matrix."""
+    raw = value.detach().cpu().numpy() if _is_torch_tensor(value) else value
+    try:
+        matrix = np.array(raw, dtype=float, copy=True)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must contain numeric values") from error
+    if matrix.ndim != 2:
+        raise ValueError(f"{name} must be a 2-D matrix")
+    return matrix
+
+
 # Fitness oeprates as a `layer` over the fitness landscape object.
 class BaseFitnessLayer(ABC):
     """
@@ -517,17 +540,26 @@ class CategoricalFitness(BaseFitnessLayer):
                  metadata: Dict = None) -> None:
         super().__init__(name=name,
                          metadata=metadata)
-        self._values = values
-        
-        if categories is None:
-            self.categories = sorted(list(set(values)))  # Unique categories from values
-        else:
-            self.categories = categories
+        self._values = list(values)
 
-        self.category_map = {cat: i for i, cat in enumerate(self.categories)}
+        if categories is None:
+            try:
+                inferred_categories = sorted(set(self._values))
+            except TypeError as error:
+                raise ValueError("categorical values must be hashable") from error
+            self._categories = tuple(_validated_categories(inferred_categories))
+        else:
+            self._categories = tuple(_validated_categories(categories))
+
+        self.category_map = {cat: i for i, cat in enumerate(self._categories)}
 
         if not all(v in self.category_map for v in self._values):
             raise ValueError("All fitness 'values' must be present in the 'categories' list.")
+
+    @property
+    def categories(self) -> list[str]:
+        """Return a defensive copy of the ordered categories."""
+        return list(self._categories)
 
     @property
     def dtype(self) -> Literal['categorical']:
@@ -677,9 +709,16 @@ class CategoricalFitness(BaseFitnessLayer):
             An instance of the CategoricalFitness class initialized
             with the provided parameters.
         """
-        mat = one_hot.detach().cpu().numpy() if _is_torch_tensor(one_hot) else np.asarray(one_hot)
-        if mat.ndim != 2:
-            raise ValueError("CategoricalFitness.from_one_hot expects a 2-D array")
+        categories = _validated_categories(categories)
+        mat = _as_float_matrix(one_hot, name="one_hot")
+        if mat.shape[1] != len(categories):
+            raise ValueError("one_hot width must match categories")
+        if not np.all(np.isfinite(mat)):
+            raise ValueError("one_hot must contain only finite values")
+        if not np.all((mat == 0.0) | (mat == 1.0)):
+            raise ValueError("one_hot must contain only zero and one")
+        if not np.all(mat.sum(axis=1) == 1.0):
+            raise ValueError("one_hot rows must contain exactly one active category")
         idx = np.argmax(mat, axis=1)
         vals = [categories[i] for i in idx]
         return cls(name=name, values=vals, categories=categories, metadata=metadata)
@@ -770,10 +809,17 @@ class CategoricalFitness(BaseFitnessLayer):
             with the provided parameters.
         """
         rng = np.random.default_rng(seed)
-        cats = list(categories)
+        cats = _validated_categories(categories)
         if p is None:
             p = [1.0 / len(cats)] * len(cats)
-        idx = rng.choice(len(cats), size=length, p=p)
+        probabilities = np.asarray(p, dtype=float)
+        if probabilities.shape != (len(cats),):
+            raise ValueError("p must provide one probability per category")
+        if not np.all(np.isfinite(probabilities)) or np.any(probabilities < 0.0):
+            raise ValueError("p must contain finite non-negative probabilities")
+        if not np.isclose(probabilities.sum(), 1.0, rtol=0.0, atol=1e-8):
+            raise ValueError("p probabilities must sum to one")
+        idx = rng.choice(len(cats), size=length, p=probabilities)
         vals = [cats[i] for i in idx]
         return cls(name=name, values=vals, categories=cats, metadata=metadata)
 
@@ -785,8 +831,8 @@ class ProbabilisticCategoricalFitness(BaseFitnessLayer):
     name : str
         Layer name.
     probabilities : ndarray
-        Matrix with shape ``(n_sequences, n_categories)``. Rows must sum to
-        one.
+        Finite non-negative matrix with shape ``(n_sequences, n_categories)``.
+        Rows must sum to one within an absolute tolerance of ``1e-8``.
     categories : list of str
         Ordered category names corresponding to matrix columns.
     metadata : dict, optional
@@ -804,21 +850,47 @@ class ProbabilisticCategoricalFitness(BaseFitnessLayer):
     metadata : Dict, optional
         Additional metadata associated with the fitness layer.
     """
+    _NORMALIZATION_ATOL = 1e-8
+
     def __init__(self,
                  name: str,
                  probabilities: np.ndarray,
                  categories: List[str],
                  metadata: Dict = None) -> None:
         super().__init__(name=name, metadata=metadata)
-        
+
+        categories = _validated_categories(categories)
+        probabilities = _as_float_matrix(probabilities, name="probabilities")
         if probabilities.shape[1] != len(categories):
             raise ValueError("Shape of probabilities matrix must match the number of categories.")
-        if not np.allclose(np.sum(probabilities, axis=1), 1.0):
+        if not np.all(np.isfinite(probabilities)):
+            raise ValueError("probabilities must contain only finite values")
+        if np.any(probabilities < 0.0):
+            raise ValueError("probabilities must contain non-negative values")
+        if not np.allclose(
+            probabilities.sum(axis=1),
+            1.0,
+            rtol=0.0,
+            atol=self._NORMALIZATION_ATOL,
+        ):
             raise ValueError("Rows in the probabilities matrix must sum to 1.")
-            
-        self.probabilities = probabilities
-        self.categories = categories
-        self.category_map = {cat: i for i, cat in enumerate(self.categories)}
+
+        self._probabilities = probabilities
+        self._probabilities.setflags(write=False)
+        self._categories = tuple(categories)
+        self.category_map = {cat: i for i, cat in enumerate(self._categories)}
+
+    @property
+    def probabilities(self) -> np.ndarray:
+        """Return a read-only view of the probability matrix."""
+        view = self._probabilities.view()
+        view.setflags(write=False)
+        return view
+
+    @property
+    def categories(self) -> list[str]:
+        """Return a defensive copy of the ordered categories."""
+        return list(self._categories)
 
     @property
     def dtype(self) -> Literal['categorical']:
@@ -925,15 +997,13 @@ class ProbabilisticCategoricalFitness(BaseFitnessLayer):
         ProbabilisticCategoricalFitness
             An instance of the ProbabilisticCategoricalFitness class.
         """
-        arr = probabilities.detach().cpu().numpy() if _is_torch_tensor(probabilities) else np.asarray(probabilities, dtype=float)
-        if arr.ndim != 2:
-            raise ValueError("from_probabilities expects 2-D (num_sequences, num_categories)")
-        # row-normalize defensively
-        row_sum = arr.sum(axis=1, keepdims=True)
-        if not np.all(row_sum > 0):
-            raise ValueError("Rows with all-zero probabilities are invalid")
-        norm = arr / row_sum
-        return cls(name=name, probabilities=norm, categories=list(categories), metadata=metadata)
+        arr = _as_float_matrix(probabilities, name="probabilities")
+        return cls(
+            name=name,
+            probabilities=arr,
+            categories=categories,
+            metadata=metadata,
+        )
 
     @classmethod
     def from_logits(cls,
@@ -971,9 +1041,12 @@ class ProbabilisticCategoricalFitness(BaseFitnessLayer):
         ProbabilisticCategoricalFitness
             An instance of the ProbabilisticCategoricalFitness class.
         """
-        z = logits.detach().cpu().numpy() if _is_torch_tensor(logits) else np.asarray(logits, dtype=float)
-        if z.ndim != 2:
-            raise ValueError("from_logits expects 2-D (num_sequences, num_categories)")
+        categories = _validated_categories(categories)
+        z = _as_float_matrix(logits, name="logits")
+        if z.shape[1] != len(categories):
+            raise ValueError("logits width must match categories")
+        if not np.all(np.isfinite(z)):
+            raise ValueError("logits must contain only finite values")
         z = z - z.max(axis=1, keepdims=True)  # numerical stability
         exp = np.exp(z)
         probs = exp / exp.sum(axis=1, keepdims=True)
@@ -1021,11 +1094,21 @@ class ProbabilisticCategoricalFitness(BaseFitnessLayer):
         ProbabilisticCategoricalFitness
             An instance of the ProbabilisticCategoricalFitness class.
         """
-        c = counts.detach().cpu().numpy() if _is_torch_tensor(counts) else np.asarray(counts, dtype=float)
-        if c.ndim != 2:
-            raise ValueError("from_counts expects 2-D (num_sequences, num_categories)")
-        if alpha > 0:
-            c = c + alpha
+        categories = _validated_categories(categories)
+        c = _as_float_matrix(counts, name="counts")
+        if c.shape[1] != len(categories):
+            raise ValueError("counts width must match categories")
+        if not np.all(np.isfinite(c)):
+            raise ValueError("counts must contain only finite values")
+        if np.any(c < 0.0):
+            raise ValueError("counts must contain non-negative values")
+        if not np.isscalar(alpha) or not np.isfinite(alpha) or alpha < 0.0:
+            raise ValueError("alpha must be a finite non-negative scalar")
+        c = c + float(alpha)
+        row_sums = c.sum(axis=1, keepdims=True)
+        if np.any(row_sums == 0.0):
+            raise ValueError("count rows must have positive mass after smoothing")
+        c = c / row_sums
         return cls.from_probabilities(name=name, probabilities=c, categories=categories, metadata=metadata)
 
     @classmethod
@@ -1062,7 +1145,7 @@ class ProbabilisticCategoricalFitness(BaseFitnessLayer):
         ProbabilisticCategoricalFitness
             An instance of the ProbabilisticCategoricalFitness class.
         """
-        cats = list(categories)
+        cats = _validated_categories(categories)
         idx_map = {c: i for i, c in enumerate(cats)}
         num_seq = len(samples)
         num_cat = len(cats)
@@ -1624,7 +1707,12 @@ def make_fitness_layer(name: str,
     is_tensor = _is_torch_tensor(obj)
 
     # Fast-path: replicate lists (ragged)
-    if isinstance(obj, list) and obj and isinstance(obj[0], (list, tuple, np.ndarray)):
+    if (
+        dtype != "categorical"
+        and isinstance(obj, list)
+        and obj
+        and isinstance(obj[0], (list, tuple, np.ndarray))
+    ):
         return NumericFitness.from_replicates(name, obj, metadata=metadata)
 
     # Try to coerce numerically
