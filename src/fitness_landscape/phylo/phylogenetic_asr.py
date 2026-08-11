@@ -55,9 +55,9 @@ class ASRConstructor:
         A precomputed phylogenetic tree. If None, the tree is inferred.
     
     replacement_matrix : List, defualt=`NQ_pfam`
-        The replacement matrix used for tree-search. Multiple can be
-        provided to fit the ML model. If `NQ_pfam`, output will be
-        directed. If LG, output will byteste undirected.
+        The replacement matrix used for tree-search. Multiple models can be
+        provided for model fitting. The constructed topology is always
+        undirected in the 0.9 publication API.
 
     model_fitting : bool, default=`False`
         Boolean for whether or not to include ML model fitting and
@@ -718,24 +718,16 @@ class ASRConstructor:
                                                             self._boolean_gap_alignment,
                                                             tip_name_to_index)
         
-    def construct_dag(self,
-                      graph_type: Literal['undirected', 'directed'] = 'undirected') -> Union[nx.DiGraph, nx.Graph]:
+    def construct_topology(self) -> nx.Graph:
         """
-        Method to construct a directed acyclic graph (DAG) from the
-        phylogenetic tree and the alignment.
-
-        Parameters
-        ----------
-        type : str, default=`undirected`
-            Whether the graph will be directed or undirected.
+        Construct an undirected topology from the phylogenetic tree.
 
         Returns
         -------
-        nx.DiGraph
-            A directed acyclic graph where nodes are the tips and
-            internal nodes of the phylogenetic tree, and edges are
-            directed from parent to child nodes. Each node contains
-            the following attributes:
+        nx.Graph
+            An undirected graph whose nodes are the tips and internal
+            nodes of the phylogenetic tree. Each node contains the
+            following attributes:
             - `sequence`: The sequence at that node, either as a
             `BaseNumpySequence` or `SoftSequence`.
             - `fitness`: Fitness value, initialized to NaN.
@@ -744,14 +736,11 @@ class ASRConstructor:
             - `ungapped_arr`: A (L, 20) array representing the ungapped
             sequence in one-hot encoding.
         """
-        if graph_type != 'undirected' and graph_type != 'directed':
-            raise ValueError(f"Expected `graph_type` parameter to be `directed` or `undirected`, found {graph_type}")
-        
         import logging as _logging
         _logger = _logging.getLogger('fitness_landscape')
         if self._log_progress:
-            _logger.info('ASR.construct_dag: start (graph_type=%s)', graph_type)
-        G = (nx.Graph() if graph_type == 'undirected' else nx.DiGraph())
+            _logger.info('ASR.construct_topology: start')
+        G = nx.Graph()
         
         for child, parent in self.phylogenetic_tree.child_parent_map().items():
             G.add_edge(parent, child)
@@ -829,5 +818,5 @@ class ASRConstructor:
                     asr_placeholder=True,
                 )
         if self._log_progress:
-            _logger.info('ASR.construct_dag: complete (nodes=%d, edges=%d)', G.number_of_nodes(), G.number_of_edges())
+            _logger.info('ASR.construct_topology: complete (nodes=%d, edges=%d)', G.number_of_nodes(), G.number_of_edges())
         return G

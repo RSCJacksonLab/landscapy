@@ -229,8 +229,10 @@ def _write_portable_bundle_dir(
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
     graph = getattr(landscape, "graph", None)
-    if not isinstance(graph, nx.Graph):
-        raise BundleValidationError("FitnessLandscape.graph must be a networkx Graph or DiGraph.")
+    if not isinstance(graph, nx.Graph) or graph.is_directed():
+        raise BundleValidationError(
+            "Portable landscape bundles require an undirected networkx Graph."
+        )
 
     original_node_order = _resolve_original_node_order(landscape)
     node_to_sequence_index = _match_nodes_to_sequence_indices(landscape, original_node_order)
@@ -361,8 +363,6 @@ def _write_portable_bundle_dir(
         "serializer_backend": PORTABLE_BACKEND,
         "serializer_version": PORTABLE_SERIALIZER_VERSION,
         "landscape_class": _class_path(type(landscape)),
-        "graph_class": _class_path(type(graph)),
-        "graph_directed": bool(graph.is_directed()),
         "node_count": len(canonical_records),
         "edge_count": int(graph.number_of_edges()),
         "sequence_length": len(canonical_sequence_objects[0]) if canonical_sequence_objects else 0,
@@ -548,8 +548,6 @@ def _write_graph_edges(
     def normalize_endpoints(u: Any, v: Any) -> tuple[int, int]:
         src = int(node_to_canonical_index[u])
         dst = int(node_to_canonical_index[v])
-        if graph.is_directed():
-            return src, dst
         return (src, dst) if src <= dst else (dst, src)
 
     ordered_edges = []
@@ -969,8 +967,7 @@ def _load_sequences(
 
 
 def _load_graph(bundle_dir: Path, manifest: Mapping[str, Any], node_keys: Sequence[Any]) -> nx.Graph:
-    graph_class = _load_graph_class(manifest)
-    graph = graph_class()
+    graph = nx.Graph()
     graph.add_nodes_from(node_keys)
 
     graph_manifest = manifest["graph"]
@@ -1123,6 +1120,22 @@ def _validate_portable_manifest(manifest: Mapping[str, Any]) -> None:
             f"Unsupported serializer_backend {manifest['serializer_backend']!r}; "
             f"expected {PORTABLE_BACKEND!r}."
         )
+    if manifest.get("graph_directed") is True:
+        raise BundleValidationError(
+            "Directed graph bundles are outside the 0.9 publication format."
+        )
+    graph_class_path = manifest.get("graph_class")
+    if graph_class_path:
+        try:
+            graph_class = _import_symbol(graph_class_path)
+        except Exception as error:
+            raise BundleValidationError(
+                f"Unable to resolve graph_class {graph_class_path!r}."
+            ) from error
+        if isinstance(graph_class, type) and issubclass(graph_class, nx.DiGraph):
+            raise BundleValidationError(
+                "Directed graph bundles are outside the 0.9 publication format."
+            )
 
 
 def _validate_file_checksums(bundle_dir: Path, manifest: Mapping[str, Any]) -> None:
@@ -1159,18 +1172,6 @@ def _validate_sequence_index_column(frame: pd.DataFrame, node_count: int) -> Non
     indices = frame["sequence_index"].tolist()
     if indices != list(range(node_count)):
         raise BundleValidationError("sequence_index column is not in canonical order.")
-
-
-def _load_graph_class(manifest: Mapping[str, Any]):
-    class_path = manifest.get("graph_class")
-    if class_path:
-        try:
-            graph_class = _import_symbol(class_path)
-            if isinstance(graph_class, type) and issubclass(graph_class, nx.Graph):
-                return graph_class
-        except Exception:
-            pass
-    return nx.DiGraph if manifest.get("graph_directed") else nx.Graph
 
 
 def _normalize_bundle_metadata(metadata: Mapping[str, Any] | None) -> dict[str, Any]:

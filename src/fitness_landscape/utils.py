@@ -156,7 +156,7 @@ def geodesic_distance_matrix(G: Union['FitnessLandscape', nx.Graph],
     Parameters
     ----------
     G : FitnessLandscape or nx.Graph
-        Input graph (directed graphs are treated as undirected).
+        Input undirected graph.
     nodes : Sequence, optional
         Node identifiers to include. Defaults to all nodes in ``G``.
     weight_key : str, optional
@@ -182,10 +182,8 @@ def geodesic_distance_matrix(G: Union['FitnessLandscape', nx.Graph],
         graph_obj = graph_attr
     else:
         graph_obj = G
-    if isinstance(graph_obj, nx.DiGraph):
-        graph_obj = graph_obj.to_undirected()
-    if not isinstance(graph_obj, nx.Graph):
-        raise TypeError("Expected FitnessLandscape or networkx Graph/Digraph.")
+    if not isinstance(graph_obj, nx.Graph) or graph_obj.is_directed():
+        raise TypeError("Expected FitnessLandscape or an undirected networkx Graph.")
 
     if nodes is None:
         node_list = list(graph_obj.nodes())

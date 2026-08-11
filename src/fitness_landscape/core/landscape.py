@@ -1468,10 +1468,7 @@ class FitnessLandscape:
         if self.graph is None:
             return [self]
 
-        if isinstance(self.graph, nx.DiGraph):
-            components_iter = nx.weakly_connected_components(self.graph)
-        else:
-            components_iter = nx.connected_components(self.graph)
+        components_iter = nx.connected_components(self.graph)
 
         components = sorted((set(comp) for comp in components_iter), key=len, reverse=True)
         node_index_map = {node: idx for idx, node in enumerate(self._node_order)}
@@ -1800,16 +1797,11 @@ class FitnessLandscape:
             if not aggregate_edge_attributes or not edge_keys:
                 return {}
             values: dict[str, list[Any]] = {k: [] for k in edge_keys}
-            if self.graph.is_directed():
-                edges_iter = (
-                    (u, v, d) for u, v, d in self.graph.edges(data=True) if u in block_a and v in block_b
-                )
-            else:
-                edges_iter = (
-                    (u, v, d)
-                    for u, v, d in self.graph.edges(data=True)
-                    if (u in block_a and v in block_b) or (u in block_b and v in block_a)
-                )
+            edges_iter = (
+                (u, v, d)
+                for u, v, d in self.graph.edges(data=True)
+                if (u in block_a and v in block_b) or (u in block_b and v in block_a)
+            )
             found = False
             for _, _, data in edges_iter:
                 found = True
@@ -2033,12 +2025,11 @@ class FitnessLandscape:
         filepath = Path(filepath)
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-        directed = isinstance(self.graph, nx.DiGraph)
         root = Element(
             "graph",
             attrib={
                 "label": getattr(self, "name", "FitnessLandscape"),
-                "directed": "1" if directed else "0",
+                "directed": "0",
                 "xmlns": "http://www.cs.rpi.edu/XGMML",
             },
         )
@@ -2967,7 +2958,7 @@ class FitnessLandscape:
                 _log_progress=_log_progress,
             )
 
-            graph = constructor.construct_dag(graph_type='undirected')
+            graph = constructor.construct_topology()
 
             # Stamp branch lengths from the supplied tree onto the inferred graph.
             for child_name, child_node in node_lookup.items():

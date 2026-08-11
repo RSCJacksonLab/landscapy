@@ -14,7 +14,7 @@ class _FakeASRConstructor:
     def __init__(self, *args, **kwargs):
         self.tip_names = {"tip"}
 
-    def construct_dag(self, graph_type="undirected"):
+    def construct_topology(self):
         sequence = BaseNumpySequence.from_string(
             "AA",
             alphabet=PROT_20,

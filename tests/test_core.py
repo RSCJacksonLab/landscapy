@@ -635,8 +635,7 @@ def test_create_phylo_graph_registers_auto_annotations(monkeypatch):
         def __init__(self, *args, **kwargs):
             self.tip_names = ["tip1", "tip2"]
 
-        def construct_dag(self, graph_type: str = "undirected"):
-            assert graph_type == "undirected"
+        def construct_topology(self):
             return fake_graph.copy()
 
     monkeypatch.setattr(
@@ -781,8 +780,7 @@ def test_landscape_from_phylogeny_infers_missing_nodes(monkeypatch):
         def __init__(self, alignment, phylogenetic_tree=None, **kwargs):
             DummyCtor.calls.append({'alignment': alignment, 'tree': phylogenetic_tree, 'kwargs': kwargs})
 
-        def construct_dag(self, graph_type: str = 'undirected'):
-            assert graph_type == 'undirected'
+        def construct_topology(self):
             return fake_graph.copy()
 
     def stub_make_aligned_seqs(mapping: dict[str, str], moltype: str | None = None):
@@ -854,7 +852,7 @@ def test_from_phylogeny_respects_reconstruct_flag(monkeypatch):
         def __init__(self, alignment, phylogenetic_tree=None, **kwargs):
             DummyCtor.flags.append(kwargs.get('reconstruct_ancestral_states'))
 
-        def construct_dag(self, graph_type: str = 'undirected'):
+        def construct_topology(self):
             return fake_graph.copy()
 
     def stub_make_aligned_seqs(mapping: dict[str, str], moltype: str | None = None):

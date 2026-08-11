@@ -19,6 +19,9 @@ All notable changes to Landscapy are documented here.
 - Improved memory use when loading and exporting large landscapes.
 - Compatibility imports for moved APIs now preserve their original cause and
   report the required optional package without masking transitive import errors.
+- Renamed phylogenetic `construct_dag()` to the undirected-only
+  `construct_topology()` and removed directed graph state from portable bundle
+  manifests.
 
 ### Removed
 

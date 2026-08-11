@@ -1410,7 +1410,7 @@ def create_phylo_graph(sequences: Union[Path, Alignment],
                        _compute_hamming_edges: bool = False,
                        _lightweight_nodes: bool = False,
                        _hard_ancestors: bool = False,
-                       **kwargs) -> nx.DiGraph:
+                       **kwargs) -> nx.Graph:
     """
     Factory function to create an undirected graph using phylogenetic
     inference and ancestral sequence reconstruction (with an 
@@ -1457,7 +1457,7 @@ def create_phylo_graph(sequences: Union[Path, Alignment],
                                   reconstruct_ancestral_states=reconstruct_ancestral_states,
                                   _log_progress=_log_progress)
     
-    graph = constructor.construct_dag(graph_type='undirected')
+    graph = constructor.construct_topology()
 
     # Optionally strip heavy arrays and collapse ancestors to hard sequences
     if _lightweight_nodes or _hard_ancestors:
@@ -2170,7 +2170,7 @@ def _star_block(u, neighbors, seq_u, seqs_v, alphabet, chunk_size, eps):
             set_s[(u, v)] = float(-np.log(max(dist, eps)))
     return set_w, set_d, set_s
 
-def compute_edge_mutations_star(G: nx.Graph | nx.DiGraph,
+def compute_edge_mutations_star(G: nx.Graph,
                                 *,
                                 alphabet: List = PROT_20,
                                 chunk_size: Optional[int] = 8,
@@ -2186,8 +2186,8 @@ def compute_edge_mutations_star(G: nx.Graph | nx.DiGraph,
 
     Parameters
     ----------
-    G : nx.Graph or nx.DiGraph
-        The graph to compute expected Hamming distances for.
+    G : nx.Graph
+        The undirected graph to compute expected Hamming distances for.
     
     alphabet : List, default=PROT_20
         The ungapped alphabet used for alignment.
@@ -2198,6 +2198,9 @@ def compute_edge_mutations_star(G: nx.Graph | nx.DiGraph,
     eps : float, default=1e-12
         Small value to avoid division by zero in normalization.
     """
+    if G.is_directed():
+        raise TypeError("Edge mutation annotation requires an undirected graph.")
+
     A = len(alphabet)
 
     def _sanitize(arr: np.ndarray) -> np.ndarray:
@@ -2237,7 +2240,7 @@ def compute_edge_mutations_star(G: nx.Graph | nx.DiGraph,
         )
         for u in G.nodes():
             # Avoid duplicate pairs in undirected graphs
-            nbrs = [v for v in G.neighbors(u) if (u < v) or G.is_directed()]
+            nbrs = [v for v in G.neighbors(u) if u < v]
             if not nbrs:
                 continue
             Pu = _sanitize(G.nodes[u]['sequence'].ungapped_arr)
@@ -2260,7 +2263,7 @@ def compute_edge_mutations_star(G: nx.Graph | nx.DiGraph,
             tasks = []
             node_list = list(G.nodes())
             for u in node_list:
-                nbrs = [v for v in G.neighbors(u) if (u < v) or G.is_directed()]
+                nbrs = [v for v in G.neighbors(u) if u < v]
                 if not nbrs:
                     continue
                 seqs_v = [G.nodes[v]['sequence'] for v in nbrs]
@@ -2306,7 +2309,7 @@ def compute_edge_mutations_star(G: nx.Graph | nx.DiGraph,
     if _log_progress:
         _logger.info('compute_edge_mutations_star: complete')
 
-def attach_expected_hamming_to_edges(G: nx.Graph | nx.DiGraph,
+def attach_expected_hamming_to_edges(G: nx.Graph,
                                      aligned: Sequence[np.ndarray],
                                      node_order: Optional[Sequence] = None,
                                      *,
@@ -2320,8 +2323,8 @@ def attach_expected_hamming_to_edges(G: nx.Graph | nx.DiGraph,
 
     Parameters
     ----------
-    G : nx.Graph or nx.DiGraph
-        The graph to attach expected Hamming distances to.
+    G : nx.Graph
+        The undirected graph to attach expected Hamming distances to.
     
     aligned : Sequence[np.ndarray]
         List of aligned soft sequences, each of shape (L_aln, A+1)
@@ -2338,6 +2341,9 @@ def attach_expected_hamming_to_edges(G: nx.Graph | nx.DiGraph,
     eps : float, default=1e-12
         Small value to avoid division by zero in normalization.
     """
+    if G.is_directed():
+        raise TypeError("Expected Hamming annotation requires an undirected graph.")
+
     if node_order is None:
         node_order = list(G.nodes())
     if len(node_order) != len(aligned):

@@ -32,9 +32,9 @@ def test_graph_to_length_matrix_returns_square_distance():
 
 
 def test_normalize_adj_matrix_handles_sink_rows():
-    G = nx.DiGraph()
+    G = nx.Graph()
     G.add_edge(0, 1, weight=2.0)
-    G.add_node(2)  # sink row
+    G.add_node(2)  # isolated row
 
     mat = normalize_adj_matrix(G)
 
