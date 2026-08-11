@@ -22,8 +22,18 @@ distance and does not imply a conductance.
 Weighted analyses accept either an explicit edge key or `"auto"`. Automatic
 resolution uses `landscapy_edge_schema`; an attribute-free graph is treated as
 unweighted, but Landscapy will not guess whether an undeclared legacy `weight`
-represents a distance or conductance. Passing `None` explicitly requests an
-unweighted analysis.
+represents a distance or conductance. Dirichlet-energy analyses default to
+`weight_key=None`, so they remain unweighted unless weighting is requested
+explicitly.
+
+For an undirected graph, global Dirichlet energy is the unnormalized quadratic
+form `f.T @ L @ f = sum_{u,v} w_uv (f_u - f_v)^2`, where the sum is over
+undirected edges. Per-edge and edge-bin energies use that same once-per-edge
+convention. The historical
+`total_dirichlet_energy` result is normalized by node count; the accompanying
+`global_dirichlet_energy` result is not. Local contributions assign half of
+each edge's energy to each endpoint, so their sum equals
+`global_dirichlet_energy`.
 
 Recognizable portable bundles from earlier versions are migrated on load:
 
