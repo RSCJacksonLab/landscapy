@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import warnings
 import numpy as np
 import networkx as nx
 from typing import TYPE_CHECKING, List, Union, Literal, Tuple, Optional, Sequence, Mapping, Hashable, Any
@@ -203,7 +202,7 @@ def _validate_diffusion_power(
 
 
 def _validate_connectivity_threshold(value: Any) -> float:
-    """Return a finite diffusion-probability threshold in ``[0, 1]``."""
+    """Return a finite dimensionless diffusion threshold in ``[0, 1]``."""
 
     if isinstance(value, (bool, np.bool_)):
         raise TypeError("`connectivity_threshold` must be a real number in [0, 1].")
@@ -315,8 +314,30 @@ def _declare_diffusion_graph_semantics(G: nx.Graph, *, constructor: str) -> None
         affinity_key="affinity",
         conductance_key="weight",
         legacy_aliases={"kernel_weight": "affinity"},
-        notes="Conductance is the retained undirected diffusion affinity.",
+        notes=(
+            "Conductance is the retained symmetric stationary-measure "
+            "diffusion amplitude."
+        ),
     )
+
+
+def _attach_diffusion_metadata(
+    graph: nx.Graph,
+    *,
+    use_stationary: bool,
+    power: int | None,
+    threshold: float,
+) -> None:
+    """Record the shared mathematical diffusion contract on a graph."""
+
+    graph.graph["diffusion_semantics"] = {
+        "kernel": "stationary_measure_similarity",
+        "formula": "Pi^(1/2) P^t Pi^(-1/2)",
+        "power": "componentwise_stationary_limit" if use_stationary else power,
+        "lazy_probability": 0.5,
+        "threshold": threshold,
+        "threshold_units": "dimensionless_diffusion_amplitude",
+    }
 
 
 def _attach_unit_hamming_edge_attributes(
@@ -347,55 +368,185 @@ def _attach_unit_hamming_edge_attributes(
     nx.set_edge_attributes(G, edge_attrs)
 
 
-def _compute_stationary_distribution(
-    transition_matrix: Union[np.ndarray, sparse.spmatrix],
-    *,
-    max_iter: int = 10000,
-    tol: float = 1e-9,
-) -> np.ndarray:
-    """Compute a left stationary distribution for a row-stochastic matrix."""
+def _reversible_lazy_transition(
+    affinity: np.ndarray | sparse.spmatrix,
+) -> tuple[np.ndarray | csr_matrix, np.ndarray, np.ndarray]:
+    """Build a reversible lazy random walk from symmetric affinities.
 
-    if transition_matrix.shape[0] != transition_matrix.shape[1]:
-        raise ValueError("transition_matrix must be square")
+    The diagonal of the supplied affinity is ignored. Isolated states receive
+    an absorbing self transition. All other states use
+    ``P = (I + D^-1 W) / 2``, which preserves detailed balance and removes
+    periodicity without changing connected components.
+    """
 
-    n = transition_matrix.shape[0]
-    if n == 0:
-        return np.zeros(0, dtype=np.float64)
-
-    vec = np.full(n, 1.0 / n, dtype=np.float64)
-
-    if sparse.issparse(transition_matrix):
-        mat_t = transition_matrix.transpose().tocsr()
-        for _ in range(max_iter):
-            new_vec = mat_t @ vec
-            new_vec = np.asarray(new_vec).ravel()
-            total = float(new_vec.sum())
-            if not np.isfinite(total) or total == 0.0:
-                new_vec = np.full(n, 1.0 / n, dtype=np.float64)
-            else:
-                new_vec /= total
-            if np.linalg.norm(new_vec - vec, 1) <= tol:
-                return new_vec
-            vec = new_vec
+    is_sparse = sparse.issparse(affinity)
+    if is_sparse:
+        weights = affinity.astype(np.float64, copy=True).tocsr()
+        if weights.shape[0] != weights.shape[1]:
+            raise ValueError("Diffusion affinity must be square.")
+        if weights.data.size and (
+            not np.all(np.isfinite(weights.data)) or np.any(weights.data < 0.0)
+        ):
+            raise ValueError("Diffusion affinity must be finite and non-negative.")
+        difference = (weights - weights.T).tocsr()
+        if difference.data.size and np.max(np.abs(difference.data)) > 1e-10:
+            raise ValueError("Diffusion affinity must be symmetric.")
+        weights = (0.5 * (weights + weights.T)).tocsr()
+        weights.setdiag(0.0)
+        weights.eliminate_zeros()
+        degrees = np.asarray(weights.sum(axis=1)).ravel()
+        isolated = degrees == 0.0
+        if np.any(isolated):
+            weights = weights.tolil()
+            for index in np.flatnonzero(isolated):
+                weights[index, index] = 1.0
+            weights = weights.tocsr()
+            degrees = np.asarray(weights.sum(axis=1)).ravel()
+        transition = sparse.diags(1.0 / degrees) @ weights
+        transition = (
+            0.5 * (sparse.eye(weights.shape[0], format="csr") + transition)
+        ).tocsr()
+        support = weights.copy()
+        support.data = np.ones_like(support.data)
+        _, component_labels = sparse.csgraph.connected_components(
+            support,
+            directed=False,
+            return_labels=True,
+        )
     else:
-        mat_t = np.asarray(transition_matrix, dtype=np.float64).T
-        for _ in range(max_iter):
-            new_vec = mat_t @ vec
-            total = float(new_vec.sum())
-            if not np.isfinite(total) or total == 0.0:
-                new_vec = np.full(n, 1.0 / n, dtype=np.float64)
-            else:
-                new_vec /= total
-            if np.linalg.norm(new_vec - vec, 1) <= tol:
-                return new_vec
-            vec = new_vec
+        weights = np.asarray(affinity, dtype=np.float64).copy()
+        if weights.ndim != 2 or weights.shape[0] != weights.shape[1]:
+            raise ValueError("Diffusion affinity must be square.")
+        if not np.all(np.isfinite(weights)) or np.any(weights < 0.0):
+            raise ValueError("Diffusion affinity must be finite and non-negative.")
+        if not np.allclose(weights, weights.T, atol=1e-10, rtol=1e-10):
+            raise ValueError("Diffusion affinity must be symmetric.")
+        weights = 0.5 * (weights + weights.T)
+        np.fill_diagonal(weights, 0.0)
+        degrees = weights.sum(axis=1)
+        isolated = degrees == 0.0
+        weights[isolated, isolated] = 1.0
+        degrees = weights.sum(axis=1)
+        base_transition = weights / degrees[:, None]
+        transition = 0.5 * (np.eye(weights.shape[0]) + base_transition)
+        _, component_labels = sparse.csgraph.connected_components(
+            csr_matrix(weights > 0.0),
+            directed=False,
+            return_labels=True,
+        )
 
-    warnings.warn(
-        "Stationary distribution power iteration did not converge within the maximum iterations;"
-        " returning the last iterate.",
-        RuntimeWarning,
-    )
-    return vec
+    if degrees.size == 0:
+        return transition, np.zeros(0, dtype=np.float64), component_labels
+    total_degree = float(degrees.sum())
+    stationary = degrees / total_degree
+
+    # Guard the invariant at the construction boundary so later symmetric
+    # kernels cannot hide a non-reversible transition.
+    if sparse.issparse(transition):
+        flux = sparse.diags(stationary) @ transition
+        imbalance = (flux - flux.T).tocsr()
+        if imbalance.data.size and np.max(np.abs(imbalance.data)) > 1e-10:
+            raise ValueError("Failed to construct a detailed-balance transition.")
+    else:
+        flux = stationary[:, None] * transition
+        if not np.allclose(flux, flux.T, atol=1e-10, rtol=1e-10):
+            raise ValueError("Failed to construct a detailed-balance transition.")
+    return transition, stationary, component_labels
+
+
+def _reversible_diffusion_kernel(
+    transition: np.ndarray | sparse.spmatrix,
+    stationary: np.ndarray,
+    component_labels: np.ndarray,
+    *,
+    stationary_limit: bool,
+    power: int | None,
+) -> np.ndarray | csr_matrix:
+    """Return a symmetric stationary-measure diffusion kernel.
+
+    For finite ``t``, the kernel is
+    ``K_t = Pi^(1/2) P^t Pi^(-1/2)``. Numerical averaging with its transpose
+    uses both orientations explicitly. The stationary limit is evaluated
+    component by component, so distinct communicating classes have zero
+    pairwise connectivity.
+    """
+
+    probabilities = np.asarray(stationary, dtype=np.float64)
+    labels = np.asarray(component_labels, dtype=np.int64)
+    n_states = probabilities.size
+    if transition.shape != (n_states, n_states) or labels.shape != (n_states,):
+        raise ValueError("Transition, stationary distribution, and labels are misaligned.")
+    if n_states == 0:
+        return csr_matrix((0, 0)) if sparse.issparse(transition) else np.empty((0, 0))
+    if np.any(probabilities <= 0.0) or not np.isclose(probabilities.sum(), 1.0):
+        raise ValueError("Stationary probabilities must be positive and sum to one.")
+
+    if stationary_limit:
+        kernel = np.zeros((n_states, n_states), dtype=np.float64)
+        for component in np.unique(labels):
+            indices = np.flatnonzero(labels == component)
+            mass = float(probabilities[indices].sum())
+            root = np.sqrt(probabilities[indices])
+            kernel[np.ix_(indices, indices)] = np.outer(root, root) / mass
+        return kernel
+
+    if power is None or power < 1:
+        raise ValueError("Finite diffusion kernels require an integer power >= 1.")
+    root = np.sqrt(probabilities)
+    inverse_root = 1.0 / root
+    if sparse.issparse(transition):
+        powered = sparse.eye(n_states, format="csr")
+        for _ in range(power):
+            powered = powered @ transition
+        kernel = sparse.diags(root) @ powered @ sparse.diags(inverse_root)
+        kernel = (0.5 * (kernel + kernel.T)).tocsr()
+        if kernel.data.size:
+            kernel.data[np.abs(kernel.data) < 1e-15] = 0.0
+            kernel.eliminate_zeros()
+        return kernel
+
+    powered = np.linalg.matrix_power(np.asarray(transition), power)
+    kernel = root[:, None] * powered * inverse_root[None, :]
+    return 0.5 * (kernel + kernel.T)
+
+
+def _threshold_undirected_kernel(
+    kernel: np.ndarray | sparse.spmatrix,
+    *,
+    threshold: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return upper-triangle kernel entries strictly above ``threshold``."""
+
+    if sparse.issparse(kernel):
+        upper = sp_triu(kernel, k=1, format="coo")
+        keep = np.isfinite(upper.data) & (upper.data > threshold)
+        return upper.row[keep], upper.col[keep], upper.data[keep]
+
+    values = np.asarray(kernel, dtype=np.float64)
+    if not np.all(np.isfinite(values)) or np.any(values < -1e-12):
+        raise ValueError("Diffusion kernel must be finite and non-negative.")
+    mask = np.triu(values > threshold, k=1)
+    rows, cols = np.where(mask)
+    return rows, cols, values[rows, cols]
+
+
+def _symmetric_affinity_from_scores(scores: csr_matrix, *, tau: float) -> csr_matrix:
+    """Exponentiate symmetric sparse scores without row-dependent scaling."""
+
+    affinity = scores.astype(np.float64, copy=True).tocsr()
+    difference = (affinity - affinity.T).tocsr()
+    if difference.data.size and np.max(np.abs(difference.data)) > 1e-10:
+        raise ValueError("Evolutionary edge scores must be symmetric.")
+    if affinity.data.size:
+        if not np.all(np.isfinite(affinity.data)):
+            raise ValueError("Evolutionary edge scores must be finite.")
+        scaled = (affinity.data - np.max(affinity.data)) / float(tau)
+        scaled = np.maximum(scaled, np.log(np.finfo(np.float64).tiny))
+        affinity.data = np.exp(scaled)
+    affinity = (0.5 * (affinity + affinity.T)).tocsr()
+    affinity.setdiag(0.0)
+    affinity.eliminate_zeros()
+    return affinity
 
 def _pack_binary(seqs: list[BaseNumpySequence]) -> np.ndarray:
     """
@@ -1634,10 +1785,11 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
                                _compute_hamming_edges: bool = False,
                                **kwargs) -> nx.Graph:
     """
-    Function to construct a graph based on expected diffusion
-    behaviour in a high-dimensional embedding space. Uses sparse
-    operations neighbor finding with either BallTree or FAISS-based
-    algorithms to accelerate the computation for very large graphs.
+    Construct a reversible undirected diffusion graph in embedding space.
+
+    RBF affinities define a lazy detailed-balance transition. Edge weights are
+    the symmetric stationary-measure kernel
+    ``Pi^(1/2) P^t Pi^(-1/2)`` after thresholding.
 
     Parameters
     ----------
@@ -1689,12 +1841,12 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
     
     t : int | float | None, default=`5`
         Diffusion power for the Markov transition matrix. When ``None``,
-        ``0`` or ``np.inf`` the stationary distribution is used instead of
-        an explicit matrix power.
+        ``0`` or ``np.inf``, use the componentwise stationary pair kernel
+        instead of an explicit matrix power.
 
     connectivity_threshold : float, default=`1e-04`
-        Finite probability threshold in ``[0, 1]`` used to define discrete
-        connectivity.
+        Finite dimensionless diffusion-amplitude threshold in ``[0, 1]`` used
+        to define discrete connectivity.
 
     _compute_hamming_edges : bool, default=False
         Reserved compatibility flag. Release builds disable the optional
@@ -1741,6 +1893,12 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
     for index, sequence in enumerate(sequences):
         G.add_node(index, sequence=sequence)
     _declare_diffusion_graph_semantics(G, constructor="embedding-diffusion")
+    _attach_diffusion_metadata(
+        G,
+        use_stationary=use_stationary,
+        power=t_int,
+        threshold=threshold,
+    )
     if n_points <= 1:
         return G
 
@@ -1800,32 +1958,38 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
     gamma = 1.0 / (2 * median_sigma_sq)
     kernel_matrix = sklearn_pairwise.rbf_kernel(embeddings, gamma=gamma)
     
-    # Create the Markov transition matrix.
-    row_sums = kernel_matrix.sum(axis=1, keepdims=True)
-    # Avoid division by zero for isolated points
-    row_sums[row_sums == 0] = 1.0
-    transition_matrix = kernel_matrix / row_sums
+    transition_matrix, stationary, component_labels = _reversible_lazy_transition(
+        kernel_matrix
+    )
+    diffusion_kernel = _reversible_diffusion_kernel(
+        transition_matrix,
+        stationary,
+        component_labels,
+        stationary_limit=use_stationary,
+        power=t_int,
+    )
+    rows, cols, edge_weights = _threshold_undirected_kernel(
+        diffusion_kernel,
+        threshold=threshold,
+    )
 
-    if use_stationary:
-        stationary = _compute_stationary_distribution(transition_matrix).astype(np.float64, copy=False)
-        diffused_matrix = np.repeat(stationary[np.newaxis, :], len(sequences), axis=0)
-    else:
-        diffused_matrix = np.linalg.matrix_power(transition_matrix, t_int)
-    
-    # Get the upper triangle to avoid duplicate edges
-    rows, cols = np.where(np.triu(diffused_matrix > threshold, k=1))
-    
-    for i, j in zip(rows, cols):
-        affinity = float(diffused_matrix[i, j])
+    for i, j, value in zip(rows, cols, edge_weights):
+        affinity = float(value)
         G.add_edge(
-            i,
-            j,
+            int(i),
+            int(j),
             affinity=affinity,
             weight=affinity,
             kernel_weight=affinity,
         )
 
     _declare_diffusion_graph_semantics(G, constructor="embedding-diffusion")
+    _attach_diffusion_metadata(
+        G,
+        use_stationary=use_stationary,
+        power=t_int,
+        threshold=threshold,
+    )
     
     # Optionally compute expected Hamming distances if available
     if _compute_hamming_edges and all(
@@ -2056,30 +2220,6 @@ def _length_normalized_gapped_soft_score(
     return float(total_score / effective_length)
 
 
-def _row_softmax_csr(scores: csr_matrix, tau: float) -> csr_matrix:
-    """Convert sparse edge scores to row-stochastic weights without underflow."""
-    if not np.isfinite(tau) or tau <= 0.0:
-        raise ValueError("`tau` must be finite and greater than zero.")
-
-    transition = scores.astype(np.float64, copy=True).tocsr()
-    for row in range(transition.shape[0]):
-        start, end = transition.indptr[row], transition.indptr[row + 1]
-        if start == end:
-            continue
-        row_scores = transition.data[start:end]
-        if not np.all(np.isfinite(row_scores)):
-            raise ValueError("Evolutionary edge scores must be finite.")
-        shifted = (row_scores - np.max(row_scores)) / float(tau)
-        row_weights = np.exp(shifted)
-        normalizer = float(row_weights.sum())
-        if not np.isfinite(normalizer) or normalizer <= 0.0:
-            raise ValueError("Failed to normalize evolutionary edge scores.")
-        transition.data[start:end] = row_weights / normalizer
-
-    transition.eliminate_zeros()
-    return transition
-
-
 def _score_pair(i, j, seq_i, seq_j, score_matrix):
     soft_alignment = require_optional(
         "softalign.soft_alignment",
@@ -2123,13 +2263,15 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                                              _compute_hamming_edges: bool = False,
                                              **kwargs) -> nx.Graph:
     """
-    Construct an evolutionary-diffusion graph from pairwise alignments.
+    Construct a reversible evolutionary-diffusion graph from pairwise alignments.
 
     Candidate pairs are selected in embedding space, then aligned and scored
     in distributed Ray tasks. The supplied reversible rate generator is
     converted to transition log-odds at ``evolutionary_time``. Pair scores are
     averaged over effective alignment length and converted to transition
-    probabilities with a numerically stable row-wise softmax.
+    affinities with a numerically stable global exponential shift. A lazy
+    detailed-balance transition then defines the symmetric
+    ``Pi^(1/2) P^t Pi^(-1/2)`` edge kernel.
 
     Parameters
     ----------
@@ -2185,16 +2327,16 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     
     t : int | float | None, default=5
         Diffusion power for the Markov transition matrix. When ``None``,
-        ``0`` or ``np.inf`` the stationary distribution is used instead of
-        explicitly computing ``T^t``.
+        ``0`` or ``np.inf``, use the componentwise stationary pair kernel
+        instead of explicitly computing ``P^t``.
     
     tau : float, default=1.0
         Temperature applied to length-normalized evolutionary log-odds before
-        row-wise softmax normalization.
+        the shared symmetric exponential affinity is constructed.
 
     connectivity_threshold : float, default=1e-4
-        Finite probability threshold in ``[0, 1]``. Symmetrized diffusion
-        values above this threshold are retained as edges.
+        Finite threshold in ``[0, 1]``. Symmetric dimensionless diffusion
+        amplitudes above this threshold are retained as edges.
 
     cpus : int, default=1
         Target number of worker CPUs for Ray alignment tasks. Each task
@@ -2268,6 +2410,12 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     _declare_diffusion_graph_semantics(
         graph,
         constructor="evolutionary-diffusion",
+    )
+    _attach_diffusion_metadata(
+        graph,
+        use_stationary=use_stationary,
+        power=t_int,
+        threshold=thr,
     )
     if n_sequences <= 1:
         return graph
@@ -2370,54 +2518,32 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     else:
         edge_scores = csr_matrix((n_sequences, n_sequences), dtype=np.float64)
 
-    # Convert length-normalized log-odds to a row-stochastic transition
-    # matrix without ever exponentiating the large negative full-length
-    # scores that caused the original float32 collapse.
+    # Convert symmetric length-normalized log-odds into a shared affinity
+    # before row normalization. Row-dependent softmax shifts would obscure the
+    # reversible affinity needed to establish detailed balance.
     _t_norm0 = time.perf_counter(); _c_norm0 = time.process_time()
-    Tmat = _row_softmax_csr(edge_scores, tau=tau)
-    _logger.info('Row-softmax transition matrix: nnz=%d wall=%.2fs cpu=%.2fs', Tmat.nnz, time.perf_counter()-_t_norm0, time.process_time()-_c_norm0)
-
-    if use_stationary:
-        _logger.info('Using stationary distribution for diffusion connectivity (t=%s).', t)
-        stationary = _compute_stationary_distribution(Tmat).astype(np.float64, copy=False)
-        if stationary.size:
-            weights = 0.5 * (stationary[:, None] + stationary[None, :])
-            mask = np.triu(weights > thr, k=1)
-            rows, cols = np.where(mask)
-            edge_weights = weights[rows, cols].astype(np.float32, copy=False)
-        else:
-            rows = cols = np.empty(0, dtype=np.int32)
-            edge_weights = np.empty(0, dtype=np.float32)
-        _logger.info('Stationary distribution thresholding produced edges=%d', edge_weights.size)
-    else:
-        _t_pow0 = time.perf_counter(); _c_pow0 = time.process_time()
-        P = Tmat.copy()
-        for step in range(t_int - 1):
-            P = P @ Tmat
-            if P.nnz:
-                small = np.abs(P.data) <= 1e-12
-                if np.any(small):
-                    P.data[small] = 0.0
-                    P.eliminate_zeros()
-            _logger.info('Diffusion step %d/%d: nnz=%d', step + 1, t_int - 1, P.nnz)
-        _logger.info('Diffusion power done: wall=%.2fs cpu=%.2fs', time.perf_counter()-_t_pow0, time.process_time()-_c_pow0)
-
-        _t_sym0 = time.perf_counter(); _c_sym0 = time.process_time()
-        P_sym = (P + P.T).tocsr()
-        if P_sym.nnz:
-            P_sym.data *= 0.5
-
-        if P_sym.nnz and thr > 0.0:
-            small = P_sym.data <= thr
-            if np.any(small):
-                P_sym.data[small] = 0.0
-                P_sym.eliminate_zeros()
-
-        U = sp_triu(P_sym, k=1, format='coo') if P_sym.nnz else coo_matrix(P_sym)
-        rows = U.row
-        cols = U.col
-        edge_weights = U.data.astype(np.float32, copy=False)
-        _logger.info('Symmetrize + threshold: nnz=%d wall=%.2fs cpu=%.2fs', U.nnz, time.perf_counter()-_t_sym0, time.process_time()-_c_sym0)
+    affinity_matrix = _symmetric_affinity_from_scores(edge_scores, tau=tau)
+    transition_matrix, stationary, component_labels = _reversible_lazy_transition(
+        affinity_matrix
+    )
+    diffusion_kernel = _reversible_diffusion_kernel(
+        transition_matrix,
+        stationary,
+        component_labels,
+        stationary_limit=use_stationary,
+        power=t_int,
+    )
+    rows, cols, edge_weights = _threshold_undirected_kernel(
+        diffusion_kernel,
+        threshold=thr,
+    )
+    _logger.info(
+        'Reversible diffusion kernel: nnz=%d edges=%d wall=%.2fs cpu=%.2fs',
+        diffusion_kernel.nnz if sparse.issparse(diffusion_kernel) else np.count_nonzero(diffusion_kernel),
+        edge_weights.size,
+        time.perf_counter()-_t_norm0,
+        time.process_time()-_c_norm0,
+    )
 
     _t_graph0 = time.perf_counter(); _c_graph0 = time.process_time()
     # add edges with attribute
@@ -2435,6 +2561,12 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     _declare_diffusion_graph_semantics(
         graph,
         constructor="evolutionary-diffusion",
+    )
+    _attach_diffusion_metadata(
+        graph,
+        use_stationary=use_stationary,
+        power=t_int,
+        threshold=thr,
     )
 
     # Optionally compute expected Hamming distances if available
