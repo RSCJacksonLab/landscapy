@@ -166,6 +166,7 @@ def category_boundary_crossing_times(
     n_walks: int = 100,
     max_steps: int = 100,
     seed: Optional[int] = None,
+    weight_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Estimate expected category-to-category boundary crossing times via random walks.
@@ -187,6 +188,10 @@ def category_boundary_crossing_times(
         Maximum steps per walk before aborting (counts as a miss).
     seed : int, optional
         Random seed.
+    weight_key : str, optional
+        Edge attribute used to weight neighbour transitions. If ``None``,
+        neighbours are sampled uniformly. Missing attributes default to 1.0,
+        matching NetworkX's weighted-matrix convention.
 
     Returns
     -------
@@ -244,7 +249,28 @@ def category_boundary_crossing_times(
     std_mat = np.full((n_cat, n_cat), np.nan, dtype=float)
     hits_mat = np.zeros((n_cat, n_cat), dtype=int)
 
-    neighbors = {node: list(landscape.graph.neighbors(node)) for node in node_order}
+    neighbors: dict[Any, np.ndarray] = {}
+    neighbor_probabilities: dict[Any, Optional[np.ndarray]] = {}
+    for node in node_order:
+        node_neighbors = np.asarray(list(landscape.graph.neighbors(node)), dtype=object)
+        neighbors[node] = node_neighbors
+        if weight_key is None or node_neighbors.size == 0:
+            neighbor_probabilities[node] = None
+            continue
+        weights = np.asarray(
+            [landscape.graph.edges[node, neighbor].get(weight_key, 1.0) for neighbor in node_neighbors],
+            dtype=float,
+        )
+        if not np.isfinite(weights).all() or np.any(weights < 0):
+            raise ValueError(
+                f"Edge weights for '{weight_key}' must be finite and non-negative."
+            )
+        total_weight = float(weights.sum())
+        if total_weight <= 0:
+            raise ValueError(
+                f"Node {node!r} has no positive transition weight for '{weight_key}'."
+            )
+        neighbor_probabilities[node] = weights / total_weight
     node_to_idx = {node: i for i, node in enumerate(node_order)}
 
     for a in range(n_cat):
@@ -269,10 +295,13 @@ def category_boundary_crossing_times(
                         if cat_hit == b:
                             hits.append(steps)
                             break
-                    neigh = neighbors.get(current_node, [])
-                    if not neigh:
+                    neigh = neighbors.get(current_node, np.asarray([], dtype=object))
+                    if neigh.size == 0:
                         break
-                    current_node = rng.choice(neigh)
+                    current_node = rng.choice(
+                        neigh,
+                        p=neighbor_probabilities.get(current_node),
+                    )
                     current_row = node_to_idx[current_node]
                     steps += 1
             if hits:
@@ -290,5 +319,6 @@ def category_boundary_crossing_times(
             "n_walks": n_walks,
             "max_steps": max_steps,
             "seed": seed,
+            "weight_key": weight_key,
         },
     }

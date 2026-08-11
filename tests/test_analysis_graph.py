@@ -255,3 +255,41 @@ def test_category_boundary_crossing_times_simple():
     assert mat[0, 0] == 0.0
     # B->A also finite in this tiny graph
     assert np.isfinite(mat[1, 0])
+
+
+def test_category_boundary_crossing_times_respects_edge_weights():
+    sequences = [
+        BaseNumpySequence([0], sequence_id="s0"),
+        BaseNumpySequence([1], sequence_id="s1"),
+        BaseNumpySequence([2], sequence_id="s2"),
+    ]
+    graph = nx.Graph()
+    graph.add_nodes_from(range(3))
+    for index, sequence in enumerate(sequences):
+        graph.nodes[index]["sequence"] = sequence
+    graph.add_edge(0, 1, transition_weight=1.0)
+    graph.add_edge(0, 2, transition_weight=0.0)
+    graph.add_edge(1, 2, transition_weight=1.0)
+    categorical = CategoricalFitness.from_values(
+        "cat",
+        ["A", "B", "C"],
+        categories=["A", "B", "C"],
+    )
+    landscape = FitnessLandscape(
+        sequences=sequences,
+        graph=graph,
+        fitness_layers={"cat": categorical},
+    )
+
+    out = category_boundary_crossing_times(
+        landscape,
+        layer="cat",
+        n_walks=20,
+        max_steps=3,
+        seed=0,
+        weight_key="transition_weight",
+    )
+
+    assert out["mean_crossing_time"][0, 1] == 1.0
+    assert out["hit_counts"][0, 1] == 20
+    assert out["params"]["weight_key"] == "transition_weight"
