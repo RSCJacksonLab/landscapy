@@ -52,6 +52,9 @@ All notable changes to Landscapy are documented here.
 - Made effective resistance component-wise with infinite cross-component
   costs, explicit jitter reporting, and defined empty/singleton and category
   aggregation behavior.
+- Consolidated hard-token and relaxed-distribution ESM embeddings behind one
+  implementation with explicit alphabet, masking, pooling, dtype, and ordering
+  contracts; fixed the recursive ``extract_features`` alias.
 
 ### Removed
 
