@@ -59,6 +59,9 @@ All notable changes to Landscapy are documented here.
   sample sizes; added explicit Shapiro-Wilk boundary policies, seeded
   permutation generators with replayable state, finite-sample Monte Carlo
   p-values and uncertainty, and Holm/Bonferroni/BH multiplicity correction.
+- Consolidated generalized NK construction in `create_gnk_landscape`, repaired
+  uniform and per-site multiallelic sequence construction and metadata, and
+  made `create_nk_multi_landscape` a deprecated compatibility alias.
 
 ### Removed
 
