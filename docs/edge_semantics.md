@@ -14,7 +14,8 @@ graph-level `landscapy_edge_schema` metadata key.
 
 The `weight` key is reserved for conductance. A raw distance is never copied to
 `weight`. Hamming adjacency graphs use unit conductance. Hamming kNN graphs use
-`exp(-normalized_distance)`. TDA graphs use
+`exp(-normalized_distance)`, while embedding-space kNN graphs use
+`exp(-Euclidean distance)`. TDA graphs use
 `1 / (1 + PCA-space Euclidean distance)`. Diffusion constructors use their
 retained undirected affinity as conductance. Phylogenetic `branch_length` is a
 distance and does not imply a conductance.

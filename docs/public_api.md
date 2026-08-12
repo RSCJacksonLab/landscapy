@@ -34,3 +34,8 @@ The public epistasis functions follow the
 [epistasis domain and coefficient contract](epistasis.md), including explicit
 binary-versus-categorical design domains, Walsh normalization, regression
 identifiability, and incomplete-design behavior.
+
+Graph constructors that use nearest-neighbour search follow the
+[kNN embedding-domain contract](knn_embedding_domains.md): PLM and composition
+domains use Euclidean/L2 embedding geometry, while sequence/OHE domains use
+Hamming geometry.

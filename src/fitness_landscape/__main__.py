@@ -181,7 +181,7 @@ def _resolve_replacement_matrix(value: str | None) -> np.ndarray:
 @click.option("--connectivity-threshold", type=float, default=1e-4, show_default=True, help="Connectivity threshold for the diffused matrix.")
 @click.option("--backend", type=click.Choice(["auto", "faiss", "balltree"]), default="auto", show_default=True, help="kNN backend.")
 @click.option("--index-type", type=click.Choice(["hnsw", "flat", "ivf"]), default="hnsw", show_default=True, help="FAISS index type.")
-@click.option("--faiss-metric", type=click.Choice(["ip", "l2"]), default="ip", show_default=True, help="FAISS metric.")
+@click.option("--faiss-metric", type=click.Choice(["ip", "l2"]), default="ip", show_default=True, help="FAISS metric for OHE/Hamming search; PLM and composition embeddings always use L2.")
 @click.option("--include-self", is_flag=True, default=False, help="Include self edges in the kNN graph.")
 @click.option("--use-gpu", is_flag=True, default=False, help="Use GPU for FAISS (when available for selected index).")
 @click.option("--hnsw-M", "hnsw_m", type=int, default=32, show_default=True, help="HNSW M parameter.")
@@ -425,6 +425,7 @@ def evol_diffusion_landscape(
     G = create_evol_diffusion_graph(
         sequences=seqs,
         embeddings=E,
+        embedding_domain=embedding_domain,
         k=k,
         t=t,
         tau=tau,
@@ -483,7 +484,7 @@ def evol_diffusion_landscape(
 @click.option("--k", type=int, default=50, show_default=True, help="kNN neighbours for graph construction.")
 @click.option("--backend", type=click.Choice(["auto", "faiss", "balltree"]), default="auto", show_default=True, help="kNN backend.")
 @click.option("--index-type", type=click.Choice(["hnsw", "flat", "ivf"]), default="hnsw", show_default=True, help="FAISS index type.")
-@click.option("--faiss-metric", type=click.Choice(["ip", "l2"]), default="ip", show_default=True, help="FAISS metric.")
+@click.option("--faiss-metric", type=click.Choice(["ip", "l2"]), default="ip", show_default=True, help="FAISS metric for OHE/Hamming search; PLM and composition embeddings always use L2.")
 @click.option("--include-self", is_flag=True, default=False, help="Include self edges in the kNN graph.")
 @click.option("--use-gpu", is_flag=True, default=False, help="Use GPU for FAISS (when available for selected index).")
 @click.option("--hnsw-M", "hnsw_m", type=int, default=32, show_default=True, help="HNSW M parameter.")
@@ -725,6 +726,8 @@ def knn_landscape(
     G = create_knn_graph(
         sequences=seqs,
         k=k,
+        embeddings=E,
+        embedding_domain=embedding_domain,
         backend=backend,
         index_type=index_type,
         faiss_metric=faiss_metric,

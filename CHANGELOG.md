@@ -72,6 +72,10 @@ All notable changes to Landscapy are documented here.
   epistasis domains; corrected Walsh position labels and normalization,
   enforced regression identifiability, and made higher-order empirical
   marginal decompositions subtract every lower-order subset.
+- Made kNN construction domain-aware: PLM and composition embeddings now
+  define Euclidean/L2 neighbourhoods for direct kNN graphs and the sparse
+  prefilters used by diffusion constructors, while sequence/OHE searches retain
+  Hamming geometry.
 
 ### Removed
 
