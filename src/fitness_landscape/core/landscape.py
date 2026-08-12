@@ -162,11 +162,18 @@ def _resolve_embeddings_for_graph(sequences: list[BaseNumpySequence],
         with additional keyword arguments for the graph constructor.
     """
     reg = _GRAPH_REGISTRY.get(graph_type)
-    if reg is None or not reg.needs_embeddings:
-        return embeddings, {}
+    knn_uses_embeddings = graph_type == "knn" and embedding_domain == "plm"
+    domain_aware_graphs = {"knn", "diffusion", "evol_diffusion", "diffusion_evol"}
+    domain_kwargs = (
+        {"embedding_domain": embedding_domain}
+        if graph_type in domain_aware_graphs
+        else {}
+    )
+    if reg is None or (not reg.needs_embeddings and not knn_uses_embeddings):
+        return embeddings, domain_kwargs
 
     if embeddings is not None:
-        return embeddings, {"embeddings": embeddings}
+        return embeddings, {"embeddings": embeddings, **domain_kwargs}
 
     use_soft = embedding_domain == "plm" and any(isinstance(seq, SoftSequence) for seq in sequences)
 
@@ -178,11 +185,11 @@ def _resolve_embeddings_for_graph(sequences: list[BaseNumpySequence],
             device=device,
             embedding_mode="soft" if use_soft else "hard",
         )
-        return E, {"embeddings": E}
+        return E, {"embeddings": E, **domain_kwargs}
 
     if embedding_domain == "ohe":
         E, _ = _encode_multiallele(sequences)
-        return E, {"embeddings": E}
+        return E, {"embeddings": E, **domain_kwargs}
 
     raise ValueError(f"embedding_domain must be 'plm' or 'ohe', got {embedding_domain!r}")
 

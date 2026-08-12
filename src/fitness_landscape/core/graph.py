@@ -27,18 +27,22 @@ _NEIGHBOUR_BACKENDS = {"auto", "faiss", "balltree"}
 _FAISS_INDEX_TYPES = {"flat", "hnsw", "ivf"}
 _FAISS_METRICS = {"ip", "l2"}
 _TIE_POLICIES = {"all", "min_index", "random"}
+_EMBEDDING_KNN_DOMAINS = {"plm", "composition"}
 
 
 def _validate_sequence_collection(
     sequences: Sequence[BaseNumpySequence],
     *,
     name: str = "sequences",
+    require_aligned: bool = True,
 ) -> tuple[int, int]:
     """Validate graph-constructor sequence structure.
 
     Empty collections are supported and return ``(0, 0)``. Non-empty
-    collections must contain aligned, non-empty ``BaseNumpySequence``
-    instances.
+    collections must contain non-empty ``BaseNumpySequence`` instances and,
+    by default, have a common aligned length. Embedding-space graph searches
+    may set ``require_aligned=False`` because their geometry is independent of
+    raw sequence coordinates.
     """
 
     if sequences is None:
@@ -61,11 +65,11 @@ def _validate_sequence_collection(
     lengths = [len(sequence) for sequence in sequences]
     if any(length <= 0 for length in lengths):
         raise ValueError(f"`{name}` entries must be non-empty.")
-    if len(set(lengths)) != 1:
+    if require_aligned and len(set(lengths)) != 1:
         raise ValueError(
             f"`{name}` entries must have a uniform aligned length; found {lengths}."
         )
-    return n_sequences, lengths[0]
+    return n_sequences, lengths[0] if require_aligned else 0
 
 
 def _validate_embedding_matrix(
@@ -255,38 +259,54 @@ def _attach_knn_edge_semantics(
     *,
     sequence_length: int,
     constructor: str,
+    distance_geometry: Literal["hamming", "euclidean"] = "hamming",
 ) -> None:
-    """Attach canonical Hamming kNN distances, affinities, and conductances."""
+    """Attach canonical kNN distances, affinities, and conductances."""
     length = int(sequence_length)
-    if length <= 0 and G.number_of_edges() > 0:
+    if distance_geometry == "hamming" and length <= 0 and G.number_of_edges() > 0:
         raise ValueError("kNN edge semantics require sequences of positive length.")
+    if distance_geometry not in {"hamming", "euclidean"}:
+        raise ValueError(
+            "`distance_geometry` must be either 'hamming' or 'euclidean'."
+        )
 
     attributes = {}
     for u, v, data in G.edges(data=True):
         distance = float(data["distance"])
-        normalized = distance / length if length > 0 else 0.0
-        affinity = _distance_affinity(normalized)
-        attributes[(u, v)] = {
+        affinity_distance = (
+            distance / length
+            if distance_geometry == "hamming" and length > 0
+            else distance
+        )
+        affinity = _distance_affinity(affinity_distance)
+        edge_attributes = {
             "distance": distance,
-            "normalized_distance": normalized,
             "affinity": affinity,
             "weight": affinity,
             "knn_weight": distance,
             "sim": affinity,
         }
+        if distance_geometry == "hamming":
+            edge_attributes["normalized_distance"] = affinity_distance
+        attributes[(u, v)] = edge_attributes
     if attributes:
         nx.set_edge_attributes(G, attributes)
 
+    is_hamming = distance_geometry == "hamming"
     declare_edge_semantics(
         G,
         constructor=constructor,
         distance_key="distance",
-        distance_units="hamming_count",
-        normalized_distance_key="normalized_distance",
+        distance_units="hamming_count" if is_hamming else "embedding_euclidean",
+        normalized_distance_key="normalized_distance" if is_hamming else None,
         affinity_key="affinity",
         conductance_key="weight",
         legacy_aliases={"knn_weight": "distance", "sim": "affinity"},
-        notes="Conductance is exp(-normalized Hamming distance).",
+        notes=(
+            "Conductance is exp(-normalized Hamming distance)."
+            if is_hamming
+            else "Conductance is exp(-Euclidean embedding distance)."
+        ),
     )
 
 
@@ -994,6 +1014,88 @@ def _resolve_balltree_metric(X: np.ndarray, metric: str | None = None) -> str:
         return metric
     return "hamming" if _is_binary_like_matrix(X) else "euclidean"
 
+
+def _prepare_knn_search_space(
+    sequences: List[BaseNumpySequence],
+    embeddings: np.ndarray | None,
+    *,
+    embedding_domain: str | None,
+    backend: Literal["faiss", "balltree"],
+    faiss_metric: Literal["ip", "l2"],
+) -> tuple[np.ndarray, Literal["hamming", "euclidean"], str, str]:
+    """Resolve the feature matrix and metric for a kNN search.
+
+    Sequence/OHE searches use Hamming geometry. PLM, composition, and direct
+    embedding searches use ordinary Euclidean geometry; FAISS represents that
+    geometry with its squared-L2 index, irrespective of the sequence-oriented
+    ``faiss_metric`` option.
+    """
+
+    use_embedding_geometry = embedding_domain in _EMBEDDING_KNN_DOMAINS or (
+        embeddings is not None and embedding_domain != "ohe"
+    )
+    n_sequences, _ = _validate_sequence_collection(
+        sequences,
+        require_aligned=not use_embedding_geometry,
+    )
+    if embedding_domain is not None and embedding_domain not in {
+        "ohe",
+        *_EMBEDDING_KNN_DOMAINS,
+    }:
+        raise ValueError(
+            "`embedding_domain` must be 'ohe', 'plm', 'composition', or None; "
+            f"got {embedding_domain!r}."
+        )
+
+    matrix = None
+    if embeddings is not None:
+        matrix = _validate_embedding_matrix(
+            embeddings,
+            n_sequences=n_sequences,
+        )
+    elif embedding_domain in _EMBEDDING_KNN_DOMAINS:
+        raise ValueError(
+            f"`embedding_domain={embedding_domain!r}` requires an aligned "
+            "embedding matrix for kNN construction."
+        )
+
+    use_embedding_geometry = matrix is not None and embedding_domain != "ohe"
+    if use_embedding_geometry:
+        metric = "l2" if backend == "faiss" else "euclidean"
+        return matrix, "euclidean", metric, embedding_domain or "embedding"
+
+    if n_sequences == 0:
+        metric = faiss_metric if backend == "faiss" else "hamming"
+        return np.empty((0, 0), dtype=np.float32), "hamming", metric, "ohe"
+
+    if backend == "faiss":
+        features = _one_hot_matrix_amino(sequences)
+        metric = faiss_metric
+    else:
+        features, _ = _encode_multiallele(sequences)
+        metric = "hamming"
+    return features, "hamming", metric, "ohe"
+
+
+def _attach_knn_search_metadata(
+    graph: nx.Graph,
+    *,
+    backend: str,
+    metric: str,
+    distance_geometry: str,
+    embedding_domain: str,
+    role: Literal["graph", "prefilter"],
+) -> None:
+    """Record the feature-space contract used by a kNN graph or prefilter."""
+
+    graph.graph["landscapy_knn_search"] = {
+        "role": role,
+        "backend": str(backend),
+        "metric": str(metric),
+        "distance_geometry": str(distance_geometry),
+        "embedding_domain": str(embedding_domain),
+    }
+
 def _find_knn_balltree(X : np.ndarray,
                        k : int,
                        tiebuffer : int = 0,
@@ -1199,6 +1301,8 @@ def _find_knn_faiss(X: np.ndarray,
 
 def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
                                k: int,
+                               search_features: np.ndarray,
+                               distance_geometry: Literal["hamming", "euclidean"],
                                include_self: bool = False,
                                tie_policy: Literal['all', 'min_index', 'random'] = 'all',
                                tiebuffer: int = 128,
@@ -1237,8 +1341,7 @@ def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
     if n == 0:
         return nx.Graph()
 
-    # integer-coded (n, L)
-    X, _ = _encode_multiallele(sequences)  
+    X = search_features
     L = X.shape[1]
 
     dists, inds = _find_knn_balltree(
@@ -1246,6 +1349,7 @@ def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
         k=k,
         tiebuffer=tiebuffer,
         include_self=include_self,
+        metric="hamming" if distance_geometry == "hamming" else "euclidean",
     )
 
     rng = np.random.default_rng(seed)
@@ -1253,8 +1357,8 @@ def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
 
     for i in range(n):
         ids = inds[i]
-        # convert fraction to Hamming count
-        ds = (dists[i] * L)  
+        # sklearn reports a Hamming fraction and an ordinary Euclidean length.
+        ds = dists[i] * L if distance_geometry == "hamming" else dists[i]
 
         # drop self
         keep = (ids != i)
@@ -1302,14 +1406,17 @@ def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
 
     _attach_knn_edge_semantics(
         G,
-        sequence_length=L,
+        sequence_length=len(sequences[0]),
         constructor="knn-balltree",
+        distance_geometry=distance_geometry,
     )
 
     return G
 
 def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
                             k: int,
+                            search_features: np.ndarray,
+                            distance_geometry: Literal["hamming", "euclidean"],
                             *,
                             index_type: Literal['hnsw', 'flat', 'ivf'] = "hnsw",
                             metric: Literal['ip', 'l2'] = 'ip',
@@ -1374,7 +1481,7 @@ def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
         The constructed nearest neighbor graph. 
     """
     
-    X = _one_hot_matrix_amino(sequences)
+    X = search_features
     n, d = X.shape
     L = len(sequences[0])
 
@@ -1382,25 +1489,26 @@ def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
                            use_gpu=use_gpu, hnsw_M=hnsw_M,
                            include_self=include_self, tiebuffer=tiebuffer)
 
-    # Convert FAISS distances to Hamming counts.
-    # ip: D = inner product; matches = D; hamming = L - matches
-    if metric == "ip":
-        hamming_all = (L - D).astype(np.float32)
+    # FAISS reports similarities for IP and squared distances for L2.
+    if distance_geometry == "euclidean":
+        distances_all = np.sqrt(np.maximum(D, 0.0)).astype(np.float32)
+    elif metric == "ip":
+        distances_all = (L - D).astype(np.float32)
     else:
-        hamming_all = (0.5 * D).astype(np.float32)
+        distances_all = (0.5 * D).astype(np.float32)
     del X, D
 
-    # Build graph and keep min hamming per edge.
+    # Build graph and keep the minimum distance per undirected edge.
     G = nx.Graph()
     for i, s in enumerate(sequences):
         G.add_node(i, sequence=s)
 
-    min_hamming = {}
+    min_distance = {}
 
     rng = np.random.default_rng(seed)
     for i in range(n):
         ids = I[i]
-        ds  = hamming_all[i]
+        ds  = distances_all[i]
 
         # filter invalids (-1) and optionally self
         valid = ids >= 0
@@ -1438,25 +1546,28 @@ def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
             if i == j:
                 continue
             u, v = (i, j) if i < j else (j, i)
-            prev = min_hamming.get((u, v))
+            prev = min_distance.get((u, v))
             if prev is None or dij < prev:
-                min_hamming[(u, v)] = dij
+                min_distance[(u, v)] = dij
                 G.add_edge(u, v)
 
-    del I, hamming_all
+    del I, distances_all
 
-    if min_hamming:
-        nx.set_edge_attributes(G, min_hamming, "distance")
+    if min_distance:
+        nx.set_edge_attributes(G, min_distance, "distance")
     _attach_knn_edge_semantics(
         G,
         sequence_length=L,
         constructor=f"knn-faiss-{index_type}-{metric}",
+        distance_geometry=distance_geometry,
     )
     return G
 
 def create_knn_graph(sequences: List[BaseNumpySequence],
                      k: int,
                      *,
+                     embeddings: np.ndarray | None = None,
+                     embedding_domain: Literal["plm", "ohe", "composition"] | None = None,
                      backend: Literal['auto', 'faiss', 'balltree'] = 'auto',
                      index_type: Literal['hnsw', 'flat', 'ivf'] = 'hnsw',
                      faiss_metric: Literal['ip', 'l2'] = 'ip',
@@ -1479,6 +1590,16 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
     k : int
         Positive number of non-self neighbours to connect. Values greater
         than the available population are capped at ``n - 1``.
+
+    embeddings : np.ndarray, optional
+        Finite feature matrix aligned to ``sequences``. When supplied for a
+        PLM, composition, or unspecified embedding domain, kNN is constructed
+        from ordinary Euclidean distances in this matrix. When omitted, or
+        when ``embedding_domain='ohe'``, sequence Hamming geometry is used.
+
+    embedding_domain : {'plm', 'ohe', 'composition'}, optional
+        Scientific domain of ``embeddings``. PLM and composition domains
+        require ``embeddings`` and force Euclidean/L2 neighbour search.
     
     backend : str, default=`auto`
         The computational backend to use. Options are:
@@ -1500,8 +1621,8 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
         The faiss metric. Options are:
         - `ip` : the inner produt.
         - `l2` : the L2 norm. 
-        Use of `ip` guarantees distances are returned / stored as
-        Hamming distances. 
+        This option applies only to sequence/OHE Hamming searches. Continuous
+        embedding searches always use FAISS L2 to preserve Euclidean geometry.
 
     include_self : bool, default=False
         Whether FAISS candidate queries include each sequence itself. Self
@@ -1539,7 +1660,13 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
     """
     _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
 
-    n, sequence_length = _validate_sequence_collection(sequences)
+    use_embedding_geometry = embedding_domain in _EMBEDDING_KNN_DOMAINS or (
+        embeddings is not None and embedding_domain != "ohe"
+    )
+    n, sequence_length = _validate_sequence_collection(
+        sequences,
+        require_aligned=not use_embedding_geometry,
+    )
     k, backend = _validate_neighbour_configuration(
         n_sequences=n,
         k=k,
@@ -1557,6 +1684,16 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
     ):
         raise TypeError("`seed` must be an integer or None.")
 
+    search_features, distance_geometry, search_metric, search_domain = (
+        _prepare_knn_search_space(
+            sequences,
+            embeddings,
+            embedding_domain=embedding_domain,
+            backend=backend,
+            faiss_metric=faiss_metric,
+        )
+    )
+
     if n <= 1:
         graph = nx.Graph()
         for index, sequence in enumerate(sequences):
@@ -1565,14 +1702,23 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
             graph,
             sequence_length=sequence_length,
             constructor=f"knn-{backend}",
+            distance_geometry=distance_geometry,
+        )
+        _attach_knn_search_metadata(
+            graph,
+            backend=backend,
+            metric=search_metric,
+            distance_geometry=distance_geometry,
+            embedding_domain=search_domain,
+            role="graph",
         )
         return graph
 
     if backend == 'faiss':
         G = _create_knn_graph_faiss(
-            sequences, k,
+            sequences, k, search_features, distance_geometry,
             index_type=index_type,
-            metric=faiss_metric,
+            metric=search_metric,
             include_self=include_self,
             use_gpu=use_gpu,
             hnsw_M=hnsw_M,
@@ -1583,12 +1729,22 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
     elif backend == 'balltree':
         G = _create_knn_graph_balltree(sequences,
                                           k,
+                                          search_features,
+                                          distance_geometry,
                                           include_self=include_self,
                                           tie_policy=tie_policy,
                                           tiebuffer=tiebuffer,
                                           seed=seed)
     else:
         raise ValueError(f"Unsupported backend {backend!r}. Expected `auto`, `faiss`, or `balltree`.")
+    _attach_knn_search_metadata(
+        G,
+        backend=backend,
+        metric=search_metric,
+        distance_geometry=distance_geometry,
+        embedding_domain=search_domain,
+        role="graph",
+    )
     # Optionally compute expected Hamming distances if available
     if _compute_hamming_edges and all(
         hasattr(seq, "ungapped_arr") and getattr(seq, "ungapped_arr", None) is not None
@@ -1792,6 +1948,7 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
                                t: Optional[Union[int, float]] = 5,
                                connectivity_threshold: float = 1e-4,
                                *,
+                               embedding_domain: Literal["plm", "ohe", "composition"] | None = None,
                                _compute_hamming_edges: bool = False,
                                **kwargs) -> nx.Graph:
     """
@@ -1836,8 +1993,8 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         The faiss metric. Options are:
         - `ip` : the inner produt.
         - `l2` : the L2 norm. 
-        Use of `ip` guarantees distances are returned / stored as
-        Hamming distances. 
+        Applies to sequence/OHE searches. Continuous embedding prefilters
+        always use L2 to preserve Euclidean geometry.
 
     include_self : bool, default=False
         Whether FAISS candidate queries may include the query point. The final
@@ -1858,6 +2015,11 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         Finite dimensionless diffusion-amplitude threshold in ``[0, 1]`` used
         to define discrete connectivity.
 
+    embedding_domain : {'plm', 'ohe', 'composition'}, optional
+        Domain governing the sparse kNN prefilter. PLM and composition use
+        Euclidean/L2 search in ``embeddings``; OHE uses sequence Hamming
+        geometry. When omitted, supplied embeddings are treated as continuous.
+
     _compute_hamming_edges : bool, default=False
         Reserved compatibility flag. Release builds disable the optional
         post-construction mutation pass.
@@ -1872,7 +2034,13 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         under `sequence`.
     """
     _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
-    n_points, _ = _validate_sequence_collection(sequences)
+    use_embedding_geometry = embedding_domain in _EMBEDDING_KNN_DOMAINS or (
+        embeddings is not None and embedding_domain != "ohe"
+    )
+    n_points, _ = _validate_sequence_collection(
+        sequences,
+        require_aligned=not use_embedding_geometry,
+    )
     requested_k = k
     k, backend = _validate_neighbour_configuration(
         n_sequences=n_points,
@@ -1887,6 +2055,16 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
     )
     use_stationary, t_int = _validate_diffusion_power(t)
     threshold = _validate_connectivity_threshold(connectivity_threshold)
+
+    search_features, search_geometry, search_metric, search_domain = (
+        _prepare_knn_search_space(
+            sequences,
+            embeddings,
+            embedding_domain=embedding_domain,
+            backend=backend,
+            faiss_metric=faiss_metric,
+        )
+    )
 
     if embeddings is None:
         if n_points:
@@ -1909,6 +2087,14 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         power=t_int,
         threshold=threshold,
     )
+    _attach_knn_search_metadata(
+        G,
+        backend=backend,
+        metric=search_metric,
+        distance_geometry=search_geometry,
+        embedding_domain=search_domain,
+        role="prefilter",
+    )
     if n_points <= 1:
         return G
 
@@ -1928,18 +2114,19 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
     # Use balltree algorithm (will fail as shape of embeddings >>>)
     if backend == 'balltree':
         _, neighbour_indices = _find_knn_balltree(
-            embeddings,
+            search_features,
             k,
             tiebuffer,
             include_self=include_self,
+            metric=search_metric,
         )
     
     # Use FAISS algorithm (approx or exact).
     elif backend == 'faiss':
-        _, neighbour_indices = _find_knn_faiss(embeddings,
+        _, neighbour_indices = _find_knn_faiss(search_features,
                                        k,
                                        index_type=index_type,
-                                       metric=faiss_metric,
+                                       metric=search_metric,
                                        use_gpu=use_gpu,
                                        hnsw_M=hnsw_M,
                                        include_self=include_self,
@@ -2268,6 +2455,7 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                                              connectivity_threshold: float = 1e-4,
                                              cpus: int = 1,
                                              *,
+                                             embedding_domain: Literal["plm", "ohe", "composition"] | None = None,
                                              evolutionary_time: float = 1.0,
                                              equilibrium_frequencies: Optional[np.ndarray] = None,
                                              _compute_hamming_edges: bool = False,
@@ -2319,8 +2507,8 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         The faiss metric. Options are:
         - `ip` : the inner produt.
         - `l2` : the L2 norm. 
-        Use of `ip` guarantees distances are returned / stored as
-        Hamming distances. 
+        Applies to sequence/OHE searches. Continuous embedding prefilters
+        always use L2 to preserve Euclidean geometry.
 
     include_self : bool, default=False
         Whether the candidate-neighbour query includes each sequence itself.
@@ -2352,6 +2540,11 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         Target number of worker CPUs for Ray alignment tasks. Each task
         consumes a single CPU.
 
+    embedding_domain : {'plm', 'ohe', 'composition'}, optional
+        Domain governing the sparse kNN prefilter. PLM and composition use
+        Euclidean/L2 search in ``embeddings``; OHE uses sequence Hamming
+        geometry. When omitted, supplied embeddings are treated as continuous.
+
     evolutionary_time : float, default=1.0
         Evolutionary time used to obtain transition probabilities from the
         instantaneous rate generator. This is distinct from the graph
@@ -2374,7 +2567,13 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         The constructed graph.
     """
     _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
-    n_sequences, _ = _validate_sequence_collection(sequences)
+    use_embedding_geometry = embedding_domain in _EMBEDDING_KNN_DOMAINS or (
+        embeddings is not None and embedding_domain != "ohe"
+    )
+    n_sequences, _ = _validate_sequence_collection(
+        sequences,
+        require_aligned=not use_embedding_geometry,
+    )
     k, backend = _validate_neighbour_configuration(
         n_sequences=n_sequences,
         k=k,
@@ -2397,6 +2596,16 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         raise TypeError("`tau` must be a finite real number greater than zero.") from error
     if not np.isfinite(tau) or tau <= 0.0:
         raise ValueError("`tau` must be finite and greater than zero.")
+
+    search_features, search_geometry, search_metric, search_domain = (
+        _prepare_knn_search_space(
+            sequences,
+            embeddings,
+            embedding_domain=embedding_domain,
+            backend=backend,
+            faiss_metric=faiss_metric,
+        )
+    )
 
     if embeddings is None:
         if n_sequences:
@@ -2427,6 +2636,14 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         power=t_int,
         threshold=thr,
     )
+    _attach_knn_search_metadata(
+        graph,
+        backend=backend,
+        metric=search_metric,
+        distance_geometry=search_geometry,
+        embedding_domain=search_domain,
+        role="prefilter",
+    )
     if n_sequences <= 1:
         return graph
 
@@ -2442,29 +2659,28 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     )
     _logger = logging.getLogger('fitness_landscape')
     _t_knn0 = time.perf_counter(); _c_knn0 = time.process_time()
-    balltree_metric = _resolve_balltree_metric(embeddings)
     metric_used = None
     if backend == 'balltree':
         _, neighbor_indices = _find_knn_balltree(
-            embeddings,
+            search_features,
             k,
             tiebuffer,
             include_self=include_self,
-            metric=balltree_metric,
+            metric=search_metric,
         )
-        metric_used = balltree_metric
+        metric_used = search_metric
     
     # Use FAISS algorithm (approx or exact).
     elif backend == 'faiss':
-        _, neighbor_indices = _find_knn_faiss(embeddings,
+        _, neighbor_indices = _find_knn_faiss(search_features,
                                        k,
                                        index_type=index_type,
-                                       metric=faiss_metric,
+                                       metric=search_metric,
                                        use_gpu=use_gpu,
                                        hnsw_M=hnsw_M,
                                        include_self=include_self,
                                        tiebuffer=tiebuffer) 
-        metric_used = faiss_metric
+        metric_used = search_metric
     _logger.info('kNN prefilter done: backend=%s metric=%s k=%d n=%d wall=%.2fs cpu=%.2fs', backend, metric_used, k, n_sequences, time.perf_counter()-_t_knn0, time.process_time()-_c_knn0)
 
     pairs_to_align = set()
