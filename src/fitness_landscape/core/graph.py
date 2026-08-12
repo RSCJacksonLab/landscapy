@@ -28,6 +28,8 @@ _FAISS_INDEX_TYPES = {"flat", "hnsw", "ivf"}
 _FAISS_METRICS = {"ip", "l2"}
 _TIE_POLICIES = {"all", "min_index", "random"}
 _EMBEDDING_KNN_DOMAINS = {"plm", "composition"}
+_DEFAULT_MAX_DIFFUSION_NNZ = 50_000_000
+_DEFAULT_MAX_DIFFUSION_WORK = 1_000_000_000
 
 
 def _validate_sequence_collection(
@@ -221,6 +223,49 @@ def _validate_connectivity_threshold(value: Any) -> float:
     return threshold
 
 
+def _validate_diffusion_budget(value: Any, *, name: str) -> int:
+    """Return a positive exact-diffusion resource budget."""
+
+    return _validate_integer(value, name=name, minimum=1)
+
+
+def _csr_storage_bytes(n_rows: int, nnz: int) -> int:
+    """Conservatively estimate bytes for one float64 CSR matrix."""
+
+    # SciPy normally uses int32 column indices but may promote to int64 for
+    # very large matrices. Count int64 indices and indptr entries so the
+    # estimate remains conservative across platforms.
+    return int(nnz) * (np.dtype(np.float64).itemsize + np.dtype(np.int64).itemsize) + (
+        int(n_rows) + 1
+    ) * np.dtype(np.int64).itemsize
+
+
+def _raise_diffusion_budget_error(
+    *,
+    stage: str,
+    quantity: str,
+    estimate: int,
+    limit: int,
+) -> None:
+    """Raise an actionable error before exact sparse diffusion exceeds budget."""
+
+    if quantity == "nonzeros":
+        memory = _csr_storage_bytes(0, estimate)
+        detail = f"{estimate:,} nonzeros (at least {memory / 2**30:.2f} GiB per CSR matrix)"
+        option = "max_diffusion_nnz"
+    else:
+        detail = f"{estimate:,} scalar products"
+        option = "max_diffusion_work"
+    raise MemoryError(
+        f"Exact sparse diffusion at {stage} requires {detail}, exceeding "
+        f"`{option}={limit:,}`. Reduce `k`, `t`, or `tiebuffer`, partition the "
+        f"landscape, or deliberately raise `{option}` only after provisioning "
+        "the corresponding memory and compute resources. "
+        "`connectivity_threshold` is applied after exact diffusion and cannot "
+        "reduce intermediate resource use."
+    )
+
+
 def _force_disable_hamming_edge_computation(_requested: bool) -> bool:
     """Normalize the legacy Hamming-edge annotation flag.
 
@@ -360,6 +405,56 @@ def _attach_diffusion_metadata(
     }
 
 
+def _attach_sparse_diffusion_construction_metadata(
+    graph: nx.Graph,
+    *,
+    requested_k: int,
+    effective_k: int,
+    tiebuffer: int,
+    backend: str,
+    index_type: str,
+    max_nnz: int,
+    max_work: int,
+    affinity_nnz: int,
+    transition_nnz: int,
+    kernel_nnz: int,
+    directed_candidates: int,
+    diffusion_work: int,
+) -> None:
+    """Record the sparse scientific-kernel and resource-control contract."""
+
+    largest_matrix_nnz = max(affinity_nnz, transition_nnz, kernel_nnz)
+    graph.graph["diffusion_construction"] = {
+        "affinity_source": "symmetric_union_knn_rbf",
+        "storage": "csr",
+        "diffusion_accuracy": "exact",
+        "requested_k": int(requested_k),
+        "effective_k": int(effective_k),
+        "tiebuffer": int(tiebuffer),
+        "tie_rule": "all_returned_candidates_at_exact_kth_distance",
+        "candidate_backend_approximate": bool(
+            backend == "faiss" and index_type in {"hnsw", "ivf"}
+        ),
+        "candidate_backend": str(backend),
+        "candidate_index_type": str(index_type) if backend == "faiss" else None,
+        "directed_candidates": int(directed_candidates),
+        "affinity_nnz": int(affinity_nnz),
+        "transition_nnz": int(transition_nnz),
+        "kernel_nnz": int(kernel_nnz),
+        "estimated_scalar_products": int(diffusion_work),
+        "max_diffusion_nnz": int(max_nnz),
+        "max_diffusion_work": int(max_work),
+        "largest_matrix_estimated_bytes": _csr_storage_bytes(
+            graph.number_of_nodes(), largest_matrix_nnz
+        ),
+        # Scaling the largest CSR estimate by four accounts conservatively for
+        # the affinity, transition, current power, and product/kernel matrices
+        # that can coexist during one exact multiplication.
+        "estimated_peak_working_bytes": 4
+        * _csr_storage_bytes(graph.number_of_nodes(), largest_matrix_nnz),
+    }
+
+
 def _attach_unit_hamming_edge_attributes(
     G: nx.Graph,
     sequences: Sequence[BaseNumpySequence],
@@ -474,6 +569,105 @@ def _reversible_lazy_transition(
     return transition, stationary, component_labels
 
 
+def _sparse_product_requirements(
+    left: csr_matrix,
+    right: csr_matrix,
+    *,
+    max_nnz: int,
+    max_work: int,
+    stage: str,
+    work_already: int = 0,
+) -> tuple[int, int]:
+    """Count exact product structure and arithmetic before multiplication.
+
+    The marker array is O(number of columns), while traversal stops as soon as
+    either public feasibility budget is exceeded. This prevents SciPy from
+    allocating an unexpectedly dense sparse-product result merely to discover
+    that the exact request is infeasible.
+    """
+
+    left = left.tocsr()
+    right = right.tocsr()
+    if left.shape[1] != right.shape[0]:
+        raise ValueError("Sparse diffusion product matrices are misaligned.")
+
+    n_rows, n_cols = left.shape[0], right.shape[1]
+    marker = np.full(n_cols, -1, dtype=np.int64)
+    output_nnz = 0
+    scalar_products = 0
+    right_row_nnz = np.diff(right.indptr)
+
+    for row in range(n_rows):
+        intermediates = left.indices[left.indptr[row] : left.indptr[row + 1]]
+        row_work = int(right_row_nnz[intermediates].sum(dtype=np.int64))
+        scalar_products += row_work
+        if work_already + scalar_products > max_work:
+            _raise_diffusion_budget_error(
+                stage=stage,
+                quantity="work",
+                estimate=work_already + scalar_products,
+                limit=max_work,
+            )
+
+        row_nnz = 0
+        for middle in intermediates:
+            columns = right.indices[
+                right.indptr[middle] : right.indptr[middle + 1]
+            ]
+            unseen = marker[columns] != row
+            if np.any(unseen):
+                new_columns = columns[unseen]
+                marker[new_columns] = row
+                row_nnz += int(new_columns.size)
+                if row_nnz == n_cols:
+                    break
+
+        output_nnz += row_nnz
+        if output_nnz > max_nnz:
+            _raise_diffusion_budget_error(
+                stage=stage,
+                quantity="nonzeros",
+                estimate=output_nnz,
+                limit=max_nnz,
+            )
+
+    return output_nnz, scalar_products
+
+
+def _checked_sparse_matrix_power(
+    transition: csr_matrix,
+    power: int,
+    *,
+    max_nnz: int,
+    max_work: int,
+) -> tuple[csr_matrix, int]:
+    """Compute an exact sparse power after per-step structure/work checks."""
+
+    n_states = transition.shape[0]
+    powered = sparse.eye(n_states, format="csr", dtype=np.float64)
+    total_work = 0
+    for step in range(1, power + 1):
+        _, step_work = _sparse_product_requirements(
+            powered,
+            transition,
+            max_nnz=max_nnz,
+            max_work=max_work,
+            stage=f"power step {step}/{power}",
+            work_already=total_work,
+        )
+        total_work += step_work
+        powered = (powered @ transition).tocsr()
+        powered.eliminate_zeros()
+        if powered.nnz > max_nnz:  # defensive against unexpected SciPy structure
+            _raise_diffusion_budget_error(
+                stage=f"power step {step}/{power}",
+                quantity="nonzeros",
+                estimate=powered.nnz,
+                limit=max_nnz,
+            )
+    return powered, total_work
+
+
 def _reversible_diffusion_kernel(
     transition: np.ndarray | sparse.spmatrix,
     stationary: np.ndarray,
@@ -481,6 +675,9 @@ def _reversible_diffusion_kernel(
     *,
     stationary_limit: bool,
     power: int | None,
+    max_nnz: int | None = None,
+    max_work: int | None = None,
+    _diagnostics: dict[str, int] | None = None,
 ) -> np.ndarray | csr_matrix:
     """Return a symmetric stationary-measure diffusion kernel.
 
@@ -502,6 +699,47 @@ def _reversible_diffusion_kernel(
         raise ValueError("Stationary probabilities must be positive and sum to one.")
 
     if stationary_limit:
+        if sparse.issparse(transition) and max_nnz is not None:
+            component_sizes = np.bincount(labels)
+            required_nnz = sum(int(size) ** 2 for size in component_sizes)
+            if required_nnz > max_nnz:
+                _raise_diffusion_budget_error(
+                    stage="componentwise stationary limit",
+                    quantity="nonzeros",
+                    estimate=required_nnz,
+                    limit=max_nnz,
+                )
+            if max_work is not None and required_nnz > max_work:
+                _raise_diffusion_budget_error(
+                    stage="componentwise stationary limit",
+                    quantity="work",
+                    estimate=required_nnz,
+                    limit=max_work,
+                )
+            if _diagnostics is not None:
+                _diagnostics["estimated_scalar_products"] = required_nnz
+
+            rows = np.empty(required_nnz, dtype=np.int64)
+            cols = np.empty(required_nnz, dtype=np.int64)
+            values = np.empty(required_nnz, dtype=np.float64)
+            cursor = 0
+            component_order = np.argsort(labels, kind="stable")
+            offsets = np.concatenate(([0], np.cumsum(component_sizes)))
+            for start, stop in zip(offsets[:-1], offsets[1:]):
+                indices = component_order[start:stop]
+                mass = float(probabilities[indices].sum())
+                root = np.sqrt(probabilities[indices])
+                for local_row, row in enumerate(indices):
+                    next_cursor = cursor + indices.size
+                    rows[cursor:next_cursor] = row
+                    cols[cursor:next_cursor] = indices
+                    values[cursor:next_cursor] = root[local_row] * root / mass
+                    cursor = next_cursor
+            return coo_matrix(
+                (values, (rows, cols)),
+                shape=(n_states, n_states),
+            ).tocsr()
+
         kernel = np.zeros((n_states, n_states), dtype=np.float64)
         for component in np.unique(labels):
             indices = np.flatnonzero(labels == component)
@@ -515,9 +753,21 @@ def _reversible_diffusion_kernel(
     root = np.sqrt(probabilities)
     inverse_root = 1.0 / root
     if sparse.issparse(transition):
-        powered = sparse.eye(n_states, format="csr")
-        for _ in range(power):
-            powered = powered @ transition
+        if max_nnz is not None:
+            if max_work is None:
+                raise ValueError("`max_work` is required when `max_nnz` is set.")
+            powered, total_work = _checked_sparse_matrix_power(
+                transition.tocsr(),
+                power,
+                max_nnz=max_nnz,
+                max_work=max_work,
+            )
+            if _diagnostics is not None:
+                _diagnostics["estimated_scalar_products"] = total_work
+        else:
+            powered = sparse.eye(n_states, format="csr")
+            for _ in range(power):
+                powered = powered @ transition
         kernel = sparse.diags(root) @ powered @ sparse.diags(inverse_root)
         kernel = (0.5 * (kernel + kernel.T)).tocsr()
         if kernel.data.size:
@@ -548,6 +798,105 @@ def _threshold_undirected_kernel(
     mask = np.triu(values > threshold, k=1)
     rows, cols = np.where(mask)
     return rows, cols, values[rows, cols]
+
+
+def _select_diffusion_knn_candidates(
+    search_features: np.ndarray,
+    neighbour_indices: np.ndarray,
+    *,
+    k: int,
+    distance_geometry: Literal["hamming", "euclidean"],
+) -> list[np.ndarray]:
+    """Rerank backend candidates and retain all observed ties at rank ``k``.
+
+    Approximate backends define the candidate pool, but distances and ties are
+    evaluated exactly in the declared search geometry. ``tiebuffer`` affects
+    the scientific graph only when the extra returned candidates tie the kth
+    candidate; it cannot recover neighbours omitted by an approximate index.
+    """
+
+    features = np.asarray(search_features)
+    selected: list[np.ndarray] = []
+    for row, raw_candidates in enumerate(np.asarray(neighbour_indices)):
+        candidates = np.asarray(raw_candidates, dtype=np.int64)
+        candidates = candidates[(candidates >= 0) & (candidates != row)]
+        if candidates.size:
+            candidates = np.unique(candidates)
+        if candidates.size == 0:
+            selected.append(np.empty(0, dtype=np.int64))
+            continue
+
+        if distance_geometry == "hamming":
+            distances = np.mean(features[candidates] != features[row], axis=1)
+        else:
+            deltas = features[candidates] - features[row]
+            distances = np.linalg.norm(deltas, axis=1)
+        order = np.argsort(distances, kind="stable")
+        candidates = candidates[order]
+        distances = distances[order]
+        cutoff = distances[min(k, candidates.size) - 1]
+        tolerance = np.finfo(np.float64).eps * max(1.0, abs(float(cutoff))) * 8.0
+        selected.append(candidates[distances <= cutoff + tolerance])
+    return selected
+
+
+def _sparse_rbf_affinity_from_candidates(
+    embeddings: np.ndarray,
+    candidates_by_row: Sequence[np.ndarray],
+    *,
+    gamma: float,
+    max_nnz: int,
+) -> tuple[csr_matrix, int]:
+    """Construct the symmetric union-kNN RBF affinity without densification."""
+
+    n_points = embeddings.shape[0]
+    directed_nnz = int(sum(len(candidates) for candidates in candidates_by_row))
+    symmetric_bound = min(n_points * n_points, 2 * directed_nnz)
+    transition_bound = min(n_points * n_points, symmetric_bound + n_points)
+    if transition_bound > max_nnz:
+        _raise_diffusion_budget_error(
+            stage="kNN affinity and lazy transition",
+            quantity="nonzeros",
+            estimate=transition_bound,
+            limit=max_nnz,
+        )
+
+    row_parts = []
+    col_parts = []
+    value_parts = []
+    for row, candidates in enumerate(candidates_by_row):
+        candidates = np.asarray(candidates, dtype=np.int64)
+        if candidates.size == 0:
+            continue
+        deltas = embeddings[candidates] - embeddings[row]
+        squared_distances = np.einsum("ij,ij->i", deltas, deltas)
+        values = np.exp(-float(gamma) * squared_distances)
+        keep = np.isfinite(values) & (values > 0.0)
+        if np.any(keep):
+            row_parts.append(np.full(np.count_nonzero(keep), row, dtype=np.int64))
+            col_parts.append(candidates[keep])
+            value_parts.append(values[keep])
+
+    if not row_parts:
+        return csr_matrix((n_points, n_points), dtype=np.float64), directed_nnz
+    directed = coo_matrix(
+        (
+            np.concatenate(value_parts),
+            (np.concatenate(row_parts), np.concatenate(col_parts)),
+        ),
+        shape=(n_points, n_points),
+    ).tocsr()
+    affinity = directed.maximum(directed.T).tocsr()
+    affinity.setdiag(0.0)
+    affinity.eliminate_zeros()
+    if affinity.nnz + n_points > max_nnz:
+        _raise_diffusion_budget_error(
+            stage="kNN affinity and lazy transition",
+            quantity="nonzeros",
+            estimate=affinity.nnz + n_points,
+            limit=max_nnz,
+        )
+    return affinity, directed_nnz
 
 
 def _symmetric_affinity_from_scores(scores: csr_matrix, *, tau: float) -> csr_matrix:
@@ -1947,6 +2296,8 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
                                hnsw_M: int = 32,
                                t: Optional[Union[int, float]] = 5,
                                connectivity_threshold: float = 1e-4,
+                               max_diffusion_nnz: int = _DEFAULT_MAX_DIFFUSION_NNZ,
+                               max_diffusion_work: int = _DEFAULT_MAX_DIFFUSION_WORK,
                                *,
                                embedding_domain: Literal["plm", "ohe", "composition"] | None = None,
                                _compute_hamming_edges: bool = False,
@@ -1954,8 +2305,9 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
     """
     Construct a reversible undirected diffusion graph in embedding space.
 
-    RBF affinities define a lazy detailed-balance transition. Edge weights are
-    the symmetric stationary-measure kernel
+    RBF affinities on the symmetric union of kNN candidates define a sparse
+    lazy detailed-balance transition. Edge weights are the exact symmetric
+    stationary-measure kernel
     ``Pi^(1/2) P^t Pi^(-1/2)`` after thresholding.
 
     Parameters
@@ -1967,11 +2319,14 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         Finite two-dimensional sequence embeddings indexed according to
         sequence order.
 
-    k : int, default=`5`
-        Nearest neighbors to scale the rbf gamma parameter.
+    k : int, default=128
+        Non-self neighbours defining each directed candidate set. Their
+        undirected union supports the sparse RBF affinity and also sets its
+        global bandwidth.
 
     tiebuffer : int, default=0
-        Additional nearest-neighbour candidates retained for tie handling.
+        Additional backend hits inspected for candidates tied at the exact kth
+        distance. Non-tied buffered candidates do not enter the affinity.
 
     backend : str, default=`auto`
         The computational backend to use. Options are:
@@ -2015,6 +2370,15 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         Finite dimensionless diffusion-amplitude threshold in ``[0, 1]`` used
         to define discrete connectivity.
 
+    max_diffusion_nnz : int, default=50000000
+        Maximum nonzeros allowed in any exact sparse affinity, transition, or
+        diffusion-power matrix. The constructor raises ``MemoryError`` before
+        a multiplication whose exact structural result exceeds this budget.
+
+    max_diffusion_work : int, default=1000000000
+        Maximum cumulative scalar products allowed for the exact sparse matrix
+        power. This is a work guard, not a numerical approximation control.
+
     embedding_domain : {'plm', 'ohe', 'composition'}, optional
         Domain governing the sparse kNN prefilter. PLM and composition use
         Euclidean/L2 search in ``embeddings``; OHE uses sequence Hamming
@@ -2055,6 +2419,14 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
     )
     use_stationary, t_int = _validate_diffusion_power(t)
     threshold = _validate_connectivity_threshold(connectivity_threshold)
+    max_diffusion_nnz = _validate_diffusion_budget(
+        max_diffusion_nnz,
+        name="max_diffusion_nnz",
+    )
+    max_diffusion_work = _validate_diffusion_budget(
+        max_diffusion_work,
+        name="max_diffusion_work",
+    )
 
     search_features, search_geometry, search_metric, search_domain = (
         _prepare_knn_search_space(
@@ -2096,13 +2468,22 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         role="prefilter",
     )
     if n_points <= 1:
+        _attach_sparse_diffusion_construction_metadata(
+            G,
+            requested_k=int(requested_k),
+            effective_k=k,
+            tiebuffer=tiebuffer,
+            backend=backend,
+            index_type=index_type,
+            max_nnz=max_diffusion_nnz,
+            max_work=max_diffusion_work,
+            affinity_nnz=0,
+            transition_nnz=n_points,
+            kernel_nnz=n_points,
+            directed_candidates=0,
+            diffusion_work=0,
+        )
         return G
-
-    sklearn_pairwise = require_optional(
-        "sklearn.metrics.pairwise",
-        extra="knn",
-        purpose="diffusion embedding graph construction",
-    )
 
     k_for_scale = k
     if int(requested_k) >= n_points and k_for_scale == n_points - 1:
@@ -2112,10 +2493,14 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         k_for_scale = max(1, int(np.sqrt(n_points)))
     
     # Use balltree algorithm (will fail as shape of embeddings >>>)
+    # The backend's ``include_self=True`` query capacity counts the query point
+    # itself. Ask for one additional hit so public ``k`` continues to denote
+    # non-self candidates in either mode.
+    backend_query_k = k + int(include_self)
     if backend == 'balltree':
         _, neighbour_indices = _find_knn_balltree(
             search_features,
-            k,
+            backend_query_k,
             tiebuffer,
             include_self=include_self,
             metric=search_metric,
@@ -2124,7 +2509,7 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
     # Use FAISS algorithm (approx or exact).
     elif backend == 'faiss':
         _, neighbour_indices = _find_knn_faiss(search_features,
-                                       k,
+                                       backend_query_k,
                                        index_type=index_type,
                                        metric=search_metric,
                                        use_gpu=use_gpu,
@@ -2132,17 +2517,24 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
                                        include_self=include_self,
                                        tiebuffer=tiebuffer) 
 
+    candidates_by_row = _select_diffusion_knn_candidates(
+        search_features,
+        neighbour_indices,
+        k=k,
+        distance_geometry=search_geometry,
+    )
+
     # Evaluate scale in a common Euclidean unit after the requested backend
     # has selected and ordered candidates. This avoids interpreting FAISS
     # inner-product scores or squared-L2 scores as ordinary distances.
     sigma = np.zeros(n_points, dtype=np.float64)
     for row in range(n_points):
-        candidates = np.asarray(neighbour_indices[row], dtype=np.int64)
-        candidates = candidates[(candidates >= 0) & (candidates != row)]
+        candidates = candidates_by_row[row]
         if candidates.size:
-            scale_index = min(k_for_scale, candidates.size) - 1
-            neighbour = int(candidates[scale_index])
-            sigma[row] = float(np.linalg.norm(embeddings[row] - embeddings[neighbour]))
+            distances = np.linalg.norm(embeddings[candidates] - embeddings[row], axis=1)
+            distances.sort()
+            scale_index = min(k_for_scale, distances.size) - 1
+            sigma[row] = float(distances[scale_index])
     pos = sigma[np.isfinite(sigma) & (sigma > 0)]
 
     if pos.size == 0:
@@ -2153,17 +2545,26 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
             median_sigma_sq = 1.0
 
     gamma = 1.0 / (2 * median_sigma_sq)
-    kernel_matrix = sklearn_pairwise.rbf_kernel(embeddings, gamma=gamma)
+    affinity_matrix, directed_candidates = _sparse_rbf_affinity_from_candidates(
+        embeddings,
+        candidates_by_row,
+        gamma=gamma,
+        max_nnz=max_diffusion_nnz,
+    )
     
     transition_matrix, stationary, component_labels = _reversible_lazy_transition(
-        kernel_matrix
+        affinity_matrix
     )
+    diffusion_diagnostics: dict[str, int] = {}
     diffusion_kernel = _reversible_diffusion_kernel(
         transition_matrix,
         stationary,
         component_labels,
         stationary_limit=use_stationary,
         power=t_int,
+        max_nnz=max_diffusion_nnz,
+        max_work=max_diffusion_work,
+        _diagnostics=diffusion_diagnostics,
     )
     rows, cols, edge_weights = _threshold_undirected_kernel(
         diffusion_kernel,
@@ -2186,6 +2587,21 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         use_stationary=use_stationary,
         power=t_int,
         threshold=threshold,
+    )
+    _attach_sparse_diffusion_construction_metadata(
+        G,
+        requested_k=int(requested_k),
+        effective_k=k,
+        tiebuffer=tiebuffer,
+        backend=backend,
+        index_type=index_type,
+        max_nnz=max_diffusion_nnz,
+        max_work=max_diffusion_work,
+        affinity_nnz=affinity_matrix.nnz,
+        transition_nnz=transition_matrix.nnz,
+        kernel_nnz=diffusion_kernel.nnz,
+        directed_candidates=directed_candidates,
+        diffusion_work=diffusion_diagnostics["estimated_scalar_products"],
     )
     
     # Optionally compute expected Hamming distances if available

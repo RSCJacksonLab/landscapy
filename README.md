@@ -113,6 +113,9 @@ For nearest-neighbour graphs, `embedding_domain="plm"` uses Euclidean
 distances in the supplied or computed PLM embeddings. The same domain-aware
 geometry is used by sparse kNN prefilters in diffusion constructors; see the
 [kNN embedding-domain contract](docs/knn_embedding_domains.md).
+Embedding diffusion evaluates its RBF affinity only on that sparse candidate
+graph and uses resource-guarded exact sparse powers, avoiding dense `n x n`
+kernel construction.
 
 ## Portable landscape export
 

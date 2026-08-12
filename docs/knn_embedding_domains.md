@@ -18,6 +18,14 @@ implementation used for OHE/Hamming searches. FAISS squared-L2 outputs are
 converted back to ordinary Euclidean distances before they are stored on a
 direct kNN graph.
 
+For embedding diffusion, the returned neighbours support the sparse RBF
+affinity after exact reranking and kth-distance tie handling. Thus `k` changes
+the scientific kernel support. `tiebuffer` can add tied candidates but does not
+add farther candidates. HNSW and IVF can omit exact neighbours, so their
+candidate support—and therefore their kernel—is explicitly approximate; flat
+FAISS and BallTree provide exact candidate searches. Diffusion itself is exact
+conditional on that support.
+
 PLM kNN graphs therefore do not require aligned or equal-length protein
 sequences, provided the embedding matrix has one finite row per sequence. OHE
 and sequence-Hamming graphs still require a common aligned length.
