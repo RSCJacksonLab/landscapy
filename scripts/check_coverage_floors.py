@@ -11,7 +11,6 @@ MINIMUM_LINE_COVERAGE = {
     "src/fitness_landscape/analysis/adaptive_walk.py": 74.0,
     "src/fitness_landscape/analysis/dirichlet_energy.py": 44.0,
     "src/fitness_landscape/analysis/epistasis.py": 84.0,
-    "src/fitness_landscape/analysis/persistent_homology.py": 59.0,
     "src/fitness_landscape/analysis/statistics.py": 53.0,
 }
 

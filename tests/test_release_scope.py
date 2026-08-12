@@ -20,11 +20,15 @@ def test_release_api_excludes_deferred_features():
     assert not hasattr(fitness_landscape, "DirectedFitnessLandscape")
     assert not hasattr(fitness_landscape.analysis, "cross_spectral_coherence")
     assert not hasattr(fitness_landscape.analysis, "calculate_local_bottleneck")
+    assert not hasattr(fitness_landscape.analysis, "compute_persistent_homology")
     assert not hasattr(FitnessLandscape, "plot")
 
     assert importlib.util.find_spec("fitness_landscape.core.digraph") is None
     assert importlib.util.find_spec("fitness_landscape.analysis.bottleneck") is None
     assert importlib.util.find_spec("fitness_landscape.analysis.coupling") is None
+    assert importlib.util.find_spec(
+        "fitness_landscape.analysis.persistent_homology"
+    ) is None
     visualization_spec = importlib.util.find_spec("fitness_landscape.visualization")
     assert visualization_spec is None or visualization_spec.loader is None
 

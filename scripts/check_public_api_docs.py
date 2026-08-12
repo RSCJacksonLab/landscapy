@@ -53,7 +53,6 @@ PUBLIC_EXPORTS: dict[str, tuple[str, ...]] = {
         "calculate_ruggedness_autocorrelation_analytical",
         "calculate_ruggedness_autocorrelation_stochastic",
         "category_boundary_crossing_times",
-        "compute_persistent_homology",
         "compute_ruggedness_diffusion_scale",
         "compute_ruggedness_variance_energy",
         "fit_t_bayesian_laplace",

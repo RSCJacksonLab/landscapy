@@ -22,7 +22,6 @@ from fitness_landscape.analysis.epistasis import (
     calculate_epistasis_regression,
     calculate_epistasis_walsh,
 )
-from fitness_landscape.analysis.persistent_homology import compute_persistent_homology
 from fitness_landscape.analysis.statistics import (
     analyze_fitness_distribution,
     hypothesis_testing,
@@ -165,17 +164,6 @@ def test_additive_landscape_has_zero_second_order_epistasis(
 
     assert result["by_order"][2]
     assert max(abs(value) for value in result["by_order"][2].values()) < 1e-12
-
-
-def test_persistent_homology_of_square_has_one_essential_component(
-    additive_square_landscape,
-):
-    result = compute_persistent_homology(additive_square_landscape, max_dim=1)
-
-    assert result["betti_numbers"] == [1]
-    assert result["stats"]["by_dim"]["dim_0"]["count"] == 3
-    assert result["stats"]["by_dim"]["dim_0"]["total_persistence"] == 3.0
-    assert result["stats"]["global"]["n_infinite_features"] == 1
 
 
 def test_distribution_summary_has_known_moments(additive_square_landscape):

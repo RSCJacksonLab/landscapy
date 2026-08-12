@@ -58,4 +58,5 @@ All notable changes to Landscapy are documented here.
 - Directed landscapes and directed-landscape CLI commands.
 - Bottleneck analysis.
 - Coupling analysis.
+- Persistent-homology analysis; TDA graph construction remains supported.
 - Built-in visualisation and plotting.

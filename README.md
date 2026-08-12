@@ -15,7 +15,8 @@ The following experimental areas are not part of this release:
 
 - directed graphs and directed fitness landscapes;
 - bottleneck analysis;
-- coupling analysis; and
+- coupling analysis;
+- persistent-homology analysis; and
 - built-in plotting or interactive visualisation.
 
 Those areas are maintained independently on feature branches so that they do
@@ -133,7 +134,7 @@ resistance and disconnected-category aggregation follow the
   undirected graph construction, and `FitnessLandscape`.
 - `fitness_landscape.models`: NK, Rough Mount Fuji, and elementary landscapes.
 - `fitness_landscape.analysis`: ruggedness, epistasis, adaptive walks,
-  statistics, diffusion scale, persistent homology, and alignment metrics.
+  statistics, diffusion scale, and alignment metrics.
 - `fitness_landscape.transforms`: Walsh-Hadamard, eigenmode, and graph Fourier
   transforms.
 - `fitness_landscape.phylo`: phylogenetic inference and ancestral-state

@@ -24,7 +24,6 @@ _EXPORTS = {
     "calculate_ruggedness_autocorrelation_analytical": "random_walk",
     "calculate_ruggedness_autocorrelation_stochastic": "random_walk",
     "category_boundary_crossing_times": "random_walk",
-    "compute_persistent_homology": "persistent_homology",
     "compute_ruggedness_diffusion_scale": "diffusion_scale",
     "compute_ruggedness_variance_energy": "diffusion_scale",
     "fit_t_bayesian_laplace": "diffusion_scale",
