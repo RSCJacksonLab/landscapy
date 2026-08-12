@@ -65,6 +65,9 @@ All notable changes to Landscapy are documented here.
   the directly imported `tqdm` embedding dependency, constrained Python 3.11 to
   a compatible `piqtree`, and gated FAISS wheels by supported OS/architecture.
 - Added actionable CPU and BallTree fallbacks to unavailable FAISS diagnostics.
+- Consolidated generalized NK construction in `create_gnk_landscape`, repaired
+  uniform and per-site multiallelic sequence construction and metadata, and
+  made `create_nk_multi_landscape` a deprecated compatibility alias.
 
 ### Removed
 

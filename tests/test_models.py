@@ -2,7 +2,12 @@ import numpy as np
 import pytest
 import networkx as nx
 
-from fitness_landscape.models.nk import create_gnk_landscape, create_nk_binary_landscape
+from fitness_landscape.models.nk import (
+    create_gnk_landscape,
+    create_nk_binary_landscape,
+    create_nk_multi_landscape,
+    generate_NK_states,
+)
 from fitness_landscape.models.rmf import create_rmf_landscape
 from fitness_landscape.models.elementary_landscape import create_elementary_landscape
 from fitness_landscape.core.sequence import (
@@ -21,8 +26,7 @@ def test_gnk_binary_default():
     """
     landscape = create_gnk_landscape(N=4, K=1, alphabet=[0, 1], seed=42)
     assert len(landscape.sequences) == 16  # 2^4
-    # Updated Assertion: Check for the base class
-    assert isinstance(landscape.sequences[0], BaseNumpySequence)
+    assert isinstance(landscape.sequences[0], MultialleleSequence)
     assert len(landscape.get_signal()) == 16
 
 def test_gnk_amino_acid_alphabet():
@@ -32,8 +36,7 @@ def test_gnk_amino_acid_alphabet():
     aa_alphabet = AMINO_ACID_ALPHABET[:4] # Use a small subset for speed
     landscape = create_gnk_landscape(N=3, K=1, alphabet=aa_alphabet, seed=42)
     assert len(landscape.sequences) == 64  # 4^3
-    # Updated Assertion: Check for the base class
-    assert isinstance(landscape.sequences[0], BaseNumpySequence)
+    assert isinstance(landscape.sequences[0], MultialleleSequence)
     assert landscape.sequences[0].alphabet == aa_alphabet
     assert len(landscape.get_signal()) == 64
 
@@ -75,7 +78,7 @@ def test_gnk_with_adjacency_matrix():
         [0, 0, 1, 0]
     ])
     
-    landscape = create_gnk_landscape(N=4, K=2, alphabet=[0, 1], adj_mat=adj_mat, seed=42)
+    landscape = create_gnk_landscape(N=4, alphabet=[0, 1], adj_mat=adj_mat, seed=42)
     default_landscape = create_gnk_landscape(N=4, K=2, alphabet=[0, 1], seed=42)
     
     assert not np.array_equal(landscape.get_signal(), default_landscape.get_signal())
@@ -152,7 +155,7 @@ def test_gnk_invalid_arguments():
     with pytest.raises(IndexError):
         # Variable site index out of bounds
         create_gnk_landscape(
-            N=1, K=1, alphabet=['A', 'C', 'G'],
+            N=1, K=0, alphabet=['A', 'C', 'G'],
             base_sequence=['A', 'C', 'G'], variable_sites=[3]
         )
 
@@ -430,3 +433,407 @@ def test_gnk_dict_alphabet_missing_site_raises():
     }
     with pytest.raises(ValueError):
         create_gnk_landscape(N=3, K=1, alphabet=per_site_incomplete, seed=1)
+
+
+@pytest.mark.parametrize(
+    ("factory", "kwargs", "expected_sequences", "expected_fitness"),
+    [
+        (
+            create_nk_binary_landscape,
+            {"N": 2, "K": 0, "seed": 7},
+            [[0, 0], [0, 1], [1, 0], [1, 1]],
+            [
+                0.06959004147242326,
+                -0.20564920865487757,
+                0.2056492086548775,
+                -0.06959004147242331,
+            ],
+        ),
+        (
+            create_gnk_landscape,
+            {"N": 2, "K": 1, "alphabet": ["A", "B", "C"], "seed": 7},
+            [
+                ["A", "A"],
+                ["A", "B"],
+                ["A", "C"],
+                ["B", "A"],
+                ["B", "B"],
+                ["B", "C"],
+                ["C", "A"],
+                ["C", "B"],
+                ["C", "C"],
+            ],
+            [
+                -0.004375441875754615,
+                0.02515104271190155,
+                0.1137008695598945,
+                -0.2867708431949958,
+                -0.17826935620301249,
+                0.3836362128153788,
+                -0.40904519326677447,
+                0.1119976870704113,
+                0.24397502238295116,
+            ],
+        ),
+        (
+            create_gnk_landscape,
+            {
+                "N": 2,
+                "K": 1,
+                "alphabet": {0: ["A", "B"], 1: ["x", "y", "z"]},
+                "seed": 7,
+            },
+            [
+                ["A", "x"],
+                ["A", "y"],
+                ["A", "z"],
+                ["B", "x"],
+                ["B", "y"],
+                ["B", "z"],
+            ],
+            [
+                -0.21564278288002167,
+                0.3163184463956683,
+                0.008535890067111002,
+                -0.00760536427846345,
+                -0.14677254958766942,
+                0.04516636028337509,
+            ],
+        ),
+        (
+            create_gnk_landscape,
+            {
+                "N": 2,
+                "K": 0,
+                "alphabet": {0: ["A", "B"], 2: ["C", "D"]},
+                "base_sequence": "AxC",
+                "variable_sites": [0, 2],
+                "seed": 7,
+            },
+            [
+                ["A", "x", "C"],
+                ["A", "x", "D"],
+                ["B", "x", "C"],
+                ["B", "x", "D"],
+            ],
+            [
+                0.06959004147242326,
+                -0.20564920865487757,
+                0.2056492086548775,
+                -0.06959004147242331,
+            ],
+        ),
+        (
+            create_gnk_landscape,
+            {
+                "N": 3,
+                "alphabet": ["A", "B"],
+                "adj_mat": np.array(
+                    [[0, 1, 0], [1, 0, 1], [0, 1, 0]]
+                ),
+                "seed": 7,
+            },
+            [
+                ["A", "A", "A"],
+                ["A", "A", "B"],
+                ["A", "B", "A"],
+                ["A", "B", "B"],
+                ["B", "A", "A"],
+                ["B", "A", "B"],
+                ["B", "B", "A"],
+                ["B", "B", "B"],
+            ],
+            [
+                -0.12366718604875147,
+                0.1506880912142036,
+                0.19607554609599898,
+                0.12250440285717244,
+                -0.17177077161712617,
+                0.18344315675654724,
+                -0.1926056582079065,
+                -0.1646675810501379,
+            ],
+        ),
+    ],
+    ids=["binary", "uniform", "per-site", "base-sequence", "adjacency"],
+)
+def test_nk_known_answers_and_reproducibility(
+    factory,
+    kwargs,
+    expected_sequences,
+    expected_fitness,
+):
+    first = factory(**kwargs)
+    second = factory(**kwargs)
+
+    assert [sequence.to_array().tolist() for sequence in first.sequences] == (
+        expected_sequences
+    )
+    np.testing.assert_allclose(first.get_signal(), expected_fitness, atol=1e-14)
+    np.testing.assert_array_equal(first.get_signal(), second.get_signal())
+
+
+def test_generate_nk_states_uses_the_authoritative_generator():
+    sequences, fitness = generate_NK_states(
+        N=2,
+        K=0,
+        alphabet=[0, 1],
+        seed=7,
+    )
+
+    assert sequences.tolist() == [[0, 0], [0, 1], [1, 0], [1, 1]]
+    np.testing.assert_allclose(
+        fitness,
+        [
+            0.06959004147242326,
+            -0.20564920865487757,
+            0.2056492086548775,
+            -0.06959004147242331,
+        ],
+        atol=1e-14,
+    )
+
+
+def test_gnk_uniform_metadata_and_sequence_type():
+    landscape = create_gnk_landscape(
+        N=2,
+        K=1,
+        alphabet=["A", "B", "C"],
+        seed=7,
+    )
+    layer = next(iter(landscape.fitness_layers.values()))
+
+    assert all(isinstance(sequence, MultialleleSequence) for sequence in landscape.sequences)
+    assert landscape.sequences[0].alphabet == ["A", "B", "C"]
+    assert layer.metadata["alphabet_type"] == "uniform"
+    assert layer.metadata["alphabet"] == ["A", "B", "C"]
+    assert layer.metadata["alphabet_size"] == 3
+    assert "site_alphabets" not in layer.metadata
+    assert "alphabet_sizes" not in layer.metadata
+
+
+def test_gnk_per_site_metadata_and_full_sequence_alphabet():
+    landscape = create_gnk_landscape(
+        N=2,
+        K=0,
+        alphabet={0: ["A", "B"], 2: ["C", "D"]},
+        base_sequence="AxC",
+        variable_sites=[0, 2],
+        seed=7,
+    )
+    layer = next(iter(landscape.fitness_layers.values()))
+
+    assert all(isinstance(sequence, MultialleleSequence) for sequence in landscape.sequences)
+    assert landscape.sequences[0].alphabet == ["A", "B", "C", "D", "x"]
+    assert layer.metadata["alphabet_type"] == "per-site"
+    assert layer.metadata["site_alphabets"] == {
+        0: ["A", "B"],
+        2: ["C", "D"],
+    }
+    assert layer.metadata["alphabet_sizes"] == {0: 2, 2: 2}
+    assert layer.metadata["variable_sites"] == [0, 2]
+    assert layer.metadata["base_sequence"] == ["A", "x", "C"]
+    assert "alphabet_size" not in layer.metadata
+
+
+def test_irregular_adjacency_metadata_records_actual_degrees():
+    landscape = create_gnk_landscape(
+        N=3,
+        alphabet=["A", "B"],
+        adj_mat=np.array([[0, 1, 0], [1, 0, 1], [0, 1, 0]]),
+        seed=7,
+    )
+    layer = landscape.fitness_layers["nk_adjacency"]
+
+    assert layer.metadata["K"] is None
+    assert layer.metadata["interaction_type"] == "adjacency"
+    assert layer.metadata["interaction_degrees"] == [1, 2, 1]
+
+
+def test_regular_adjacency_infers_k():
+    landscape = create_gnk_landscape(
+        N=3,
+        alphabet=["A", "B"],
+        adj_mat=np.ones((3, 3), dtype=int) - np.eye(3, dtype=int),
+        seed=7,
+    )
+
+    assert landscape.fitness_layers["nk_k=2"].metadata["K"] == 2
+
+
+def test_nk_multi_is_a_deprecated_gnk_compatibility_wrapper():
+    with pytest.warns(DeprecationWarning, match="use create_gnk_landscape"):
+        compatibility = create_nk_multi_landscape(
+            N=2,
+            K=1,
+            alphabet=["A", "B", "C"],
+            seed=7,
+        )
+    authoritative = create_gnk_landscape(
+        N=2,
+        K=1,
+        alphabet=["A", "B", "C"],
+        seed=7,
+    )
+
+    assert all(
+        isinstance(sequence, MultialleleSequence)
+        for sequence in compatibility.sequences
+    )
+    np.testing.assert_array_equal(
+        compatibility.get_signal(),
+        authoritative.get_signal(),
+    )
+    assert compatibility.fitness_layers.keys() == authoritative.fitness_layers.keys()
+    layer_name = next(iter(compatibility.fitness_layers))
+    assert (
+        compatibility.fitness_layers[layer_name].metadata
+        == authoritative.fitness_layers[layer_name].metadata
+    )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error", "message"),
+    [
+        ({"N": 0, "K": 0}, ValueError, "N must be positive"),
+        ({"N": -1, "K": 0}, ValueError, "N must be positive"),
+        ({"N": True, "K": 0}, TypeError, "N must be an integer"),
+        ({"N": 2.5, "K": 0}, TypeError, "N must be an integer"),
+        ({"N": 2, "K": -1}, ValueError, "K must be non-negative"),
+        ({"N": 2, "K": 2}, ValueError, "K must be less than N"),
+        ({"N": 2, "K": True}, TypeError, "K must be an integer"),
+        ({"N": 2, "K": 0.5}, TypeError, "K must be an integer"),
+        ({"N": 2}, ValueError, "Either K or adj_mat must be provided"),
+    ],
+)
+def test_nk_dimension_and_k_validation(kwargs, error, message):
+    with pytest.raises(error, match=message):
+        create_gnk_landscape(alphabet=["A", "B"], **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("variable_sites", "error", "message"),
+    [
+        ([0], ValueError, "Length of variable_sites must equal N"),
+        ([0, 0], ValueError, "variable_sites must contain unique indices"),
+        ([-1, 1], IndexError, "variable_sites indices must be in range"),
+        ([0, 2], IndexError, "variable_sites indices must be in range"),
+        ([0, 1.5], TypeError, "variable site must be an integer"),
+        ([0, True], TypeError, "variable site must be an integer"),
+    ],
+)
+def test_nk_variable_site_validation(variable_sites, error, message):
+    with pytest.raises(error, match=message):
+        create_gnk_landscape(
+            N=2,
+            K=1,
+            alphabet=["A", "B"],
+            variable_sites=variable_sites,
+        )
+
+
+def test_nk_rejects_non_iterable_variable_sites():
+    with pytest.raises(TypeError, match="variable_sites must be an iterable"):
+        create_gnk_landscape(
+            N=2,
+            K=1,
+            alphabet=["A", "B"],
+            variable_sites=1,
+        )
+
+
+@pytest.mark.parametrize(
+    ("alphabet", "error", "message"),
+    [
+        ([], ValueError, "alphabet must not be empty"),
+        (["A", "A"], ValueError, "alphabet values must be unique"),
+        ({0: ["A"], 1: []}, ValueError, r"alphabet\[1\] must not be empty"),
+        (
+            {0: ["A"], 1: ["B", "B"]},
+            ValueError,
+            r"alphabet\[1\] values must be unique",
+        ),
+        (
+            {0: ["A"]},
+            ValueError,
+            "Per-site alphabet missing for variable_sites",
+        ),
+        (
+            {0: [["A"]], 1: ["B"]},
+            TypeError,
+            r"alphabet\[0\] values must be hashable",
+        ),
+    ],
+)
+def test_nk_alphabet_validation(alphabet, error, message):
+    with pytest.raises(error, match=message):
+        create_gnk_landscape(N=2, K=1, alphabet=alphabet)
+
+
+def test_nk_rejects_non_iterable_alphabet():
+    with pytest.raises(TypeError, match="alphabet must be an iterable"):
+        create_gnk_landscape(N=2, K=1, alphabet=2)
+
+
+@pytest.mark.parametrize(
+    ("base_sequence", "message"),
+    [
+        (2, "base_sequence must be a sequence"),
+        ([], "base_sequence must not be empty"),
+        (["X", "B"], r"base_sequence\[0\].*is not in alphabet"),
+    ],
+)
+def test_nk_base_sequence_validation(base_sequence, message):
+    with pytest.raises((TypeError, ValueError), match=message):
+        create_gnk_landscape(
+            N=1,
+            K=0,
+            alphabet=["A", "B"],
+            base_sequence=base_sequence,
+            variable_sites=[0],
+        )
+
+
+@pytest.mark.parametrize(
+    ("adjacency", "message"),
+    [
+        (np.zeros((2, 3)), "adj_mat must have shape"),
+        (np.array([[0, 0.5], [0.5, 0]]), "adj_mat values must be binary"),
+        (np.array([[0, 1], [0, 0]]), "adj_mat must be symmetric"),
+        (np.array([[1, 0], [0, 0]]), "adj_mat diagonal must be zero"),
+    ],
+)
+def test_nk_adjacency_validation(adjacency, message):
+    with pytest.raises(ValueError, match=message):
+        create_gnk_landscape(
+            N=2,
+            alphabet=["A", "B"],
+            adj_mat=adjacency,
+        )
+
+
+def test_nk_rejects_non_comparable_adjacency_values():
+    class NonComparable:
+        def __eq__(self, other):
+            raise TypeError("not comparable")
+
+    adjacency = np.full((2, 2), NonComparable(), dtype=object)
+
+    with pytest.raises(ValueError, match="adj_mat values must be binary"):
+        create_gnk_landscape(
+            N=2,
+            alphabet=["A", "B"],
+            adj_mat=adjacency,
+        )
+
+
+def test_nk_rejects_k_inconsistent_with_adjacency():
+    adjacency = np.array([[0, 1, 0], [1, 0, 1], [0, 1, 0]])
+
+    with pytest.raises(ValueError, match="K must equal every adj_mat row degree"):
+        create_gnk_landscape(
+            N=3,
+            K=1,
+            alphabet=["A", "B"],
+            adj_mat=adjacency,
+        )
