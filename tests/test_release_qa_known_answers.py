@@ -177,12 +177,13 @@ def test_distribution_summary_has_known_moments(additive_square_landscape):
     assert result["skewness"] == pytest.approx(0.0)
 
 
-def test_hypothesis_testing_removes_nan_and_returns_all_requested_tests():
+def test_hypothesis_testing_explicitly_omits_nan_and_returns_requested_tests():
     result = hypothesis_testing(
         groups={
             "low": np.array([0.0, 1.0, np.nan, 2.0]),
             "high": np.array([3.0, 4.0, 5.0]),
-        }
+        },
+        nan_policy="omit",
     )
 
     assert result["group_stats"]["low"]["n"] == 3
@@ -194,14 +195,15 @@ def test_hypothesis_testing_removes_nan_and_returns_all_requested_tests():
 
 
 def test_permutation_test_detects_a_large_location_shift():
-    np.random.seed(7)
     result = permutation_test(
         groups={"low": np.arange(5.0), "high": np.arange(20.0, 25.0)},
         n_permutations=499,
         alternative="two-sided",
+        random_state=7,
     )
 
     comparison = result[("low", "high")]
     assert comparison["observed"] == -20.0
     assert comparison["p_value"] < 0.05
+    assert comparison["p_value"] >= comparison["p_value_resolution"]
     assert comparison["significant"] is True

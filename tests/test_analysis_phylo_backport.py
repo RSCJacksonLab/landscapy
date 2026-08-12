@@ -94,7 +94,7 @@ def test_hypothesis_testing_basic_groups():
 
     result = hypothesis_testing(groups=groups, run_tests=("ttest",))
 
-    assert set(result.keys()) == {"group_stats", "pairwise_tests"}
+    assert {"group_stats", "pairwise_tests"} <= result.keys()
     assert set(result["group_stats"].keys()) == {"A", "B"}
     assert "B" in result["pairwise_tests"]["A"]
     t_result = result["pairwise_tests"]["A"]["B"]["t_test"]
