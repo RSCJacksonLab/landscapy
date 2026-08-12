@@ -205,9 +205,15 @@ def test_embedding_constructor_matches_manual_one_step_kernel():
     )
 
     # k=1 gives sigma values [1, 1, 2], whose median is one.
-    pairwise_squared = (embeddings - embeddings.T) ** 2
-    affinity = np.exp(-0.5 * pairwise_squared)
-    np.fill_diagonal(affinity, 0.0)
+    # The sparse affinity is the symmetric union of directed kNN candidates:
+    # 0 -> 1, 1 -> 0, and 2 -> 1. The non-candidate pair (0, 2) is zero.
+    affinity = np.array(
+        [
+            [0.0, np.exp(-0.5), 0.0],
+            [np.exp(-0.5), 0.0, np.exp(-2.0)],
+            [0.0, np.exp(-2.0), 0.0],
+        ]
+    )
     degrees = affinity.sum(axis=1)
     transition = 0.5 * (np.eye(3) + affinity / degrees[:, None])
     stationary = degrees / degrees.sum()

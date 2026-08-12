@@ -84,6 +84,10 @@ All notable changes to Landscapy are documented here.
   define Euclidean/L2 neighbourhoods for direct kNN graphs and the sparse
   prefilters used by diffusion constructors, while sequence/OHE searches retain
   Hamming geometry.
+- Replaced dense embedding-diffusion RBF, transition, power, and threshold
+  matrices with a sparse union-kNN RBF operator and exact resource-guarded
+  sparse powers; documented candidate/tie/approximation semantics and added
+  scale benchmarks plus bounded-growth failures.
 
 ### Removed
 
