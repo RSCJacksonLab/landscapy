@@ -27,6 +27,21 @@ with external plotting and visualisation tools.
 
 Landscapy supports Python 3.11 and 3.12.
 
+For a standard installation, install every feature supported by the current OS
+except the separately maintained ML export stack:
+
+```bash
+python -m pip install "landscapy[all]"
+```
+
+This is the recommended path for CLI users. It installs the CLI, portable
+Parquet export, kNN and TDA constructors, analyses, CPU parallelism, alignment,
+phylogeny, CPU FAISS where a compatible wheel exists, and protein language-model
+embeddings. It deliberately excludes the `ml` extra and its PyTorch Geometric
+export dependency.
+
+Install only the lightweight core when optional functionality is not required:
+
 ```bash
 python -m pip install landscapy
 ```
@@ -38,7 +53,7 @@ bundles:
 python -m pip install "landscapy[parquet]"
 ```
 
-Optional backends are installed explicitly so the core package remains small:
+Individual extras remain available for constrained environments:
 
 - `knn` for scikit-learn nearest-neighbour and diffusion graphs;
 - `tda` for topological graph construction;
@@ -50,7 +65,22 @@ Optional backends are installed explicitly so the core package remains small:
 - `ml` for embeddings plus PyTorch Geometric export; and
 - `cli` for the command-line entry points.
 
-Install every optional backend with `python -m pip install "landscapy[all]"`.
+`landscapy[ml]` remains an explicit, separate install while its dependency
+contract is revised:
+
+```bash
+python -m pip install "landscapy[ml]"
+```
+
+Always quote an extras expression such as `"landscapy[all]"`; shells including
+zsh otherwise interpret the square brackets as a filename pattern.
+
+FAISS availability depends on upstream binary wheels. `landscapy[all]` installs
+`faiss-cpu` on supported Linux x86-64/ARM64, current macOS Intel/Apple Silicon,
+and Windows x86-64/ARM64 platforms. On other platforms, the comprehensive
+install keeps scikit-learn's portable BallTree backend available. Select it with
+`--backend balltree`. GPU FAISS is not supplied by `faiss-cpu`; when a compatible
+GPU build is unavailable, omit `--use-gpu` to use CPU FAISS or select BallTree.
 
 For development from a checkout:
 
@@ -153,6 +183,20 @@ landscapy --help
 landscapy-evol --help
 landscapy-phylo --help
 ```
+
+Given an aligned protein FASTA file, a minimal portable kNN CLI workflow is:
+
+```bash
+landscapy knn-landscape \
+  --sequences sequences.fasta \
+  --output landscape.pkl \
+  --k 5 \
+  --backend balltree \
+  --embedding-domain ohe
+```
+
+The BallTree example works across supported operating systems and does not
+require a platform-specific FAISS build.
 
 ## Citation
 
