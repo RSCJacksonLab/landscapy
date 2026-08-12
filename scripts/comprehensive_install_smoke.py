@@ -5,8 +5,9 @@ from __future__ import annotations
 import importlib.util
 from importlib.metadata import PackageNotFoundError, version
 import os
+import shutil
 import subprocess
-import sys
+import sysconfig
 import tempfile
 from pathlib import Path
 
@@ -30,11 +31,16 @@ NON_ML_DISTRIBUTIONS = (
 
 
 def _landscapy_executable() -> Path:
+    executable = shutil.which("landscapy")
+    if executable is not None:
+        return Path(executable)
+
     suffix = ".exe" if os.name == "nt" else ""
-    executable = Path(sys.executable).parent / f"landscapy{suffix}"
-    if not executable.is_file():
-        raise AssertionError(f"Landscapy CLI entry point was not installed at {executable}")
-    return executable
+    scripts_directory = Path(sysconfig.get_path("scripts"))
+    installed = scripts_directory / f"landscapy{suffix}"
+    if not installed.is_file():
+        raise AssertionError("Landscapy CLI entry point is not installed")
+    return installed
 
 
 def main() -> None:
