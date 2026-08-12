@@ -51,6 +51,7 @@ PUBLIC_EXPORTS: dict[str, tuple[str, ...]] = {
         "resistance_distance_matrix",
         "category_diffusion_hierarchy",
         "calculate_ruggedness_autocorrelation_analytical",
+        "time_continuous_autocorrelation",
         "calculate_ruggedness_autocorrelation_stochastic",
         "category_boundary_crossing_times",
         "compute_ruggedness_diffusion_scale",
