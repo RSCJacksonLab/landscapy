@@ -30,6 +30,9 @@ jobs:
       - name: Validate the documented 0.9 public API
         run: python scripts/check_public_api_docs.py
 
+      - name: Execute cookbook examples
+        run: python scripts/check_cookbook_examples.py
+
   lint:
     runs-on: ubuntu-latest
 

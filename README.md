@@ -206,6 +206,14 @@ landscapy knn-landscape \
 The BallTree example works across supported operating systems and does not
 require a platform-specific FAISS build.
 
+## Cookbook
+
+The [worked-example cookbook](docs/cookbook/README.md) starts with empirical
+tables and the layered `FitnessLandscape` data model, then covers graph
+construction, topology, and analysis. Every recipe states its assumptions,
+expected outputs, and limits of interpretation, and its executable example is
+checked in CI.
+
 ## Citation
 
 Citation metadata is provided in `CITATION.cff`. Release changes are recorded
