@@ -1,374 +1,580 @@
-import numpy as np
-import random
+"""Factories for binary and generalized NK fitness landscapes."""
 
+from __future__ import annotations
+
+from dataclasses import dataclass
 from itertools import product
-from typing import List, Optional, Union, Dict, Tuple
-from ..core.landscape import FitnessLandscape
+from numbers import Integral
+from typing import Hashable, Iterable, Mapping, Optional, Sequence, Tuple, Union
+import warnings
+
+import numpy as np
+
 from ..core.fitness import NumericFitness
-from ..core.sequence import BaseNumpySequence, BinarySequence, MultialleleSequence
+from ..core.landscape import FitnessLandscape
+from ..core.sequence import BinarySequence, MultialleleSequence
 
 
-def generate_NK_states(N: int,
-                       K: Optional[int] = None,
-                       alphabet: Union[List, Dict[int, List]] = (0, 1),
-                       seed: Optional[int] = None,
-                       adj_mat: Optional[np.ndarray] = None,
-                       base_sequence: Optional[Union[List, str]] = None,
-                       variable_sites: Optional[List[int]] = None) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Function to generate sequences and fitness values for a generalized
-    NK landscape, supporting per-site alphabets and custom interaction
-    matrices on a base sequence indexed by `n`.
+_DEFAULT_GNK_ALPHABET = tuple("ACDEFGHIKLMNPQRSTVWY")
+_Alphabet = Union[Sequence[Hashable], Mapping[int, Sequence[Hashable]]]
+
+
+@dataclass(frozen=True)
+class _NKSpecification:
+    """Validated, normalized inputs for an NK state-space construction."""
+
+    N: int
+    K: int | None
+    site_alphabets: dict[int, tuple[Hashable, ...]]
+    alphabet_type: str
+    variable_sites: tuple[int, ...]
+    base_sequence: tuple[Hashable, ...] | None
+    adjacency: np.ndarray | None
+    interaction_degrees: tuple[int, ...]
+
+
+def _require_integer(value: object, *, name: str) -> int:
+    """Return an integer while rejecting booleans and non-integral values."""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be an integer")
+    return int(value)
+
+
+def _validate_alphabet(
+    values: Iterable[Hashable], *, name: str
+) -> tuple[Hashable, ...]:
+    """Return a non-empty, unique tuple of hashable allele values."""
+    try:
+        alphabet = tuple(values)
+    except TypeError as error:
+        raise TypeError(f"{name} must be an iterable of allele values") from error
+    if not alphabet:
+        raise ValueError(f"{name} must not be empty")
+
+    seen: set[Hashable] = set()
+    for allele in alphabet:
+        try:
+            if allele in seen:
+                raise ValueError(f"{name} values must be unique")
+            seen.add(allele)
+        except TypeError as error:
+            raise TypeError(f"{name} values must be hashable") from error
+    return alphabet
+
+
+def _normalize_variable_sites(
+    N: int,
+    variable_sites: Optional[Sequence[int]],
+    *,
+    sequence_length: int,
+) -> tuple[int, ...]:
+    """Validate and normalize the global coordinates varied by the model."""
+    if variable_sites is None:
+        sites = tuple(range(N))
+    else:
+        try:
+            raw_sites = tuple(variable_sites)
+        except TypeError as error:
+            raise TypeError("variable_sites must be an iterable of integers") from error
+        sites = tuple(
+            _require_integer(site, name="variable site") for site in raw_sites
+        )
+
+    if len(sites) != N:
+        raise ValueError("Length of variable_sites must equal N")
+    if len(set(sites)) != len(sites):
+        raise ValueError("variable_sites must contain unique indices")
+    if any(site < 0 or site >= sequence_length for site in sites):
+        raise IndexError("variable_sites indices must be in range")
+    return sites
+
+
+def _validate_adjacency(adj_mat: object, N: int) -> np.ndarray:
+    """Return a binary, symmetric NK interaction adjacency matrix."""
+    adjacency = np.asarray(adj_mat)
+    if adjacency.shape != (N, N):
+        raise ValueError(f"adj_mat must have shape ({N}, {N}); got {adjacency.shape}")
+    try:
+        is_binary = np.logical_or(adjacency == 0, adjacency == 1)
+    except (TypeError, ValueError) as error:
+        raise ValueError("adj_mat values must be binary (0 or 1)") from error
+    if not np.all(is_binary):
+        raise ValueError("adj_mat values must be binary (0 or 1)")
+    if not np.array_equal(adjacency, adjacency.T):
+        raise ValueError("adj_mat must be symmetric")
+    if np.any(np.diag(adjacency) != 0):
+        raise ValueError("adj_mat diagonal must be zero")
+    return np.array(adjacency, dtype=np.int8, copy=True)
+
+
+def _normalize_nk_specification(
+    N: int,
+    K: Optional[int],
+    alphabet: _Alphabet,
+    adj_mat: Optional[np.ndarray],
+    base_sequence: Optional[Union[Sequence[Hashable], str]],
+    variable_sites: Optional[Sequence[int]],
+) -> _NKSpecification:
+    """Validate user inputs once for every NK entry point."""
+    N = _require_integer(N, name="N")
+    if N <= 0:
+        raise ValueError("N must be positive")
+
+    normalized_k = None
+    if K is not None:
+        normalized_k = _require_integer(K, name="K")
+        if normalized_k < 0:
+            raise ValueError("K must be non-negative")
+        if normalized_k >= N:
+            raise ValueError("K must be less than N")
+
+    if base_sequence is None:
+        base = None
+        sequence_length = N
+    else:
+        try:
+            base = tuple(base_sequence)
+        except TypeError as error:
+            raise TypeError("base_sequence must be a sequence") from error
+        if not base:
+            raise ValueError("base_sequence must not be empty")
+        sequence_length = len(base)
+
+    sites = _normalize_variable_sites(
+        N,
+        variable_sites,
+        sequence_length=sequence_length,
+    )
+
+    if isinstance(alphabet, Mapping):
+        site_alphabets: dict[int, tuple[Hashable, ...]] = {}
+        for raw_site, values in alphabet.items():
+            site = _require_integer(raw_site, name="alphabet site")
+            site_alphabets[site] = _validate_alphabet(
+                values,
+                name=f"alphabet[{site}]",
+            )
+        missing = [site for site in sites if site not in site_alphabets]
+        if missing:
+            raise ValueError(f"Per-site alphabet missing for variable_sites {missing}")
+        site_alphabets = {site: site_alphabets[site] for site in sites}
+        alphabet_type = "per-site"
+    else:
+        uniform_alphabet = _validate_alphabet(alphabet, name="alphabet")
+        site_alphabets = {site: uniform_alphabet for site in sites}
+        alphabet_type = "uniform"
+
+    if base is not None:
+        for site in sites:
+            if base[site] not in site_alphabets[site]:
+                raise ValueError(
+                    f"base_sequence[{site}]={base[site]!r} is not in alphabet[{site}]"
+                )
+
+    adjacency = None
+    if adj_mat is not None:
+        adjacency = _validate_adjacency(adj_mat, N)
+        degrees = tuple(int(value) for value in adjacency.sum(axis=1))
+        if normalized_k is not None and any(
+            degree != normalized_k for degree in degrees
+        ):
+            raise ValueError(
+                "K must equal every adj_mat row degree when both are provided"
+            )
+        if normalized_k is None and len(set(degrees)) == 1:
+            normalized_k = degrees[0]
+    else:
+        if normalized_k is None:
+            raise ValueError("Either K or adj_mat must be provided")
+        degrees = (normalized_k,) * N
+
+    return _NKSpecification(
+        N=N,
+        K=normalized_k,
+        site_alphabets=site_alphabets,
+        alphabet_type=alphabet_type,
+        variable_sites=sites,
+        base_sequence=base,
+        adjacency=adjacency,
+        interaction_degrees=degrees,
+    )
+
+
+def _generate_nk_states(
+    specification: _NKSpecification,
+    *,
+    seed: Optional[int],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Generate the state space and fitness signal for a validated model."""
+    rng = np.random.default_rng(seed)
+    sites = specification.variable_sites
+    variable_alphabets = [specification.site_alphabets[site] for site in sites]
+
+    if specification.base_sequence is None:
+        sequences = np.array(list(product(*variable_alphabets)), dtype=object)
+    else:
+        sequence_rows = []
+        for alleles in product(*variable_alphabets):
+            row = list(specification.base_sequence)
+            for allele, site in zip(alleles, sites):
+                row[site] = allele
+            sequence_rows.append(row)
+        sequences = np.array(sequence_rows, dtype=object)
+
+    allele_maps = {
+        site: {
+            allele: index
+            for index, allele in enumerate(specification.site_alphabets[site])
+        }
+        for site in sites
+    }
+    alphabet_sizes = {site: len(specification.site_alphabets[site]) for site in sites}
+
+    interaction_sites: list[list[int]] = []
+    if specification.adjacency is not None:
+        for local_site, site in enumerate(sites):
+            neighbor_indices = np.flatnonzero(specification.adjacency[local_site])
+            neighbors = [sites[int(index)] for index in neighbor_indices]
+            interaction_sites.append([site, *sorted(neighbors)])
+    else:
+        for site in sites:
+            choices = [candidate for candidate in sites if candidate != site]
+            neighbors = rng.choice(
+                choices,
+                size=specification.K,
+                replace=False,
+            ).tolist()
+            interaction_sites.append([site, *sorted(neighbors)])
+
+    contribution_tables = []
+    for participating_sites in interaction_sites:
+        bases = [alphabet_sizes[site] for site in participating_sites]
+        table = rng.random(int(np.prod(bases, dtype=np.int64)))
+        table -= table.mean()
+        contribution_tables.append((participating_sites, bases, table))
+
+    global_to_local = {site: index for index, site in enumerate(sites)}
+    fitness_values = np.zeros(len(sequences), dtype=float)
+    for row_index, sequence in enumerate(sequences):
+        total = 0.0
+        for participating_sites, bases, table in contribution_tables:
+            if specification.base_sequence is None:
+                alleles = [
+                    sequence[global_to_local[site]] for site in participating_sites
+                ]
+            else:
+                alleles = [sequence[site] for site in participating_sites]
+            digits = [
+                allele_maps[site][allele]
+                for site, allele in zip(participating_sites, alleles)
+            ]
+            table_index = 0
+            for digit, base in zip(digits, bases):
+                table_index = table_index * base + digit
+            total += table[table_index]
+        fitness_values[row_index] = total / specification.N
+
+    return sequences, fitness_values
+
+
+def generate_NK_states(
+    N: int,
+    K: Optional[int] = None,
+    alphabet: _Alphabet = (0, 1),
+    seed: Optional[int] = None,
+    adj_mat: Optional[np.ndarray] = None,
+    base_sequence: Optional[Union[Sequence[Hashable], str]] = None,
+    variable_sites: Optional[Sequence[int]] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Generate generalized NK sequences and their fitness values.
 
     Parameters
     ----------
     N : int
         Number of variable sites.
     K : int, optional
-        Number of interacting neighbors for each variable site. Not
-        required if an adjacency matrix is provided.
-    alphabet : list OR dict[int, list], default=[0,1]
-        - If list: uniform alphabet for all variable sites.
-        - If dict: per-site alphabet for specific global indices.
-          Example: {0:['A','B'], 1:['A','B','C'], 5:['B','C']}
+        Number of interacting neighbours per variable site. Required when
+        ``adj_mat`` is omitted and constrained to ``0 <= K < N``.
+    alphabet : sequence or mapping of int to sequence, default=(0, 1)
+        A uniform ordered alphabet or ordered alphabets keyed by global variable
+        site. Every alphabet must be non-empty and contain unique values.
     seed : int, optional
-        Random seed for reproducibility.
-    adj_mat : np.ndarray, optional
-        (N x N) adjacency matrix over the variable_sites order.
-        If None, K-neighborhood is randomly constructed per variable site.
-    base_sequence : list or str, optional
-        Full template sequence (global coordinates). If provided, only
-        `variable_sites` are varied; otherwise sequences are length N
-        over the variable sites alone.
-    variable_sites : list[int], optional
-        Global indices (0-based) of the sites varied. If None and
-        base_sequence is None, defaults to range(N). If base_sequence is given
-        and variable_sites is None, defaults to the first N indices.
+        Random seed controlling neighbourhood and contribution-table sampling.
+    adj_mat : ndarray, optional
+        Binary symmetric ``(N, N)`` interaction matrix with a zero diagonal.
+    base_sequence : sequence or str, optional
+        Full template sequence. Only ``variable_sites`` are varied.
+    variable_sites : sequence of int, optional
+        Unique global indices of the ``N`` varied sites. Defaults to the first
+        ``N`` positions.
 
     Returns
     -------
-    sequences : np.ndarray
-        Generated sequences. If base_sequence is None, shape is
-        (num_states, N). If base_sequence is provided, shape is
-        (num_states, len(base_sequence)).
-    fitness_values : np.ndarray
-        Array of corresponding fitness values (shape: num_states,).
+    tuple of ndarray
+        State-space array and aligned floating-point fitness array.
     """
-    rng = np.random.default_rng(seed)
-
-    # Validity check base sequence if base_sequence is not none.
-    if base_sequence is not None:
-        if isinstance(base_sequence, str):
-            base_sequence = list(base_sequence)
-        L_total = len(base_sequence)
-        if variable_sites is None:
-            variable_sites = list(range(N))  # “first N sites varied”
-        if len(variable_sites) != N:
-            raise ValueError("Length of variable_sites must equal N when base_sequence is provided.")
-        if any(i >= L_total for i in variable_sites):
-            raise IndexError("All variable_sites must be valid indices in base_sequence.")
-    else:
-        # Treat the NK problem as an N-dimensional space; no base sequence.
-        L_total = N
-        if variable_sites is None:
-            variable_sites = list(range(N))
-        if len(variable_sites) != N:
-            raise ValueError("Length of variable_sites must equal N.")
-
-    # Build per-site alphabets for ALL global indices.
-    if isinstance(alphabet, dict):
-        site_alpha: Dict[int, List] = {int(k): list(v) for k, v in alphabet.items()}
-        
-        # If alphabet is missing for a site in the alphanet Dict, throw error.
-        missing = [i for i in variable_sites if i not in site_alpha]
-        if missing:
-            raise ValueError(
-                f"Per-site alphabet missing for variable_sites {missing}. "
-                "Add them to the `alphabet` dict."
-            )
-        uniform_alpha = None
-    else:
-        # Static alphabet case
-        uniform_alpha = list(alphabet)
-        site_alpha = {i: uniform_alpha for i in variable_sites}
-
-    # Validate base_sequence characters belong to their site alphabets
-    # The base sequence must align to the alphabet dict.
-    if base_sequence is not None:
-        for s in variable_sites:
-            if base_sequence[s] not in site_alpha[s]:
-                raise ValueError(
-                    f"base_sequence[{s}]={base_sequence[s]!r} not in per-site alphabet {site_alpha[s]}."
-                )
-
-    # Build per-site allele maps for fast radix indexing.
-    # Throw error if any sites are empty.
-    allele_map: Dict[int, Dict] = {s: {a: idx for idx, a in enumerate(site_alpha[s])}
-                                   for s in variable_sites}
-    alpha_sizes = {s: len(site_alpha[s]) for s in variable_sites}
-    if any(sz < 1 for sz in alpha_sizes.values()):
-        raise ValueError("Each per-site alphabet must be non-empty.")
-
-    # Build the cartesian set of sequences in NK landscape.
-    # Order the variable sites as given (this is the “local” 0..N-1 order).
-    var_order = list(variable_sites)
-    var_alphs = [site_alpha[s] for s in var_order]
-
-    if base_sequence is not None:
-        # Full-length sequences where only variable_sites vary
-        combos = product(*var_alphs)
-        seqs = []
-        for combo in combos:
-            new_seq = list(base_sequence)  # copy
-            for v, site in zip(combo, var_order):
-                new_seq[site] = v
-            seqs.append(new_seq)
-        sequences = np.array(seqs, dtype=object if any(not isinstance(x, (int, np.integer)) for x in seqs[0]) else None)
-    else:
-        # Sequences are only the variable part; length N of variable sites.
-        combos = product(*var_alphs)
-        sequences = np.array([list(c) for c in combos], dtype=object if any(not isinstance(x, (int, np.integer)) for x in next(iter(var_alphs))) else None)
-
-    num_sequences = len(sequences)
-    if num_sequences == 0:
-        return sequences, np.zeros(0, dtype=float)
-
-    # Build neighbor sets in GLOBAL coordinates (matching full sequence positions) 
-    if adj_mat is not None:
-        if adj_mat.shape != (N, N):
-            raise ValueError(f"adj_mat must be shape ({N},{N}), got {adj_mat.shape}.")
-        neighbor_sets_global: List[List[int]] = []
-        for si, site in enumerate(var_order):
-            nbr_local = np.where(adj_mat[si] == 1)[0]
-            nbr_local = [j for j in nbr_local if j != si]
-            neigh_global = [var_order[j] for j in nbr_local]
-            idxs_global = [site] + sorted(neigh_global)
-            neighbor_sets_global.append(idxs_global)
-    else:
-        if K is None:
-            raise ValueError("Either `K` or `adj_mat` must be provided.")
-        neighbor_sets_global = []
-        for site in var_order:
-            choices = [v for v in var_order if v != site]
-            if K > len(choices):
-                raise ValueError(f"K={K} exceeds available neighbor choices={len(choices)} for site {site}")
-            neigh_global = rng.choice(choices, size=K, replace=False).tolist()
-            idxs_global = [site] + sorted(neigh_global)
-            neighbor_sets_global.append(idxs_global)
-
-    # Build per-site NK tables with mixed-radix (per-site) bases.
-    # Zero-centered.
-    fitness_contrib = []
-    for idxs_global in neighbor_sets_global:
-        # total states = product over bases of participating sites
-        bases = [alpha_sizes[s] for s in idxs_global]
-        total_states = int(np.prod(bases))
-        table = rng.random(total_states)
-        table -= table.mean()
-        fitness_contrib.append((idxs_global, bases, table))
-
-    # Evaluate sequences using mixed-radix indexing
-    fitness_values = np.zeros(num_sequences, dtype=float)
-
-    def _mixed_radix_index(vals,
-                           bases):
-        """
-        Helper function to compute index with left-to-right radix.
-        """
-        idx = 0
-        for v, b in zip(vals, bases):
-            idx = idx * b + v
-        return idx
-
-    if base_sequence is not None:
-        # sequences are full length, read alleles directly by global index
-        for r, seq in enumerate(sequences):
-            total = 0.0
-            for idxs_global, bases, table in fitness_contrib:
-
-                digits = [allele_map[s][seq[s]] for s in idxs_global]
-                total += table[_mixed_radix_index(digits, bases)]
-            fitness_values[r] = total / float(N)
-    else:
-        # sequences are only the variable part in the order var_order
-        # Build a map: global site to local position j in sequences row
-        global_to_local = {s: j for j, s in enumerate(var_order)}
-        for r, seq_var in enumerate(sequences):
-            total = 0.0
-            for idxs_global, bases, table in fitness_contrib:
-                digits = [allele_map[s][seq_var[global_to_local[s]]] for s in idxs_global]
-                total += table[_mixed_radix_index(digits, bases)]
-            fitness_values[r] = total / float(N)
-
-    return sequences, fitness_values
-
-def create_gnk_landscape(N: int,
-                         K: Optional[int] = None,
-                         alphabet: List = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y'],
-                         seed: Optional[int] = None,
-                         adj_mat: Optional[np.ndarray] = None,
-                         base_sequence: Optional[Union[List, str]] = None,
-                         variable_sites: Optional[List[int]] = None,
-                         **kwargs) -> FitnessLandscape:
-    """
-    Factory function to create a generalized NK fitness landscape.
-
-    Parameters
-    ----------
-    N : int
-        Number of variable sites in each sequence. If variable sites is
-        not specified but a base sequence is, the first N sites will be
-        varied.
-    K : int
-        Number of interacting neighbors for each site. If not specified,
-        will be inferred from the adjacency matrix.
-    alphabet : list
-        The alphabet of characters or symbols to use for the sequences.
-    seed : int, optional
-        Random seed for reproducibility.
-    adj_mat : np.ndarray, optional
-        Adjacency matrix defining epistatic interactions.
-    base_sequence : list, optional
-        A template sequence.
-    variable_sites : list of int, optional
-        Indices of the sites to be varied in the `base_sequence`. The
-        sites are assumed to be pre-zero indexed.
-    **kwargs : dict, optional
-        Additional keyword arguments for the FitnessLandscape constructor.
-
-    Returns
-    -------
-    FitnessLandscape
-        An instance of the FitnessLandscape class.
-    """
-    alphabet_size = len(alphabet)
-    sequences_np, fitness_values = generate_NK_states(
-        N, K, alphabet, seed, adj_mat, base_sequence, variable_sites
+    specification = _normalize_nk_specification(
+        N,
+        K,
+        alphabet,
+        adj_mat,
+        base_sequence,
+        variable_sites,
     )
+    return _generate_nk_states(specification, seed=seed)
 
-    sequences = [BaseNumpySequence(seq, alphabet=alphabet) for seq in sequences_np]
 
-    replicates = [[val] for val in fitness_values]
-    
+def _ordered_sequence_alphabet(
+    specification: _NKSpecification,
+) -> list[Hashable]:
+    """Return the ordered union needed by full sequence objects."""
+    ordered: list[Hashable] = []
+    seen: set[Hashable] = set()
+    for site in specification.variable_sites:
+        for allele in specification.site_alphabets[site]:
+            if allele not in seen:
+                seen.add(allele)
+                ordered.append(allele)
+    if specification.base_sequence is not None:
+        for allele in specification.base_sequence:
+            if allele not in seen:
+                seen.add(allele)
+                ordered.append(allele)
+    return ordered
+
+
+def _model_metadata(
+    specification: _NKSpecification,
+    *,
+    model_type: str,
+) -> dict:
+    """Describe variable alphabets and interactions without ambiguity."""
+    metadata = {
+        "N": specification.N,
+        "K": specification.K,
+        "type": model_type,
+        "alphabet_type": specification.alphabet_type,
+        "variable_sites": list(specification.variable_sites),
+        "interaction_type": (
+            "adjacency" if specification.adjacency is not None else "random"
+        ),
+        "interaction_degrees": list(specification.interaction_degrees),
+    }
+    if specification.alphabet_type == "uniform":
+        alphabet = list(specification.site_alphabets[specification.variable_sites[0]])
+        metadata.update(
+            {
+                "alphabet": alphabet,
+                "alphabet_size": len(alphabet),
+            }
+        )
+    else:
+        metadata.update(
+            {
+                "site_alphabets": {
+                    site: list(specification.site_alphabets[site])
+                    for site in specification.variable_sites
+                },
+                "alphabet_sizes": {
+                    site: len(specification.site_alphabets[site])
+                    for site in specification.variable_sites
+                },
+            }
+        )
+    if specification.base_sequence is not None:
+        metadata["base_sequence"] = list(specification.base_sequence)
+    return metadata
+
+
+def _build_nk_landscape(
+    specification: _NKSpecification,
+    fitness_values: np.ndarray,
+    sequences_np: np.ndarray,
+    *,
+    binary: bool,
+    **kwargs,
+) -> FitnessLandscape:
+    """Build a landscape from one authoritative NK state generator."""
+    if binary:
+        sequences = [BinarySequence(sequence) for sequence in sequences_np]
+        model_type = "binary"
+    else:
+        sequence_alphabet = _ordered_sequence_alphabet(specification)
+        sequences = [
+            MultialleleSequence(sequence, alphabet=sequence_alphabet)
+            for sequence in sequences_np
+        ]
+        model_type = "generalized"
+
+    layer_name = (
+        f"nk_k={specification.K}" if specification.K is not None else "nk_adjacency"
+    )
     fitness_layers = {
-        f'nk_k={K}': NumericFitness(
-            name=f'nk_k={K}',
-            values=replicates,
-            metadata={'N': N, 'K': K, 'alphabet_size': alphabet_size}
+        layer_name: NumericFitness(
+            name=layer_name,
+            values=[[value] for value in fitness_values],
+            metadata=_model_metadata(specification, model_type=model_type),
         )
     }
-    
     return FitnessLandscape.build(
         sequences=sequences,
         fitness_layers=fitness_layers,
-        graph='hamming',
-        **kwargs
+        graph="hamming",
+        **kwargs,
     )
 
-def create_nk_binary_landscape(N: int,
-                               K: Optional[int] = None,
-                               seed: Optional[int] = None,
-                               adj_mat: Optional[np.ndarray] = None,
-                               **kwargs) -> FitnessLandscape:
-    """
-    Factory function to create a binary NK fitness landscape.
-    Sequence types are `BinarySequence`.
+
+def create_gnk_landscape(
+    N: int,
+    K: Optional[int] = None,
+    alphabet: _Alphabet = _DEFAULT_GNK_ALPHABET,
+    seed: Optional[int] = None,
+    adj_mat: Optional[np.ndarray] = None,
+    base_sequence: Optional[Union[Sequence[Hashable], str]] = None,
+    variable_sites: Optional[Sequence[int]] = None,
+    **kwargs,
+) -> FitnessLandscape:
+    """Create a generalized, potentially multiallelic NK landscape.
 
     Parameters
     ----------
     N : int
-        Number of sites in each sequence.
-    K : int
-        Number of interacting neighbors for each gene (epistatic
-        interactions).
+        Number of variable sites.
+    K : int, optional
+        Number of interacting neighbours per site. Required without an
+        adjacency matrix. If supplied with an adjacency matrix, it must equal
+        every row degree.
+    alphabet : sequence or mapping of int to sequence, optional
+        Uniform alphabet or per-site alphabets keyed by global variable site.
     seed : int, optional
-        Random seed for reproducibility.
-    adj_mat : np.ndarray, optional
-        Adjacency matrix defining epistatic interactions.
+        Random-number-generator seed.
+    adj_mat : ndarray, optional
+        Binary symmetric interaction matrix with a zero diagonal.
+    base_sequence : sequence or str, optional
+        Full template sequence whose non-variable positions remain fixed.
+    variable_sites : sequence of int, optional
+        Unique global coordinates varied in ``base_sequence``.
     **kwargs : dict, optional
-        Additional keyword arguments to pass to the FitnessLandscape
-        constructor.
+        Additional arguments for :meth:`FitnessLandscape.build`.
 
     Returns
     -------
     FitnessLandscape
-        An instance of the FitnessLandscape class representing the NK
-        landscape.
+        Generalized NK landscape containing ``MultialleleSequence`` objects.
     """
-    sequences_np, fitness_values = generate_NK_states(N, 
-                                                      K, 
-                                                      alphabet=[0,1], 
-                                                      seed=seed,
-                                                      adj_mat=adj_mat)
-    
-    sequences = [BinarySequence(seq) for seq in sequences_np]
-
-    # Wrap the single fitness array into a list of lists for the NumericFitness layer
-    replicates = [[val] for val in fitness_values]
-    
-    # Create the fitness layer
-    fitness_layers = {
-        f'nk_k={K}': NumericFitness(name=f'nk_k={K}',
-                                    values=replicates,
-                                    metadata={'N' : N,
-                                              'K' : K,
-                                              'alphabet_size' : 2,
-                                              'type': 'binary'})
-    }
-    
-    return FitnessLandscape.build(
-        sequences=sequences,
-        fitness_layers=fitness_layers,
-        graph='hamming',
-        **kwargs
+    specification = _normalize_nk_specification(
+        N,
+        K,
+        alphabet,
+        adj_mat,
+        base_sequence,
+        variable_sites,
+    )
+    sequences_np, fitness_values = _generate_nk_states(
+        specification,
+        seed=seed,
+    )
+    return _build_nk_landscape(
+        specification,
+        fitness_values,
+        sequences_np,
+        binary=False,
+        **kwargs,
     )
 
-def create_nk_multi_landscape(N: int,
-                               K: int,
-                               alphabet: List,
-                               seed: Optional[int] = None,
-                               **kwargs) -> FitnessLandscape:
-    """Create a multiallelic NK fitness landscape.
+
+def create_nk_binary_landscape(
+    N: int,
+    K: Optional[int] = None,
+    seed: Optional[int] = None,
+    adj_mat: Optional[np.ndarray] = None,
+    **kwargs,
+) -> FitnessLandscape:
+    """Create a binary NK landscape.
 
     Parameters
     ----------
     N : int
-        Number of sites in each sequence.
+        Number of binary sites.
+    K : int, optional
+        Number of interacting neighbours per site. Required without an
+        adjacency matrix. If supplied with an adjacency matrix, it must equal
+        every row degree.
+    seed : int, optional
+        Random-number-generator seed.
+    adj_mat : ndarray, optional
+        Binary symmetric interaction matrix with a zero diagonal.
+    **kwargs : dict, optional
+        Additional arguments for :meth:`FitnessLandscape.build`.
+
+    Returns
+    -------
+    FitnessLandscape
+        Binary NK landscape containing ``BinarySequence`` objects.
+    """
+    specification = _normalize_nk_specification(
+        N,
+        K,
+        (0, 1),
+        adj_mat,
+        None,
+        None,
+    )
+    sequences_np, fitness_values = _generate_nk_states(
+        specification,
+        seed=seed,
+    )
+    return _build_nk_landscape(
+        specification,
+        fitness_values,
+        sequences_np,
+        binary=True,
+        **kwargs,
+    )
+
+
+def create_nk_multi_landscape(
+    N: int,
+    K: int,
+    alphabet: Sequence[Hashable],
+    seed: Optional[int] = None,
+    **kwargs,
+) -> FitnessLandscape:
+    """Create a multiallelic GNK landscape through a compatibility alias.
+
+    Parameters
+    ----------
+    N : int
+        Number of variable sites.
     K : int
         Number of interacting neighbours per site.
-    alphabet : list
-        Ordered allele values permitted at every site.
+    alphabet : sequence
+        Ordered uniform alphabet used at every site.
     seed : int, optional
-        Random seed for reproducibility.
-    **kwargs
-        Additional keyword arguments to pass to the FitnessLandscape
-        constructor.
+        Random-number-generator seed.
+    **kwargs : dict, optional
+        Additional arguments for :meth:`FitnessLandscape.build`.
 
     Returns
     -------
     FitnessLandscape
-        Multiallelic NK landscape with a numeric fitness layer.
-    """
-    sequences_np, fitness_values = generate_NK_states(N, K, alphabet=alphabet, seed=seed)
-    
-    sequences = [MultialleleSequence(seq) for seq in sequences_np]
+        Generalized NK landscape returned by :func:`create_gnk_landscape`.
 
-    # Wrap the single fitness array into a list of lists for the NumericFitness layer
-    replicates = [[val] for val in fitness_values]
-    
-    # Create the fitness layer
-    fitness_layers = {
-        f'nk_k={K}': NumericFitness(name=f'nk_k={K}',
-                                    values=replicates,
-                                    metadata={'N' : N,
-                                              'K' : K,
-                                              'alphabet_size' : len(alphabet),
-                                              'type' : 'multi-allele'})
-    }
-    
-    return FitnessLandscape.build(
-        sequences=sequences,
-        fitness_layers=fitness_layers,
-        graph='hamming',
-        **kwargs
+    Warns
+    -----
+    DeprecationWarning
+        This compatibility name is deprecated in favour of
+        :func:`create_gnk_landscape`.
+    """
+    warnings.warn(
+        "create_nk_multi_landscape is deprecated; use create_gnk_landscape",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return create_gnk_landscape(
+        N=N,
+        K=K,
+        alphabet=alphabet,
+        seed=seed,
+        **kwargs,
     )
