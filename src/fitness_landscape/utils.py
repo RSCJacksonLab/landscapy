@@ -269,7 +269,7 @@ def _compute_embeddings_from_sequences(
     if device is None:
         torch = require_optional(
             "torch",
-            extra="ml",
+            extra="embeddings",
             purpose="protein language-model embeddings",
         )
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -278,40 +278,63 @@ def _compute_embeddings_from_sequences(
     if embedding_mode not in {"hard", "soft"}:
         raise ValueError("embedding_mode must be 'hard' or 'soft'.")
 
+    from .embedding import ESMEmbedder
+
     if embedding_mode == "hard":
-        from .embedding.hard_embedding import ESMEmbedder as HardESMEmbedder
-
-        def _to_text(seq: BaseNumpySequence) -> str:
-            symbols = []
-            for sym in seq.to_array():
-                token = str(sym)
-                symbols.append("-" if token == "gap" else token)
-            return "".join(symbols)
-
-        embedder = HardESMEmbedder(
+        embedder = ESMEmbedder(
             model_name=model_name,
             device=device,
             batch_size=batch_size,
         )
-        sequences_to_embed = [_to_text(seq) for seq in sequences]
-        return embedder.embed_relaxed_seqs(sequences_to_embed, batch_size=batch_size)
+        sequences_to_embed = []
+        for sequence in sequences:
+            tokens = [
+                "-" if str(symbol).lower() == "gap" else str(symbol)
+                for symbol in sequence.to_array()
+            ]
+            sequences_to_embed.append("".join(tokens))
+        return embedder.embed_sequences(sequences_to_embed, batch_size=batch_size)
 
-    from .embedding.soft_embedding import ESMEmbedder as SoftESMEmbedder
-
-    ohe_arrays = []
+    relaxed_arrays = []
+    relaxed_alphabets = []
     for seq in sequences:
         if isinstance(seq, SoftSequence):
-            # For SoftSequence, the posterior is the relaxed encoding
-            ohe_arrays.append(seq.posterior)
+            relaxed_arrays.append(np.asarray(seq.posterior, dtype=np.float32))
         else:
-            ohe_arrays.append(seq.to_one_hot())
+            relaxed_arrays.append(np.asarray(seq.to_one_hot(), dtype=np.float32))
+        normalized_alphabet = [
+            "-" if str(symbol).lower() == "gap" else str(symbol).upper()
+            for symbol in seq.alphabet
+        ]
+        if len(set(normalized_alphabet)) != len(normalized_alphabet):
+            raise ValueError("sequence alphabet is ambiguous after gap normalization")
+        relaxed_alphabets.append(normalized_alphabet)
 
-    embedder = SoftESMEmbedder(
+    shared_alphabet = []
+    for alphabet in relaxed_alphabets:
+        for symbol in alphabet:
+            if symbol not in shared_alphabet:
+                shared_alphabet.append(symbol)
+
+    remapped_arrays = []
+    for array, alphabet in zip(relaxed_arrays, relaxed_alphabets):
+        if array.ndim != 2 or array.shape[1] != len(alphabet):
+            raise ValueError("sequence encoding width must match its alphabet")
+        remapped = np.zeros(
+            (array.shape[0], len(shared_alphabet)),
+            dtype=np.float32,
+        )
+        for source_index, symbol in enumerate(alphabet):
+            remapped[:, shared_alphabet.index(symbol)] = array[:, source_index]
+        remapped_arrays.append(remapped)
+
+    embedder = ESMEmbedder(
         model_name=model_name,
         device=device,
+        alphabet=shared_alphabet or None,
         batch_size=batch_size,
     )
-    return embedder.embed_relaxed_seqs(ohe_arrays, batch_size=batch_size)
+    return embedder.embed_relaxed_seqs(remapped_arrays, batch_size=batch_size)
 
 def make_latent_geometric_graph_connected(n_latent: int = 120,
                                           d_target: int = 4,
@@ -719,16 +742,33 @@ def resolve_plm_embedder(
     if mode == "auto":
         mode = "soft" if any(isinstance(seq, SoftSequence) for seq in sequences) else "hard"
 
-    if mode == "soft":
-        from .embedding.soft_embedding import ESMEmbedder as SoftESMEmbedder
-
-        embedder = SoftESMEmbedder(model_name=model_name, device=device, batch_size=batch_size)
-    elif mode == "hard":
-        from .embedding.hard_embedding import ESMEmbedder as HardESMEmbedder
-
-        embedder = HardESMEmbedder(model_name=model_name, device=device, batch_size=batch_size)
-    else:
+    if mode not in {"soft", "hard"}:
         raise ValueError("embedding_mode must be 'auto', 'hard', or 'soft'.")
+    from .embedding import ESMEmbedder
+
+    alphabet = None
+    if mode == "soft" and sequences:
+        normalized_alphabets = [
+            [
+                "-" if str(symbol).lower() == "gap" else str(symbol).upper()
+                for symbol in sequence.alphabet
+            ]
+            for sequence in sequences
+        ]
+        alphabet = normalized_alphabets[0]
+        if any(
+            sequence_alphabet != alphabet
+            for sequence_alphabet in normalized_alphabets[1:]
+        ):
+            raise ValueError(
+                "soft sequences must share one ordered alphabet when resolving an embedder"
+            )
+    embedder = ESMEmbedder(
+        model_name=model_name,
+        device=device,
+        alphabet=alphabet,
+        batch_size=batch_size,
+    )
     return embedder, mode
 
 def alignment_to_base_numpy_sequences(alignment: Alignment,

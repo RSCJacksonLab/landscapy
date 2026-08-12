@@ -103,6 +103,9 @@ multi_line_output = 3
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = "test_*.py"
+markers = [
+  "integration: opt-in tests that load pinned external model artifacts",
+]
 filterwarnings = [
   "ignore:numpy.core._multiarray_umath.*:DeprecationWarning",
   "ignore:.*SwigPyPacked.*:DeprecationWarning",

@@ -8,6 +8,6 @@ __all__ = ["ESMEmbedder"]
 def __getattr__(name):
     if name != "ESMEmbedder":
         raise AttributeError(name)
-    value = import_module(f"{__name__}.soft_embedding").ESMEmbedder
+    value = import_module(f"{__name__}.esm").ESMEmbedder
     globals()[name] = value
     return value
