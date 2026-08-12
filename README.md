@@ -81,6 +81,9 @@ and Windows x86-64/ARM64 platforms. On other platforms, the comprehensive
 install keeps scikit-learn's portable BallTree backend available. Select it with
 `--backend balltree`. GPU FAISS is not supplied by `faiss-cpu`; when a compatible
 GPU build is unavailable, omit `--use-gpu` to use CPU FAISS or select BallTree.
+The embedding extra selects the latest compatible pre-2.13 Torch release on
+Windows because the current 2.13 wheel cannot load its shared-memory DLL on the
+supported GitHub Windows image.
 
 For development from a checkout:
 

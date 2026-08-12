@@ -63,7 +63,8 @@ All notable changes to Landscapy are documented here.
   p-values and uncertainty, and Holm/Bonferroni/BH multiplicity correction.
 - Made `landscapy[all]` the exact union of user-facing extras except `ml`, added
   the directly imported `tqdm` embedding dependency, constrained Python 3.11 to
-  a compatible `piqtree`, and gated FAISS wheels by supported OS/architecture.
+  a compatible `piqtree`, selected a Windows-compatible Torch line for
+  embeddings, and gated FAISS wheels by supported OS/architecture.
 - Added actionable CPU and BallTree fallbacks to unavailable FAISS diagnostics.
 
 ### Removed
