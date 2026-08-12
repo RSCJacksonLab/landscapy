@@ -95,6 +95,10 @@ def walsh_coefficients(landscape: FitnessLandscape,
         r = int(mask).bit_count()
         if order is not None and r > order:
             continue
-        term = "intercept" if r == 0 else ",".join(str(j) for j in range(L) if (mask >> j) & 1)
+        # Genotypes are lexicographically ordered as big-endian bit strings,
+        # while FWHT mask bits are numbered from the least-significant bit.
+        # Map masks back to ascending biological sequence positions.
+        positions = sorted(L - 1 - j for j in range(L) if (mask >> j) & 1)
+        term = "intercept" if r == 0 else ",".join(str(j) for j in positions)
         result[term] = float(coeff[mask])
     return result

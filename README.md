@@ -131,6 +131,8 @@ resistance and disconnected-category aggregation follow the
 [component-wise resistance contract](docs/resistance_distance.md).
 Publication-facing distribution, pairwise, and permutation inference follows
 the documented [statistical inference contract](docs/statistical_inference.md).
+Walsh, regression, ensemble, and reference-free epistasis methods follow the
+documented [epistasis domain and coefficient contract](docs/epistasis.md).
 
 - `fitness_landscape.core`: sequences, fitness and annotation layers,
   undirected graph construction, and `FitnessLandscape`.
