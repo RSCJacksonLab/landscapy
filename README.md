@@ -214,6 +214,9 @@ construction, topology, and analysis. Every recipe states its assumptions,
 expected outputs, and limits of interpretation, and its executable example is
 checked in CI.
 
+- [Foundations](docs/cookbook/foundations/README.md)
+- [Components, topology, and annotated groups](docs/cookbook/topology/README.md)
+
 ## Citation
 
 Citation metadata is provided in `CITATION.cff`. Release changes are recorded
