@@ -125,7 +125,9 @@ distance. Constructor input and small-sample behavior are specified in the
 [graph-constructor contract](docs/graph_constructors.md), and diffusion graphs
 follow the [reversible diffusion contract](docs/diffusion_semantics.md).
 Transition eigenmodes follow the documented
-[random-walk spectral contract](docs/spectral_operators.md).
+[random-walk spectral contract](docs/spectral_operators.md). Effective
+resistance and disconnected-category aggregation follow the
+[component-wise resistance contract](docs/resistance_distance.md).
 
 - `fitness_landscape.core`: sequences, fitness and annotation layers,
   undirected graph construction, and `FitnessLandscape`.

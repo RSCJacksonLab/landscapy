@@ -49,6 +49,9 @@ All notable changes to Landscapy are documented here.
   about scalar shape and finite numeric values.
 - Corrected Dirichlet edge-bin and local conservation, made weighting
   explicitly opt-in by edge key, and documented global versus per-node energy.
+- Made effective resistance component-wise with infinite cross-component
+  costs, explicit jitter reporting, and defined empty/singleton and category
+  aggregation behavior.
 
 ### Removed
 
