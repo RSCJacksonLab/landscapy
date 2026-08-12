@@ -1128,11 +1128,18 @@ def _find_knn_faiss(X: np.ndarray,
     if n == 0:
         empty = np.empty((0, 0), dtype=np.float32)
         return empty, empty.astype(np.int64)
-    faiss = require_optional(
-        "faiss",
-        extra="faiss",
-        purpose="FAISS nearest-neighbour graph construction",
-    )
+    try:
+        faiss = require_optional(
+            "faiss",
+            extra="faiss",
+            purpose="FAISS nearest-neighbour graph construction",
+        )
+    except ModuleNotFoundError as error:
+        raise ModuleNotFoundError(
+            f"{error} FAISS wheels are platform-specific; rerun with "
+            "`backend='balltree'` to use the portable scikit-learn fallback.",
+            name=error.name,
+        ) from error
     # Set the FAISS metric so easy conversion back to hamming distance.
     if metric == "ip":
         faiss_metric = faiss.METRIC_INNER_PRODUCT
@@ -1174,7 +1181,10 @@ def _find_knn_faiss(X: np.ndarray,
     if use_gpu:
         if not hasattr(faiss, "StandardGpuResources"):
             raise RuntimeError(
-                "`use_gpu=True` requires a GPU-enabled FAISS installation."
+                "`use_gpu=True` is unavailable because the installed FAISS build "
+                "has no GPU support. Install a GPU-enabled FAISS build supported "
+                "by this OS, rerun with `use_gpu=False` for CPU FAISS, or select "
+                "`backend='balltree'`."
             )
         res = faiss.StandardGpuResources()
         index = faiss.index_cpu_to_gpu(res, 0, index)

@@ -286,6 +286,32 @@ def test_invalid_faiss_metric_is_reported_before_optional_import(monkeypatch):
         _find_knn_faiss(np.zeros((3, 2)), k=1, metric="cosine")
 
 
+def test_missing_faiss_reports_portable_fallback(monkeypatch):
+    def missing(*args, **kwargs):
+        raise ModuleNotFoundError(
+            "FAISS is unavailable on this platform.",
+            name="faiss",
+        )
+
+    monkeypatch.setattr(graph_module, "require_optional", missing)
+
+    with pytest.raises(ModuleNotFoundError, match="backend='balltree'"):
+        _find_knn_faiss(np.zeros((3, 2)), k=1)
+
+
+def test_cpu_only_faiss_reports_gpu_and_balltree_fallbacks(monkeypatch):
+    fake = _FakeFaiss()
+    monkeypatch.setattr(graph_module, "require_optional", lambda *args, **kwargs: fake)
+
+    with pytest.raises(RuntimeError, match="use_gpu=False.*backend='balltree'"):
+        _find_knn_faiss(
+            np.zeros((3, 2)),
+            k=1,
+            index_type="flat",
+            use_gpu=True,
+        )
+
+
 @pytest.mark.parametrize(("metric", "expected_metric"), [("ip", 0), ("l2", 1)])
 def test_faiss_hnsw_receives_requested_metric(monkeypatch, metric, expected_metric):
     fake = _FakeFaiss()

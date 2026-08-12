@@ -11,6 +11,8 @@ All notable changes to Landscapy are documented here.
 - Corrected evolutionary-diffusion edge scoring.
 - Python 3.11 and 3.12 package metadata and build verification.
 - Release-blocking lint, public-import, CLI-smoke, and branch-coverage gates.
+- Cross-platform clean-install smoke tests for the comprehensive non-ML extra,
+  including an end-to-end kNN CLI workflow.
 
 ### Changed
 
@@ -59,6 +61,10 @@ All notable changes to Landscapy are documented here.
   sample sizes; added explicit Shapiro-Wilk boundary policies, seeded
   permutation generators with replayable state, finite-sample Monte Carlo
   p-values and uncertainty, and Holm/Bonferroni/BH multiplicity correction.
+- Made `landscapy[all]` the exact union of user-facing extras except `ml`, added
+  the directly imported `tqdm` embedding dependency, constrained Python 3.11 to
+  a compatible `piqtree`, and gated FAISS wheels by supported OS/architecture.
+- Added actionable CPU and BallTree fallbacks to unavailable FAISS diagnostics.
 
 ### Removed
 
