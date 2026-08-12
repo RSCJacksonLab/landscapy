@@ -1,198 +1,408 @@
 import numpy as np
 import networkx as nx
+import scipy.sparse as sp
+import scipy.sparse.linalg as spla
+from dataclasses import dataclass
+from numbers import Real
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
 from ..core.landscape import FitnessLandscape
-from ..core.edge_schema import AUTO_EDGE_KEY
+from ..core.edge_schema import AUTO_EDGE_KEY, resolve_edge_attribute
 from ..core.fitness import CategoricalFitness, ProbabilisticCategoricalFitness
 from ..core.graph import create_hamming_graph
 from ..core.sequence import sequence_distance
-from ..transforms import graph_fourier_transform, eigenmode_decomposition
 
-def calculate_ruggedness_autocorrelation_analytical(landscape: FitnessLandscape,
-                                                      lag_max: int = None,
-                                                      weight_key: str | None = AUTO_EDGE_KEY,
-                                                      _eigenvectors: Optional[np.ndarray] = None,
-                                                      _eigenvalues: Optional[np.ndarray] = None) -> Dict:
-    """
-    Function to determine the analytical autocorrelation of a fitness
-    landscape.
 
-    Parameters
-    ----------
-    landscape : FitnessLandscape
-        The fitness landscape to analyze.
-    
-    lag_max : int, default=`None`
-        The maximum lag to include in the autocorrelation calculation.
-    weight_key : str or None, default="auto"
-        Conductance attribute used for the graph-Fourier basis. ``None``
-        requests an unweighted basis.
-    _eigenvectors : ndarray, optional
-        Precomputed graph-Laplacian eigenvectors ordered by ascending
-        eigenvalue.
-    _eigenvalues : ndarray, optional
-        Eigenvalues corresponding to ``_eigenvectors``.
-    
-    Returns
-    -------
-    results : Dict
-        The analytical autocorrelation results.
+_AUTOCORRELATION_TOLERANCE = 1e-12
 
-    Notes
-    -----
-    The active fitness signal is mean-centred. Its graph-Fourier power is
-    transformed to an autocovariance matrix, averaged over unordered node
-    pairs at each unweighted shortest-path distance, and normalized by lag
-    zero. The reported correlation length is ``-1 / log(abs(r[1]))`` when
-    ``0 < abs(r[1]) < 1`` and infinity otherwise.
-    """
- 
-    # Center signal on 0
-    node_order = list(landscape.graph.nodes())
-    raw_signal = landscape.get_node_signal(node_order)
-    mean_centered_signal = raw_signal - np.mean(raw_signal)
 
-    # Perform computation in fourier basis
-    eigenvectors, _, gft_coefficients = graph_fourier_transform(
-        landscape,
-        signal=mean_centered_signal,
-        weight_key=weight_key,
-        _eigenvectors=_eigenvectors,
-        _eigenvalues=_eigenvalues,
-    )
-    power_spectrum = np.abs(gft_coefficients)**2
-    autocov_matrix = eigenvectors @ np.diag(power_spectrum) @ eigenvectors.T
-    
-    # Average over distances
-    dist_matrix = nx.floyd_warshall_numpy(landscape.graph, nodelist=node_order)
-    max_dist = int(np.max(dist_matrix))
-    autocorr_by_lag = [[] for _ in range(max_dist + 1)]
-    num_nodes = landscape.graph.number_of_nodes()
-    
-    for i in range(num_nodes):
-        for j in range(i, num_nodes):
-            k = int(dist_matrix[i, j])
-            autocorr_by_lag[k].append(autocov_matrix[i, j])
-            
-    r_k = np.array([np.mean(vals) if vals else 0 for vals in autocorr_by_lag])
-    
-    # Normalize the final autocorrelation function by r(0).
-    if r_k[0] != 0:
-        r_k /= r_k[0]
-    
-    # Calculate the correlation length.
-    if len(r_k) > 1 and 0 < np.abs(r_k[1]) < 1:
-        correlation_length = -1 / np.log(np.abs(r_k[1]))
-    else:
-        correlation_length = np.inf
+@dataclass(frozen=True)
+class _StationaryWalk:
+    """Validated reversible random-walk data shared by all estimators."""
 
-    if lag_max is not None:
-        r_k = r_k[:lag_max + 1]
-    
-    return {
-        'autocorrelation': r_k,
-        'correlation_length': correlation_length
-    }
+    node_order: tuple[Any, ...]
+    transition: sp.csr_array
+    symmetric_transition: sp.csr_array
+    stationary: np.ndarray
+    centered_signal: np.ndarray
+    variance: float
+    weight_key: Optional[str]
 
-def calculate_ruggedness_autocorrelation_stochastic(landscape: FitnessLandscape,
-                                                      n_walks: int = 100,
-                                                      steps: int = 100,
-                                                      lag_max: int = None,
-                                                      seed: Optional[int] = None) -> Dict:
-    """
-    Function to determine the stochastic autocorrelation of a fitness
-    landscape.
 
-    Parameters
-    ----------
-    landscape : FitnessLandscape
-        The fitness landscape to analyze.
-
-    n_walks : int, default=100
-        Number of independent random walks averaged.
-    
-    steps : int, default=100
-        The number of random walk steps.
-    
-    lag_max : int, default=`None`
-        The maximum lag to include in the autocorrelation calculation.
-    
-    seed : int, default=`None`
-        The seed for the RNG.
-    
-    Returns
-    -------
-    results : Dict
-        The stochastic autocorrelation results.
-
-    Notes
-    -----
-    Each trajectory begins at a uniformly selected graph node and moves to a
-    uniformly selected neighbour. Autocorrelation is computed after centring
-    each trajectory by its own mean, normalized at lag zero, and then averaged
-    across walks. The correlation length uses the same lag-one definition as
-    :func:`calculate_ruggedness_autocorrelation_analytical`.
-    """
-    rng = np.random.default_rng(seed)
-    
-    if lag_max is None:
-        lag_max = steps // 2
-        
-    all_autocorrs = []
-    
-    node_order = list(landscape.graph.nodes())
-    if not node_order:
+def _stationary_walk(
+    landscape: FitnessLandscape,
+    weight_key: Optional[str],
+) -> _StationaryWalk:
+    """Build the declared undirected conductance walk and stationary measure."""
+    graph = landscape.graph
+    if graph is None or graph.number_of_nodes() == 0:
         raise ValueError("Landscape graph contains no nodes.")
-    signal = landscape.get_signal()
+    if graph.is_directed():
+        raise TypeError(
+            "Autocorrelation in Landscapy 0.9 requires an undirected graph."
+        )
+    if graph.number_of_nodes() < 2 or not nx.is_connected(graph):
+        raise ValueError(
+            "Autocorrelation requires one connected, non-trivial graph without "
+            "isolates; analyse landscapes returned by get_components() separately."
+        )
 
-    for _ in range(n_walks):
-        current_node = node_order[int(rng.integers(len(node_order)))]
-        
-        fitness_trajectory = []
-        for _ in range(steps):
-            sequence_index = landscape.sequence_index_for_node(current_node)
-            fitness_trajectory.append(signal[sequence_index])
-            neighbors = list(landscape.graph.neighbors(current_node))
-            if not neighbors:
-                # Handle nodes with no neighbors 
-                break
-            current_node = neighbors[int(rng.integers(len(neighbors)))]
-        
-        if len(fitness_trajectory) < 2:
-            continue # Skip walks that are too short
-            
-        # De-mean the signal for this trajectory
-        fitness_trajectory = np.array(fitness_trajectory)
-        mean_fitness = np.mean(fitness_trajectory)
-        
-        # Calculate autocorrelation for this single walk
-        autocorr = np.correlate(fitness_trajectory - mean_fitness, fitness_trajectory - mean_fitness, mode='full')
-        
-        # Normalize and slice
-        autocorr = autocorr[len(fitness_trajectory)-1 : len(fitness_trajectory) -1 + lag_max]
-        if autocorr[0] != 0:
-            autocorr /= autocorr[0]
-            all_autocorrs.append(autocorr)
-            
-    if not all_autocorrs:
-        return {
-            'autocorrelation': np.array([1.0] + [0.0] * (lag_max - 1)),
-            'correlation_length': np.inf
-        }
+    resolved_weight_key = resolve_edge_attribute(
+        graph,
+        "conductance",
+        weight_key,
+        required=False,
+    )
+    node_order = tuple(graph.nodes())
+    adjacency = nx.to_scipy_sparse_array(
+        graph,
+        nodelist=node_order,
+        weight=resolved_weight_key,
+        dtype=float,
+        format="csr",
+    )
+    degrees = np.asarray(adjacency.sum(axis=1), dtype=float).ravel()
+    if np.any(~np.isfinite(degrees)) or np.any(degrees <= 0.0):
+        raise ValueError(
+            "The declared conductances must give every node positive finite degree; "
+            "analyse connected components separately with get_components()."
+        )
 
-    # Average the autocorrelation functions from all the walks
-    avg_autocorr = np.mean(all_autocorrs, axis=0)
-    
-    # Calculate correlation length from the averaged autocorrelation
-    if len(avg_autocorr) > 1 and 0 < np.abs(avg_autocorr[1]) < 1:
-        correlation_length = -1 / np.log(np.abs(avg_autocorr[1]))
-    else:
-        correlation_length = np.inf
-    
+    support = adjacency.copy()
+    support.data = (support.data > 0.0).astype(np.int8)
+    support.eliminate_zeros()
+    component_count = sp.csgraph.connected_components(
+        support,
+        directed=False,
+        return_labels=False,
+    )
+    if component_count != 1:
+        raise ValueError(
+            "Positive-conductance edges must form one connected graph; analyse "
+            "connected components separately with get_components()."
+        )
+
+    inverse_degree = 1.0 / degrees
+    transition = (sp.diags(inverse_degree) @ adjacency).tocsr()
+    inverse_root_degree = 1.0 / np.sqrt(degrees)
+    symmetric_transition = (
+        sp.diags(inverse_root_degree)
+        @ adjacency
+        @ sp.diags(inverse_root_degree)
+    ).tocsr()
+    stationary = degrees / np.sum(degrees)
+
+    raw_signal = np.asarray(landscape.get_node_signal(node_order), dtype=float)
+    if raw_signal.shape != (len(node_order),) or np.any(~np.isfinite(raw_signal)):
+        raise ValueError("Autocorrelation requires one finite scalar per graph node.")
+    centered_signal = raw_signal - float(stationary @ raw_signal)
+    variance = float(stationary @ np.square(centered_signal))
+    if not np.isfinite(variance) or variance <= 0.0:
+        raise ValueError(
+            "Autocorrelation is undefined for a constant or zero-stationary-variance "
+            "fitness signal."
+        )
+
+    return _StationaryWalk(
+        node_order=node_order,
+        transition=transition,
+        symmetric_transition=symmetric_transition,
+        stationary=stationary,
+        centered_signal=centered_signal,
+        variance=variance,
+        weight_key=resolved_weight_key,
+    )
+
+
+def _validate_lag_max(lag_max: Optional[int], default: int) -> int:
+    """Return a non-negative integer maximum lag."""
+    if lag_max is None:
+        return default
+    if isinstance(lag_max, (bool, np.bool_)) or not isinstance(
+        lag_max, (int, np.integer)
+    ):
+        raise TypeError("lag_max must be a non-negative integer or None.")
+    if lag_max < 0:
+        raise ValueError("lag_max must be a non-negative integer or None.")
+    return int(lag_max)
+
+
+def _bounded_autocorrelation(values: np.ndarray) -> np.ndarray:
+    """Enforce the exact normalized-correlation bound up to roundoff."""
+    values = np.asarray(values, dtype=float)
+    if np.any(~np.isfinite(values)):
+        raise RuntimeError("Autocorrelation evaluation produced a non-finite value.")
+    if np.any(np.abs(values) > 1.0 + _AUTOCORRELATION_TOLERANCE):
+        raise RuntimeError("Autocorrelation evaluation violated |C| <= 1.")
+    return np.clip(values, -1.0, 1.0)
+
+
+def _equivalent_single_exponential_length(values: np.ndarray) -> Optional[float]:
+    """Return the lag-one-matched geometric envelope, never a mixing time."""
+    if len(values) < 2:
+        return None
+    magnitude = abs(float(values[1]))
+    if magnitude <= _AUTOCORRELATION_TOLERANCE:
+        return 0.0
+    if magnitude >= 1.0 - _AUTOCORRELATION_TOLERANCE:
+        return np.inf
+    return float(-1.0 / np.log(magnitude))
+
+
+def _elementary_eigenvalue(walk: _StationaryWalk) -> Optional[float]:
+    """Return the sole transition eigenvalue, or ``None`` for a modal mixture."""
+    mode_signal = np.sqrt(walk.stationary) * walk.centered_signal
+    transformed = walk.symmetric_transition @ mode_signal
+    eigenvalue = float(mode_signal @ transformed / (mode_signal @ mode_signal))
+    residual = transformed - eigenvalue * mode_signal
+    scale = float(np.linalg.norm(mode_signal))
+    if np.linalg.norm(residual) <= 1e-10 * scale:
+        return eigenvalue
+    return None
+
+
+def _autocorrelation_result(values: np.ndarray, lags: np.ndarray) -> Dict[str, Any]:
+    """Build the discrete result without assigning a generic mixing length."""
     return {
-        'autocorrelation': avg_autocorr,
-        'correlation_length': correlation_length
+        "autocorrelation": values,
+        "lags": lags,
+        "correlation_length": None,
+        "equivalent_single_exponential_length": (
+            _equivalent_single_exponential_length(values)
+        ),
     }
+
+
+def calculate_ruggedness_autocorrelation_analytical(
+    landscape: FitnessLandscape,
+    lag_max: Optional[int] = None,
+    weight_key: str | None = AUTO_EDGE_KEY,
+    _eigenvectors: Optional[np.ndarray] = None,
+    _eigenvalues: Optional[np.ndarray] = None,
+) -> Dict[str, Any]:
+    """Calculate stationary discrete-time random-walk autocorrelation.
+
+    Parameters
+    ----------
+    landscape : FitnessLandscape
+        The fitness landscape to analyze.
+    lag_max : int, optional
+        Maximum integer Markov lag. The returned lags are ``0, ..., lag_max``.
+        By default, the graph diameter is used as a finite convenience range.
+    weight_key : str or None, default="auto"
+        Conductance attribute used to construct the transition kernel. ``None``
+        requests the unweighted simple random walk.
+    _eigenvectors : ndarray, optional
+        Deprecated compatibility parameter. Markov autocorrelation is evaluated
+        directly and does not use precomputed combinatorial-Laplacian modes.
+    _eigenvalues : ndarray, optional
+        Deprecated compatibility parameter corresponding to ``_eigenvectors``.
+
+    Returns
+    -------
+    dict
+        Autocorrelation, integer lags, an explicit lag-one equivalent
+        single-exponential descriptor, and a ``None`` generic correlation-length
+        compatibility field.
+
+    Notes
+    -----
+    This evaluates ``x_c.T @ diag(pi) @ P**k @ x_c`` divided by stationary
+    variance. It preserves negative and oscillatory correlations of a non-lazy
+    walk. The equivalent single-exponential length matches only ``abs(C(1))``;
+    it is not a generic decay scale or mixing time. The private eigenpair
+    parameters are accepted only for source compatibility and are ignored.
+    """
+    del _eigenvectors, _eigenvalues
+    walk = _stationary_walk(landscape, weight_key)
+    max_lag = _validate_lag_max(lag_max, nx.diameter(landscape.graph))
+    values = np.empty(max_lag + 1, dtype=float)
+    propagated = walk.centered_signal.copy()
+    weighted_signal = walk.stationary * walk.centered_signal
+    for lag in range(max_lag + 1):
+        values[lag] = float(weighted_signal @ propagated / walk.variance)
+        propagated = walk.transition @ propagated
+    values = _bounded_autocorrelation(values)
+    values[0] = 1.0
+    result = _autocorrelation_result(values, np.arange(max_lag + 1))
+    result["elementary"] = _elementary_eigenvalue(walk) is not None
+    result["weight_key"] = walk.weight_key
+    return result
+
+
+def _validate_times(
+    times: Optional[Union[Real, Iterable[Real]]],
+    default: int,
+) -> np.ndarray:
+    """Return a one-dimensional array of finite non-negative diffusion times."""
+    if times is None:
+        return np.arange(default + 1, dtype=float)
+    raw_times = (
+        [times]
+        if isinstance(times, Real) and not isinstance(times, (bool, np.bool_))
+        else times
+    )
+    try:
+        values = list(raw_times)
+    except TypeError as error:
+        raise TypeError(
+            "times must be a real number or an iterable of real numbers."
+        ) from error
+    if not values:
+        raise ValueError("times must contain at least one evaluation time.")
+    if any(
+        isinstance(value, (bool, np.bool_)) or not isinstance(value, Real)
+        for value in values
+    ):
+        raise TypeError("times must contain only finite non-negative real numbers.")
+    result = np.asarray(values, dtype=float)
+    if np.any(~np.isfinite(result)) or np.any(result < 0.0):
+        raise ValueError("times must contain only finite non-negative real numbers.")
+    return result
+
+
+def time_continuous_autocorrelation(
+    landscape: FitnessLandscape,
+    times: Optional[Union[Real, Iterable[Real]]] = None,
+    weight_key: str | None = AUTO_EDGE_KEY,
+) -> Dict[str, Any]:
+    """Calculate stationary continuous-time random-walk autocorrelation.
+
+    Parameters
+    ----------
+    landscape : FitnessLandscape
+        The fitness landscape to analyze.
+    times : real or iterable of real, optional
+        Finite non-negative diffusion times. By default, evaluate at real-valued
+        times corresponding numerically to ``0, ..., graph diameter``.
+    weight_key : str or None, default="auto"
+        Conductance attribute used to construct the transition kernel. ``None``
+        requests the unweighted simple random walk.
+
+    Returns
+    -------
+    dict
+        Continuous-time autocorrelation and its requested diffusion times.
+
+    Notes
+    -----
+    This evaluates ``x_c.T @ diag(pi) @ exp(-t * (I - P)) @ x_c`` divided by
+    stationary variance. Diffusion time is continuous and is not a number of
+    graph steps. A general multimode curve is not collapsed to one decay time.
+    """
+    walk = _stationary_walk(landscape, weight_key)
+    evaluation_times = _validate_times(times, nx.diameter(landscape.graph))
+    symmetric_laplacian = (
+        sp.eye(len(walk.node_order), format="csr") - walk.symmetric_transition
+    )
+    mode_signal = np.sqrt(walk.stationary) * walk.centered_signal
+    values = np.empty(len(evaluation_times), dtype=float)
+    for index, time in enumerate(evaluation_times):
+        if time == 0.0:
+            values[index] = 1.0
+        else:
+            propagated = spla.expm_multiply(
+                -time * symmetric_laplacian,
+                mode_signal,
+            )
+            values[index] = float(mode_signal @ propagated / walk.variance)
+    values = _bounded_autocorrelation(values)
+    elementary_eigenvalue = _elementary_eigenvalue(walk)
+    elementary_time = (
+        float(1.0 / (1.0 - elementary_eigenvalue))
+        if elementary_eigenvalue is not None
+        else None
+    )
+    return {
+        "autocorrelation": values,
+        "times": evaluation_times,
+        "correlation_time": None,
+        "elementary": elementary_eigenvalue is not None,
+        "elementary_correlation_time": elementary_time,
+        "weight_key": walk.weight_key,
+    }
+
+
+def calculate_ruggedness_autocorrelation_stochastic(
+    landscape: FitnessLandscape,
+    n_walks: int = 100,
+    steps: int = 100,
+    lag_max: Optional[int] = None,
+    seed: Optional[int] = None,
+    weight_key: str | None = AUTO_EDGE_KEY,
+) -> Dict[str, Any]:
+    """Estimate stationary discrete-time random-walk autocorrelation.
+
+    Parameters
+    ----------
+    landscape : FitnessLandscape
+        The fitness landscape to analyze.
+    n_walks : int, default=100
+        Number of independent random walks.
+    steps : int, default=100
+        Number of sampled states in each trajectory.
+    lag_max : int, optional
+        Maximum integer lag, included in the result. Defaults to ``steps // 2``.
+    seed : int, optional
+        Seed for the random-number generator.
+    weight_key : str or None, default="auto"
+        Conductance attribute used to construct the transition kernel. ``None``
+        requests the unweighted simple random walk.
+
+    Returns
+    -------
+    dict
+        Pair-count-weighted autocorrelation estimates and integer lags.
+
+    Notes
+    -----
+    Trajectories start in the stationary distribution. Every product is centred
+    by the global stationary mean and divided by the exact common stationary
+    variance, so the estimator targets the same signed, non-lazy ``P**k``
+    quantity as :func:`calculate_ruggedness_autocorrelation_analytical`.
+    """
+    if isinstance(n_walks, (bool, np.bool_)) or not isinstance(
+        n_walks, (int, np.integer)
+    ):
+        raise TypeError("n_walks must be a positive integer.")
+    if n_walks <= 0:
+        raise ValueError("n_walks must be a positive integer.")
+    if isinstance(steps, (bool, np.bool_)) or not isinstance(
+        steps, (int, np.integer)
+    ):
+        raise TypeError("steps must be a positive integer.")
+    if steps <= 0:
+        raise ValueError("steps must be a positive integer.")
+
+    walk = _stationary_walk(landscape, weight_key)
+    max_lag = _validate_lag_max(lag_max, int(steps) // 2)
+    if max_lag >= steps:
+        raise ValueError("lag_max must be smaller than steps.")
+    rng = np.random.default_rng(seed)
+    transition = walk.transition
+    product_sums = np.zeros(max_lag + 1, dtype=float)
+    pair_counts = np.zeros(max_lag + 1, dtype=np.int64)
+
+    for _ in range(int(n_walks)):
+        current = int(rng.choice(len(walk.node_order), p=walk.stationary))
+        trajectory = np.empty(int(steps), dtype=float)
+        for step in range(int(steps)):
+            trajectory[step] = walk.centered_signal[current]
+            row_start = transition.indptr[current]
+            row_end = transition.indptr[current + 1]
+            destinations = transition.indices[row_start:row_end]
+            probabilities = transition.data[row_start:row_end]
+            current = int(rng.choice(destinations, p=probabilities))
+        for lag in range(max_lag + 1):
+            products = trajectory[: int(steps) - lag] * trajectory[lag:]
+            product_sums[lag] += float(np.sum(products))
+            pair_counts[lag] += products.size
+
+    estimates = product_sums / pair_counts / walk.variance
+    estimates[0] = 1.0
+    result = _autocorrelation_result(estimates, np.arange(max_lag + 1))
+    result["pair_counts"] = pair_counts
+    result["weight_key"] = walk.weight_key
+    return result
 
 
 def category_boundary_crossing_times(

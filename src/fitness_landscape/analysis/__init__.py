@@ -22,6 +22,7 @@ _EXPORTS = {
     "resistance_distance_matrix": "graph",
     "category_diffusion_hierarchy": "graph",
     "calculate_ruggedness_autocorrelation_analytical": "random_walk",
+    "time_continuous_autocorrelation": "random_walk",
     "calculate_ruggedness_autocorrelation_stochastic": "random_walk",
     "category_boundary_crossing_times": "random_walk",
     "compute_ruggedness_diffusion_scale": "diffusion_scale",
