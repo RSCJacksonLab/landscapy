@@ -24,3 +24,8 @@ Implementation modules and names beginning with an underscore are private.
 RJMCMC aligners have moved to `phylo-landscapy`; landscapy may expose a
 compatibility import when that package is installed, but those objects are not
 part of the landscapy 0.9 API contract.
+
+The distribution and pairwise testing functions in `fitness_landscape.analysis`
+follow the [statistical inference contract](statistical_inference.md), including
+finite-data validation, explicit missing-value policies, multiplicity control,
+and reproducible Monte Carlo p-values.

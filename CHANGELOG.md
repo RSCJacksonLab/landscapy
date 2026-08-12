@@ -55,6 +55,10 @@ All notable changes to Landscapy are documented here.
 - Consolidated hard-token and relaxed-distribution ESM embeddings behind one
   implementation with explicit alphabet, masking, pooling, dtype, and ordering
   contracts; fixed the recursive ``extract_features`` alias.
+- Made distribution and pairwise tests strict about finite inputs and valid
+  sample sizes; added explicit Shapiro-Wilk boundary policies, seeded
+  permutation generators with replayable state, finite-sample Monte Carlo
+  p-values and uncertainty, and Holm/Bonferroni/BH multiplicity correction.
 
 ### Removed
 

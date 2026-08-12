@@ -129,6 +129,8 @@ Transition eigenmodes follow the documented
 [random-walk spectral contract](docs/spectral_operators.md). Effective
 resistance and disconnected-category aggregation follow the
 [component-wise resistance contract](docs/resistance_distance.md).
+Publication-facing distribution, pairwise, and permutation inference follows
+the documented [statistical inference contract](docs/statistical_inference.md).
 
 - `fitness_landscape.core`: sequences, fitness and annotation layers,
   undirected graph construction, and `FitnessLandscape`.
