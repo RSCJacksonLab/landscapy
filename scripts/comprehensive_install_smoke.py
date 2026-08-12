@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import importlib
 import importlib.util
+from importlib.metadata import PackageNotFoundError, version
 import os
 import subprocess
 import sys
@@ -13,14 +13,15 @@ from pathlib import Path
 from fitness_landscape import FitnessLandscape
 
 
-NON_ML_MODULES = (
+NON_ML_DISTRIBUTIONS = (
     "click",
     "cogent3",
+    "faiss-cpu",
     "gudhi",
     "piqtree",
     "pyarrow",
     "ray",
-    "sklearn",
+    "scikit-learn",
     "softalign",
     "torch",
     "transformers",
@@ -37,8 +38,13 @@ def _landscapy_executable() -> Path:
 
 
 def main() -> None:
-    for module in NON_ML_MODULES:
-        importlib.import_module(module)
+    for distribution in NON_ML_DISTRIBUTIONS:
+        try:
+            version(distribution)
+        except PackageNotFoundError as error:
+            raise AssertionError(
+                f"landscapy[all] did not install {distribution}"
+            ) from error
     if importlib.util.find_spec("torch_geometric") is not None:
         raise AssertionError(
             "landscapy[all] unexpectedly installed the ml-only "
