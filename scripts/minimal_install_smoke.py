@@ -1,4 +1,4 @@
-"""Exercise the publication core from a wheel with no optional extras."""
+"""Exercise core APIs without eagerly importing feature dependencies."""
 
 from __future__ import annotations
 

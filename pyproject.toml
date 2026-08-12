@@ -24,11 +24,29 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
+# The default install contains every supported non-ML feature. Platform markers
+# omit dependencies such as FAISS only where upstream does not publish a wheel.
 dependencies = [
+  "click>=8.1",
+  "cogent3==2025.7.10a10",
+  'faiss-cpu>=1.11; platform_system == "Linux" and (platform_machine == "x86_64" or platform_machine == "aarch64")',
+  'faiss-cpu>=1.11; platform_system == "Darwin" and platform_machine == "x86_64"',
+  'faiss-cpu>=1.11; platform_system == "Darwin" and platform_machine == "arm64"',
+  'faiss-cpu>=1.11; platform_system == "Windows" and (platform_machine == "AMD64" or platform_machine == "ARM64" or platform_machine == "x86_64" or platform_machine == "arm64")',
+  "gudhi>=3.11",
   "networkx>=3.2",
   "numpy>=1.24",
   "pandas>=2.3",
+  'piqtree>=0.6.1,<0.8; python_version < "3.12"',
+  'piqtree>=0.6.1; python_version >= "3.12"',
+  "pyarrow>=17",
+  "ray>=2.48",
+  "scikit-learn>=1.3",
   "scipy>=1.10",
+  "softalign>=1.0.0",
+  "torch>=2.1",
+  "transformers>=4.53.2",
+  "tqdm>=4.66",
 ]
 
 [project.optional-dependencies]
@@ -65,26 +83,9 @@ embeddings = [
   "transformers>=4.53.2",
   "tqdm>=4.66",
 ]
-# Union of every user-facing extra above except `ml`. Keep this list explicit so
-# wheel metadata contains only third-party requirements and never self-recurses.
-all = [
-  "click>=8.1",
-  "cogent3==2025.7.10a10",
-  'faiss-cpu>=1.11; platform_system == "Linux" and (platform_machine == "x86_64" or platform_machine == "aarch64")',
-  'faiss-cpu>=1.11; platform_system == "Darwin" and platform_machine == "x86_64"',
-  'faiss-cpu>=1.11; platform_system == "Darwin" and platform_machine == "arm64"',
-  'faiss-cpu>=1.11; platform_system == "Windows" and (platform_machine == "AMD64" or platform_machine == "ARM64" or platform_machine == "x86_64" or platform_machine == "arm64")',
-  "gudhi>=3.11",
-  'piqtree>=0.6.1,<0.8; python_version < "3.12"',
-  'piqtree>=0.6.1; python_version >= "3.12"',
-  "pyarrow>=17",
-  "ray>=2.48",
-  "scikit-learn>=1.3",
-  "softalign>=1.0.0",
-  "torch>=2.1",
-  "transformers>=4.53.2",
-  "tqdm>=4.66",
-]
+# The base install already contains every supported non-ML feature. Retain the
+# old spelling as a compatibility alias without adding duplicate requirements.
+all = []
 dev = [
   "build>=1.2",
   "numpydoc>=1.8",

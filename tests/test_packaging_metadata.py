@@ -1,4 +1,4 @@
-"""Checks for the install extras and their optional import contracts."""
+"""Checks the default install and optional import contracts."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from pathlib import Path
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 PYPROJECT = tomllib.loads((REPOSITORY / "pyproject.toml").read_text(encoding="utf-8"))
+PROJECT_DEPENDENCIES = PYPROJECT["project"]["dependencies"]
 EXTRAS = PYPROJECT["project"]["optional-dependencies"]
 IMPORT_DISTRIBUTIONS = {
     "faiss": "faiss-cpu",
@@ -28,23 +29,33 @@ def _declared_names(extra: str) -> set[str]:
     return {_requirement_name(requirement) for requirement in EXTRAS[extra]}
 
 
-def test_all_is_the_union_of_non_ml_user_extras():
+def test_default_install_contains_core_and_every_non_ml_user_extra():
+    core = {
+        "networkx>=3.2",
+        "numpy>=1.24",
+        "pandas>=2.3",
+        "scipy>=1.10",
+    }
     user_extras = set(EXTRAS) - {"all", "dev", "ml"}
-    expected = {
+    non_ml_requirements = {
         requirement
         for extra in user_extras
         for requirement in EXTRAS[extra]
     }
 
-    assert set(EXTRAS["all"]) == expected
+    assert set(PROJECT_DEPENDENCIES) == core | non_ml_requirements
 
 
-def test_all_excludes_dependencies_unique_to_ml():
+def test_all_remains_a_backward_compatible_alias_for_the_default_install():
+    assert EXTRAS["all"] == []
+
+
+def test_default_install_excludes_dependencies_unique_to_ml():
     shared_embedding_requirements = set(EXTRAS["embeddings"])
     ml_only = set(EXTRAS["ml"]) - shared_embedding_requirements
 
     assert "torch-geometric>=2.6" in ml_only
-    assert ml_only.isdisjoint(EXTRAS["all"])
+    assert ml_only.isdisjoint(PROJECT_DEPENDENCIES)
 
 
 def test_optional_imports_have_direct_dependencies_in_their_named_extra():

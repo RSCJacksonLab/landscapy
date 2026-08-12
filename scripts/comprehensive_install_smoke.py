@@ -49,11 +49,11 @@ def main() -> None:
             version(distribution)
         except PackageNotFoundError as error:
             raise AssertionError(
-                f"landscapy[all] did not install {distribution}"
+                f"the default landscapy install did not install {distribution}"
             ) from error
     if importlib.util.find_spec("torch_geometric") is not None:
         raise AssertionError(
-            "landscapy[all] unexpectedly installed the ml-only "
+            "the default landscapy install unexpectedly installed the ml-only "
             "torch-geometric dependency"
         )
 

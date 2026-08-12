@@ -37,17 +37,34 @@ assert MolType.make_seq is original
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
-def test_missing_optional_dependency_has_actionable_extra(monkeypatch):
+def test_missing_default_dependency_has_actionable_reinstall(monkeypatch):
     def missing(_module):
         raise ModuleNotFoundError("No module named 'ray'", name="ray")
 
     monkeypatch.setattr(_optional, "import_module", missing)
 
-    with pytest.raises(ModuleNotFoundError, match=r"landscapy\[parallel\]"):
+    with pytest.raises(ModuleNotFoundError, match=r"force-reinstall landscapy"):
         _optional.require_optional(
             "ray",
             extra="parallel",
             purpose="parallel analysis",
+        )
+
+
+def test_missing_ml_dependency_keeps_actionable_extra(monkeypatch):
+    def missing(_module):
+        raise ModuleNotFoundError(
+            "No module named 'torch_geometric'",
+            name="torch_geometric",
+        )
+
+    monkeypatch.setattr(_optional, "import_module", missing)
+
+    with pytest.raises(ModuleNotFoundError, match=r"landscapy\[ml\]"):
+        _optional.require_optional(
+            "torch_geometric",
+            extra="ml",
+            purpose="PyTorch Geometric export",
         )
 
 
@@ -64,7 +81,7 @@ def test_optional_import_does_not_mask_transitive_dependency_errors(monkeypatch)
             purpose="parallel analysis",
         )
 
-    assert "landscapy[parallel]" not in str(error.value)
+    assert "force-reinstall landscapy" not in str(error.value)
 
 
 @pytest.mark.parametrize("already_initialized", [False, True])

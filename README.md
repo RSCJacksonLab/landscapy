@@ -27,11 +27,11 @@ with external plotting and visualisation tools.
 
 Landscapy supports Python 3.11 and 3.12.
 
-For a standard installation, install every feature supported by the current OS
+The default installation includes every feature supported by the current OS
 except the separately maintained ML export stack:
 
 ```bash
-python -m pip install "landscapy[all]"
+python -m pip install landscapy
 ```
 
 This is the recommended path for CLI users. It installs the CLI, portable
@@ -40,20 +40,15 @@ phylogeny, CPU FAISS where a compatible wheel exists, and protein language-model
 embeddings. It deliberately excludes the `ml` extra and its PyTorch Geometric
 export dependency.
 
-Install only the lightweight core when optional functionality is not required:
+The former `landscapy[all]` spelling remains accepted for compatibility, but it
+is equivalent to the command above and is no longer required:
 
 ```bash
-python -m pip install landscapy
+python -m pip install "landscapy[all]"
 ```
 
-Install the optional Parquet backend for native Parquet payloads in portable
-bundles:
-
-```bash
-python -m pip install "landscapy[parquet]"
-```
-
-Individual extras remain available for constrained environments:
+The legacy feature extras remain accepted for compatibility, but their
+dependencies are now present in the default installation:
 
 - `knn` for scikit-learn nearest-neighbour and diffusion graphs;
 - `tda` for topological graph construction;
@@ -72,10 +67,10 @@ contract is revised:
 python -m pip install "landscapy[ml]"
 ```
 
-Always quote an extras expression such as `"landscapy[all]"`; shells including
+Always quote an extras expression such as `"landscapy[ml]"`; shells including
 zsh otherwise interpret the square brackets as a filename pattern.
 
-FAISS availability depends on upstream binary wheels. `landscapy[all]` installs
+FAISS availability depends on upstream binary wheels. `landscapy` installs
 `faiss-cpu` on supported Linux x86-64/ARM64, current macOS Intel/Apple Silicon,
 and Windows x86-64/ARM64 platforms. On other platforms, the comprehensive
 install keeps scikit-learn's portable BallTree backend available. Select it with
@@ -85,7 +80,7 @@ GPU build is unavailable, omit `--use-gpu` to use CPU FAISS or select BallTree.
 For development from a checkout:
 
 ```bash
-python -m pip install -e ".[dev,all]"
+python -m pip install -e ".[dev]"
 python -m pytest
 ```
 

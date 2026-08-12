@@ -18,10 +18,15 @@ def require_optional(module: str, *, extra: str, purpose: str) -> ModuleType:
         root = module.split(".", 1)[0]
         if missing != root and not missing.startswith(f"{root}."):
             raise
-        message = (
-            f"{purpose} requires the optional dependency {root!r}. "
-            f"Install it with `python -m pip install 'landscapy[{extra}]'`."
-        )
+        if extra == "ml":
+            install_hint = "Install it with `python -m pip install 'landscapy[ml]'`."
+        else:
+            install_hint = (
+                "It is included in the default Landscapy installation; repair the "
+                "environment with `python -m pip install --upgrade "
+                "--force-reinstall landscapy`."
+            )
+        message = f"{purpose} requires the dependency {root!r}. {install_hint}"
         raise ModuleNotFoundError(message, name=missing) from error
 
 
