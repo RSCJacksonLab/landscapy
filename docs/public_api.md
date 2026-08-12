@@ -29,3 +29,8 @@ The distribution and pairwise testing functions in `fitness_landscape.analysis`
 follow the [statistical inference contract](statistical_inference.md), including
 finite-data validation, explicit missing-value policies, multiplicity control,
 and reproducible Monte Carlo p-values.
+
+The public epistasis functions follow the
+[epistasis domain and coefficient contract](epistasis.md), including explicit
+binary-versus-categorical design domains, Walsh normalization, regression
+identifiability, and incomplete-design behavior.

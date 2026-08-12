@@ -62,6 +62,10 @@ All notable changes to Landscapy are documented here.
 - Consolidated generalized NK construction in `create_gnk_landscape`, repaired
   uniform and per-site multiallelic sequence construction and metadata, and
   made `create_nk_multi_landscape` a deprecated compatibility alias.
+- Defined full-cube Walsh, sampled-binary regression, and general categorical
+  epistasis domains; corrected Walsh position labels and normalization,
+  enforced regression identifiability, and made higher-order empirical
+  marginal decompositions subtract every lower-order subset.
 
 ### Removed
 
