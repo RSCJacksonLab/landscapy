@@ -16,6 +16,7 @@ invariants, interprets the output, and lists common failure modes.
 - [Epistasis on complete, sampled, and categorical landscapes](epistasis/README.md)
 - [Statistical inference and robustness analysis](statistics/README.md)
 - [Simulation models and known-answer validation](simulation/README.md)
+- [Validated exports for downstream machine learning](ml/README.md)
 
 ## Shared example data
 

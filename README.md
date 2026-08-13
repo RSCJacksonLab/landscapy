@@ -223,6 +223,7 @@ checked in CI.
 - [Epistasis on complete, sampled, and categorical landscapes](docs/cookbook/epistasis/README.md)
 - [Statistical inference and robustness analysis](docs/cookbook/statistics/README.md)
 - [Simulation models and known-answer validation](docs/cookbook/simulation/README.md)
+- [Validated exports for downstream machine learning](docs/cookbook/ml/README.md)
 
 ## Citation
 
