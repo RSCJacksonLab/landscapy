@@ -11,6 +11,7 @@ invariants, interprets the output, and lists common failure modes.
 - [Components, graph topology, communities, and annotated groups](topology/README.md)
 - [Graph construction and representation choice](graph-construction/README.md)
 - [Saving, sharing, CLI use, and external visualization](io/README.md)
+- [Ruggedness, autocorrelation, and spectral analysis](ruggedness/README.md)
 
 ## Shared example data
 
