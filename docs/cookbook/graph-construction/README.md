@@ -5,7 +5,7 @@ the supported 0.9 release and make node order, geometry, parameters, components,
 and edge meaning auditable.
 
 1. [Exact Hamming graphs](hamming.md)
-2. [k-nearest neighbours in sequence space](knn-sequence-space.md)
+2. [OHE k-nearest neighbours for non-binary sequences](knn-sequence-space.md)
 3. [PLM-embedding kNN graphs](plm-knn.md)
 4. [Embedding-diffusion graphs](embedding-diffusion.md)
 5. [Evolutionary-diffusion graphs](evolutionary-diffusion.md)

@@ -1,8 +1,10 @@
-# Construct kNN graphs in sequence space
+# Construct OHE kNN graphs from non-binary sequences
 
 kNN fixes a local neighbour count rather than an absolute mutation radius. It
 is therefore a different representation from an exact single-substitution
-graph even when both use Hamming geometry.
+graph even when both use Hamming geometry. The sequence alphabet does not have
+to be binary: aligned protein, DNA, RNA, or other categorical sequences can be
+represented in the OHE domain.
 
 ## Install and input
 
@@ -10,77 +12,84 @@ graph even when both use Hamming geometry.
 python -m pip install "landscapy[knn]"
 ```
 
-OHE/sequence-domain search requires equal aligned length. `k` counts directed
-non-self candidates before the graph is symmetrized by the union rule.
+OHE/sequence-domain search requires equal aligned length and compatible symbol
+alphabets. `BaseNumpySequence` is the general multi-allelic sequence class;
+`BinarySequence` is not required. `k` counts directed non-self candidates
+before the graph is symmetrized by the union rule.
 
 ## Worked example
 
 ```python
 # cookbook: test
 import networkx as nx
+import numpy as np
 
-from fitness_landscape import BinarySequence
-from fitness_landscape.analysis import graph_properties
+from fitness_landscape import BaseNumpySequence, FitnessLandscape
 from fitness_landscape.core import create_knn_graph
 
-sequences = [BinarySequence(f"{value:03b}", sequence_id=f"s{value}") for value in range(8)]
+texts = ["MKT", "MKS", "MRT", "AKT", "ART", "ARS", "CRS", "CRD"]
+sequences = [
+    BaseNumpySequence.from_string(text, sequence_id=f"protein-{index}")
+    for index, text in enumerate(texts)
+]
 
-def build(k, tie_policy, seed=41):
-    return create_knn_graph(
-        sequences,
-        k=k,
-        embedding_domain="ohe",
-        backend="balltree",
-        tiebuffer=4,
-        tie_policy=tie_policy,
-        seed=seed,
-    )
+# The default BaseNumpySequence string alphabet is the 20 canonical amino
+# acids. Landscapy constructs this sequence-domain representation internally;
+# it is shown here so its dimensions and row order are explicit.
+ohe = np.stack([sequence.to_one_hot().reshape(-1) for sequence in sequences])
+assert ohe.shape == (8, 3 * 20)
+assert np.all(ohe.reshape(8, 3, 20).sum(axis=2) == 1)
 
-k1_all = build(1, "all")
-k4_all = build(4, "all")
-k1_min = build(1, "min_index")
-k1_random = build(1, "random")
+graph = create_knn_graph(
+    sequences,
+    k=2,
+    embedding_domain="ohe",
+    backend="balltree",
+    tiebuffer=8,
+    tie_policy="all",
+)
+landscape = FitnessLandscape(
+    sequences,
+    graph,
+    embeddings={"ohe": ohe},
+    active_embedding_domain="ohe",
+)
 
-audit = {}
-for name, graph in {
-    "k1_all": k1_all,
-    "k4_all": k4_all,
-    "k1_min": k1_min,
-    "k1_random": k1_random,
-}.items():
-    properties = graph_properties(graph)
-    audit[name] = {
-        "edges": graph.number_of_edges(),
-        "components": properties["components"],
-        "degree": properties["degree"],
-        "isolates": list(nx.isolates(graph)),
-        "search": graph.graph["landscapy_knn_search"],
-    }
-
-assert audit["k1_all"]["edges"] == 12  # all three tied one-mutant neighbours
-assert audit["k4_all"]["edges"] == 24  # distance-two ties also enter
-assert audit["k1_min"]["edges"] == 6
-assert audit["k1_random"]["edges"] == 7
-assert audit["k1_all"]["search"] == {
+assert landscape.active_embedding_domain == "ohe"
+assert graph.number_of_edges() == 15
+assert nx.is_connected(graph)
+assert graph.graph["landscapy_knn_search"] == {
     "role": "graph",
     "backend": "balltree",
     "metric": "hamming",
     "distance_geometry": "hamming",
     "embedding_domain": "ohe",
 }
-assert audit["k1_all"]["components"]["count"] == 1
-assert audit["k4_all"]["components"]["count"] == 1
-assert audit["k1_random"]["components"]["count"] == 1
-assert audit["k1_min"]["components"]["count"] == 3
-print(audit)
+
+# Edge distances are counts of mismatched aligned residues, not binary XORs.
+for source, target, data in graph.edges(data=True):
+    expected = sum(
+        left != right
+        for left, right in zip(
+            sequences[source].to_array(), sequences[target].to_array()
+        )
+    )
+    assert data["distance"] == expected
+
+assert {data["distance"] for _, _, data in graph.edges(data=True)} == {1.0, 2.0}
+print(landscape, graph.number_of_edges(), graph.graph["landscapy_knn_search"])
 ```
 
-Because the binary cube has ties, `k=1, tie_policy="all"` retains three
-neighbours per node. `min_index` forces exactly one directed choice before union
-symmetrization, is index-dependent, and fragments this fixture into three
-components; `random` is reproducible only with its seed. The `k=1` versus `k=4`
-comparison shows that increasing `k` changes density and degree even on
-identical nodes.
+The eight amino-acid sequences produce a connected, 15-edge graph. Both
+single- and double-substitution edges occur because kNN selects the nearest
+observed rows; it does not require every selected neighbour to be a
+single-substitution variant. The explicit OHE array is attached to the
+landscape for downstream use, but `create_knn_graph` derives its OHE-domain
+search representation directly from `sequences`.
+
+For a high-level construction, the equivalent graph can be created with
+`FitnessLandscape.build(sequences, graph="knn", embedding_domain="ohe", k=2,
+backend="balltree", tie_policy="all")`.
 
 ## Backend and tie choices
 
@@ -88,12 +97,19 @@ BallTree is the portable exact backend. FAISS `flat` is exact; HNSW and IVF are
 approximate and require index parameters, software/hardware provenance, and a
 recall check against an exact subset. `tiebuffer` controls how many additional
 returned candidates are inspected for equality at the kth distance; it does
-not make an approximate index exact. The undirected edge set is the union of
-directed selections, so final degrees can exceed `k`.
+not make an approximate index exact. `tie_policy="all"` retains every candidate
+at the kth distance; `min_index` is row-order dependent, and `random` requires a
+recorded seed. The undirected edge set is the union of directed selections, so
+final degrees can exceed `k`.
 
 ## Common failures
 
 - Reporting `k` as the final undirected degree.
+- Supplying unaligned or unequal-length sequences to the OHE domain.
+- Letting individual sequences infer incompatible alphabets instead of using a
+  common explicit alphabet for non-protein categorical data.
+- Interpreting OHE/Hamming distance as biochemical similarity: every symbol
+  substitution has the same cost.
 - Breaking ties by row index without documenting row order.
 - Omitting the random seed or FAISS index configuration.
 - Comparing approximate and exact graphs without a recall/sensitivity audit.
