@@ -217,6 +217,7 @@ checked in CI.
 - [Foundations](docs/cookbook/foundations/README.md)
 - [Components, topology, and annotated groups](docs/cookbook/topology/README.md)
 - [Graph construction and representation choice](docs/cookbook/graph-construction/README.md)
+- [Saving, sharing, CLI use, and external visualization](docs/cookbook/io/README.md)
 
 ## Citation
 
