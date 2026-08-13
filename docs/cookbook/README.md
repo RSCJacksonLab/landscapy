@@ -12,6 +12,7 @@ invariants, interprets the output, and lists common failure modes.
 - [Graph construction and representation choice](graph-construction/README.md)
 - [Saving, sharing, CLI use, and external visualization](io/README.md)
 - [Ruggedness, autocorrelation, and spectral analysis](ruggedness/README.md)
+- [Adaptive walks, accessibility, basins, optima, and neutral networks](accessibility/README.md)
 
 ## Shared example data
 

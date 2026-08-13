@@ -219,6 +219,7 @@ checked in CI.
 - [Graph construction and representation choice](docs/cookbook/graph-construction/README.md)
 - [Saving, sharing, CLI use, and external visualization](docs/cookbook/io/README.md)
 - [Ruggedness, autocorrelation, and spectral analysis](docs/cookbook/ruggedness/README.md)
+- [Adaptive walks, accessibility, basins, optima, and neutral networks](docs/cookbook/accessibility/README.md)
 
 ## Citation
 
