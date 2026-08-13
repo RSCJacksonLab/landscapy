@@ -17,6 +17,7 @@ invariants, interprets the output, and lists common failure modes.
 - [Statistical inference and robustness analysis](statistics/README.md)
 - [Simulation models and known-answer validation](simulation/README.md)
 - [Validated exports for downstream machine learning](ml/README.md)
+- [Scaling, backend selection, and reproducible execution](scaling/README.md)
 
 ## Shared example data
 

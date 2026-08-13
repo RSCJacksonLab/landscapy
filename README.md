@@ -224,6 +224,7 @@ checked in CI.
 - [Statistical inference and robustness analysis](docs/cookbook/statistics/README.md)
 - [Simulation models and known-answer validation](docs/cookbook/simulation/README.md)
 - [Validated exports for downstream machine learning](docs/cookbook/ml/README.md)
+- [Scaling, backend selection, and reproducible execution](docs/cookbook/scaling/README.md)
 
 ## Citation
 
