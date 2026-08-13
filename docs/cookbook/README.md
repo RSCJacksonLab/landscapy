@@ -13,6 +13,7 @@ invariants, interprets the output, and lists common failure modes.
 - [Saving, sharing, CLI use, and external visualization](io/README.md)
 - [Ruggedness, autocorrelation, and spectral analysis](ruggedness/README.md)
 - [Adaptive walks, accessibility, basins, optima, and neutral networks](accessibility/README.md)
+- [Epistasis on complete, sampled, and categorical landscapes](epistasis/README.md)
 
 ## Shared example data
 
