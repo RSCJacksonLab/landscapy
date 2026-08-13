@@ -221,6 +221,7 @@ checked in CI.
 - [Ruggedness, autocorrelation, and spectral analysis](docs/cookbook/ruggedness/README.md)
 - [Adaptive walks, accessibility, basins, optima, and neutral networks](docs/cookbook/accessibility/README.md)
 - [Epistasis on complete, sampled, and categorical landscapes](docs/cookbook/epistasis/README.md)
+- [Statistical inference and robustness analysis](docs/cookbook/statistics/README.md)
 
 ## Citation
 

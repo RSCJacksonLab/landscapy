@@ -14,6 +14,7 @@ invariants, interprets the output, and lists common failure modes.
 - [Ruggedness, autocorrelation, and spectral analysis](ruggedness/README.md)
 - [Adaptive walks, accessibility, basins, optima, and neutral networks](accessibility/README.md)
 - [Epistasis on complete, sampled, and categorical landscapes](epistasis/README.md)
+- [Statistical inference and robustness analysis](statistics/README.md)
 
 ## Shared example data
 
