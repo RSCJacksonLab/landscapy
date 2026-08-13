@@ -5,7 +5,7 @@ nearest-neighbour search used during graph construction.
 
 | Domain | Search features | Distance |
 | --- | --- | --- |
-| `ohe` or no embeddings | aligned sequence/OHE representation | Hamming |
+| `ohe` or no embeddings | aligned categorical sequence/OHE representation | Hamming |
 | `plm` | supplied protein language-model embeddings | Euclidean |
 | `composition` | supplied composition embeddings | Euclidean |
 | direct embeddings with no domain | supplied embedding matrix | Euclidean |
@@ -28,7 +28,10 @@ conditional on that support.
 
 PLM kNN graphs therefore do not require aligned or equal-length protein
 sequences, provided the embedding matrix has one finite row per sequence. OHE
-and sequence-Hamming graphs still require a common aligned length.
+and sequence-Hamming graphs support non-binary categorical alphabets, including
+aligned amino-acid or nucleotide sequences; `BinarySequence` is not required.
+They still require a common aligned length and compatible alphabets across
+rows.
 
 The graph-level `landscapy_knn_search` record stores the backend, effective
 metric, distance geometry, embedding domain, and whether the search constructed
