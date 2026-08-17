@@ -1,5 +1,7 @@
 # Random-walk spectral contract
 
+<!-- cookbook: reference -->
+
 `eigenmode_decomposition(matrix="transition")` decomposes the random-walk
 Laplacian
 

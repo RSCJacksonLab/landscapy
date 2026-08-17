@@ -80,7 +80,7 @@ the same annotated-graph contract.
 Wrapping a graph validates node/sequence alignment; it does not validate why an
 edge exists. Declare raw distance, normalized distance, affinity, and
 conductance using the canonical keys in the [edge-semantics
-contract](../../edge_semantics.md). Do not place a raw distance in NetworkX
+contract](../graph-construction/edge-semantics.md). Do not place a raw distance in NetworkX
 `weight`, because weighted Landscapy analyses interpret `weight` as
 conductance.
 

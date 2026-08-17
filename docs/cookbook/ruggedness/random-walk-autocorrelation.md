@@ -12,7 +12,7 @@ python -m pip install landscapy
 
 Use one connected component with finite non-constant scalar fitness. State the
 conductance key, stationary centering, stochastic walk count, length, and seed.
-Read the [autocorrelation contract](../../autocorrelation.md).
+Read the [autocorrelation contract](autocorrelation-contract.md).
 
 ## Worked example
 

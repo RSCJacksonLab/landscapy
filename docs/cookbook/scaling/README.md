@@ -16,6 +16,10 @@ scientific inputs.
 - [Run component-wise pipelines with honest denominators](component-wise-pipelines.md)
 - [Record a reproducible run manifest](reproducibility-checklist.md)
 
+## Reference contract
+
+- [ESM embedding inputs, tokenization, pooling, and outputs](esm-embeddings.md)
+
 Examples use fixed synthetic inputs and small resource limits so they remain
 executable in CI. Replace them only after measuring the intended empirical
 workload on its deployment platform.

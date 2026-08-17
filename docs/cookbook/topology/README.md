@@ -12,7 +12,11 @@ denominators visible.
 6. [Analyse category diffusion and crossing](category-diffusion-and-crossing.md)
 7. [Attach external community annotations](community-annotations.md)
 
-Formal contracts: [spectral operators](../../spectral_operators.md), [effective
-resistance](../../resistance_distance.md), and [edge
-semantics](../../edge_semantics.md). The recipes use only the [supported 0.9
-public API](../../public_api.md).
+## Reference contracts
+
+- [Component-wise effective resistance](effective-resistance-contract.md)
+- [Random-walk spectral operators](../ruggedness/spectral-operators.md)
+- [Edge attributes, distance, affinity, and conductance](../graph-construction/edge-semantics.md)
+
+The recipes use only the [supported 0.9 public
+API](../foundations/public-api.md).

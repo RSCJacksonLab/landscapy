@@ -11,5 +11,6 @@ default.
 4. [Subsampling sensitivity](subsampling-sensitivity.md)
 5. [Graph-aware reporting](graph-aware-reporting.md)
 
-All examples follow the [statistical inference
-contract](../../statistical_inference.md).
+## Reference contract
+
+- [Statistical inference, missing-data, multiplicity, and randomization rules](inference-contract.md)

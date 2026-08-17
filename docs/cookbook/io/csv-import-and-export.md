@@ -2,7 +2,7 @@
 
 CSV is useful for flat interchange, but it is not a complete landscape
 serialization. This recipe uses Pandas because `read_csv_landscape` and
-`to_csv_landscape` are not in the supported [0.9 API](../../public_api.md).
+`to_csv_landscape` are not in the supported [0.9 API](../foundations/public-api.md).
 
 ## Install and input
 

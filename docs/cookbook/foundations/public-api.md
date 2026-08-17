@@ -1,4 +1,6 @@
-# Public API for landscapy 0.9
+# Public API for Landscapy 0.9
+
+<!-- cookbook: reference -->
 
 The supported 0.9 API consists of the names below. They are re-exported from
 their package namespaces through `__all__`; public methods and properties
@@ -26,21 +28,21 @@ compatibility import when that package is installed, but those objects are not
 part of the landscapy 0.9 API contract.
 
 The distribution and pairwise testing functions in `fitness_landscape.analysis`
-follow the [statistical inference contract](statistical_inference.md), including
+follow the [statistical inference contract](../statistics/inference-contract.md), including
 finite-data validation, explicit missing-value policies, multiplicity control,
 and reproducible Monte Carlo p-values.
 
 The public epistasis functions follow the
-[epistasis domain and coefficient contract](epistasis.md), including explicit
+[epistasis domain and coefficient contract](../epistasis/estimand-contracts.md), including explicit
 binary-versus-categorical design domains, Walsh normalization, regression
 identifiability, and incomplete-design behavior.
 
 Graph constructors that use nearest-neighbour search follow the
-[kNN embedding-domain contract](knn_embedding_domains.md): PLM and composition
+[kNN embedding-domain contract](../graph-construction/knn-embedding-domains.md): PLM and composition
 domains use Euclidean/L2 embedding geometry, while sequence/OHE domains use
 Hamming geometry.
 
 The autocorrelation functions follow the
-[stationary random-walk autocorrelation contract](autocorrelation.md). Discrete
+[stationary random-walk autocorrelation contract](../ruggedness/autocorrelation-contract.md). Discrete
 Markov lag and continuous diffusion time are distinct domains and their values
 must not be interchanged.

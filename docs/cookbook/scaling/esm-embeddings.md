@@ -1,5 +1,7 @@
 # ESM embedding contract
 
+<!-- cookbook: reference -->
+
 `fitness_landscape.embedding.ESMEmbedder` is the single ESM implementation.
 It has two deliberately separate input paths:
 

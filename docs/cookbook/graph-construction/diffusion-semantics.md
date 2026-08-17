@@ -1,5 +1,7 @@
 # Reversible diffusion graph semantics
 
+<!-- cookbook: reference -->
+
 Both embedding and evolutionary diffusion graphs use one mathematical
 contract. Let `W` be their symmetric, finite, non-negative pair-affinity
 matrix. Embedding diffusion obtains sparse `W` from an RBF kernel evaluated

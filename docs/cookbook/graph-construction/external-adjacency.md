@@ -89,7 +89,7 @@ landscape sequence order are identical and asserted.
 
 The graph preserves an externally specified topology; Landscapy does not
 validate the scientific reason for each edge. Follow the [edge-semantics
-contract](../../edge_semantics.md): raw `distance` increases with separation,
+contract](edge-semantics.md): raw `distance` increases with separation,
 whereas canonical `weight` increases with connection strength. Record units and
 the transform. Reject an input whose bare `weight` could mean distance, count,
 probability, or conductance until its meaning is resolved.

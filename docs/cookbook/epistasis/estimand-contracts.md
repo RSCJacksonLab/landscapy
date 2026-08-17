@@ -1,5 +1,7 @@
 # Epistasis domains and coefficient contracts
 
+<!-- cookbook: reference -->
+
 Landscapy exposes three distinct epistasis estimands. They are not
 interchangeable, and each public result records its domain and normalization.
 Every method requires equal-length sequences, a finite scalar active fitness

@@ -10,5 +10,6 @@ cells, and any regularization.
 4. [Categorical and multiallelic designs](categorical-and-multiallelic.md)
 5. [Known-answer and sensitivity checks](known-answer-and-sensitivity-checks.md)
 
-The exact formulas, normalization, domains, and missing-cell behavior are in
-the [epistasis contract](../../epistasis.md).
+## Reference contract
+
+- [Epistasis domains, coefficients, normalization, and missing-cell behavior](estimand-contracts.md)
