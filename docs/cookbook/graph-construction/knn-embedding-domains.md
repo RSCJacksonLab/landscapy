@@ -1,5 +1,7 @@
 # kNN embedding domains
 
+<!-- cookbook: reference -->
+
 The embedding domain determines the scientific geometry of every
 nearest-neighbour search used during graph construction.
 

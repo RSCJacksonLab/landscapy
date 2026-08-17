@@ -11,7 +11,7 @@ python -m pip install landscapy matplotlib
 
 The signal must follow graph node order. Full bases are suitable only for small
 graphs; `k`-truncated bases cover selected modes, not the full spectrum. See the
-[spectral operator contract](../../spectral_operators.md).
+[spectral operator contract](spectral-operators.md).
 
 ## Worked example
 

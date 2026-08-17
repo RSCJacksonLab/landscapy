@@ -1,5 +1,7 @@
 # Edge attribute semantics
 
+<!-- cookbook: reference -->
+
 Landscapy 0.9 treats edge attributes as scientific quantities rather than
 interchangeable NetworkX weights. Constructors record their contract under the
 graph-level `landscapy_edge_schema` metadata key.

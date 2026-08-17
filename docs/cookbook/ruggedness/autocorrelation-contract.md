@@ -1,5 +1,7 @@
 # Stationary random-walk autocorrelation
 
+<!-- cookbook: reference -->
+
 Landscapy exposes separate discrete- and continuous-time autocorrelation
 functions. They share one undirected conductance transition kernel and one
 stationary centering convention, but they answer different questions.
@@ -16,7 +18,7 @@ x_c = x - (pi^T x) 1.
 Passing `weight_key=None` makes `W` the unweighted adjacency matrix. An explicit
 key uses its finite non-negative edge values as conductances. The default
 `weight_key="auto"` resolves constructor-declared conductance metadata according
-to the [edge-semantics contract](edge_semantics.md). A valid input must be one
+to the [edge-semantics contract](../graph-construction/edge-semantics.md). A valid input must be one
 connected, non-trivial, undirected positive-conductance graph with a finite,
 non-constant scalar signal. Use `FitnessLandscape.get_components()` before
 analysis when the source landscape is disconnected.

@@ -14,8 +14,12 @@ and edge meaning auditable.
 8. [External adjacency matrices and edge tables](external-adjacency.md)
 9. [Compare graph representations](compare-representations.md)
 
-Formal contracts: [constructor inputs](../../graph_constructors.md), [kNN
-embedding domains](../../knn_embedding_domains.md), [diffusion
-semantics](../../diffusion_semantics.md), and [edge
-semantics](../../edge_semantics.md). All examples use the [supported 0.9 public
-API](../../public_api.md).
+## Reference contracts
+
+- [Graph-constructor inputs and validation](input-contracts.md)
+- [kNN embedding domains](knn-embedding-domains.md)
+- [Reversible diffusion semantics](diffusion-semantics.md)
+- [Edge attributes, distance, affinity, and conductance](edge-semantics.md)
+
+All examples use the [supported 0.9 public
+API](../foundations/public-api.md).

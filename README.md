@@ -112,7 +112,7 @@ weighted = calculate_ruggedness_dirichlet_energy(
 For nearest-neighbour graphs, `embedding_domain="plm"` uses Euclidean
 distances in the supplied or computed PLM embeddings. The same domain-aware
 geometry is used by sparse kNN prefilters in diffusion constructors; see the
-[kNN embedding-domain contract](docs/knn_embedding_domains.md).
+[kNN embedding-domain contract](docs/cookbook/graph-construction/knn-embedding-domains.md).
 Embedding diffusion evaluates its RBF affinity only on that sparse candidate
 graph and uses resource-guarded exact sparse powers, avoiding dense `n x n`
 kernel construction.
@@ -154,23 +154,23 @@ CSV export is also available through `to_csv_landscape` and
 ## Main modules
 
 The exact supported names and import namespaces are listed in the
-[0.9 public API contract](docs/public_api.md). CI validates that contract
+[0.9 public API contract](docs/cookbook/foundations/public-api.md). CI validates that contract
 against the exported objects and their NumPy-style docstrings.
 
 Graph constructors and weighted analyses follow the documented
-[edge distance and conductance contract](docs/edge_semantics.md). In
+[edge distance and conductance contract](docs/cookbook/graph-construction/edge-semantics.md). In
 particular, NetworkX `weight` is reserved for conductance and is never a raw
 distance. Constructor input and small-sample behavior are specified in the
-[graph-constructor contract](docs/graph_constructors.md), and diffusion graphs
-follow the [reversible diffusion contract](docs/diffusion_semantics.md).
+[graph-constructor contract](docs/cookbook/graph-construction/input-contracts.md), and diffusion graphs
+follow the [reversible diffusion contract](docs/cookbook/graph-construction/diffusion-semantics.md).
 Transition eigenmodes follow the documented
-[random-walk spectral contract](docs/spectral_operators.md). Effective
+[random-walk spectral contract](docs/cookbook/ruggedness/spectral-operators.md). Effective
 resistance and disconnected-category aggregation follow the
-[component-wise resistance contract](docs/resistance_distance.md).
+[component-wise resistance contract](docs/cookbook/topology/effective-resistance-contract.md).
 Publication-facing distribution, pairwise, and permutation inference follows
-the documented [statistical inference contract](docs/statistical_inference.md).
+the documented [statistical inference contract](docs/cookbook/statistics/inference-contract.md).
 Walsh, regression, ensemble, and reference-free epistasis methods follow the
-documented [epistasis domain and coefficient contract](docs/epistasis.md).
+documented [epistasis domain and coefficient contract](docs/cookbook/epistasis/estimand-contracts.md).
 
 - `fitness_landscape.core`: sequences, fitness and annotation layers,
   undirected graph construction, and `FitnessLandscape`.

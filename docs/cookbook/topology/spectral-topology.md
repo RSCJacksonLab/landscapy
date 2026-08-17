@@ -12,8 +12,8 @@ python -m pip install landscapy
 
 This recipe uses a simple undirected graph with two connected components and no
 isolates. It requests unweighted operators explicitly with `weight_key=None`.
-See the [spectral-operator contract](../../spectral_operators.md) and [edge
-semantics](../../edge_semantics.md) before using conductance weights.
+See the [spectral-operator contract](../ruggedness/spectral-operators.md) and [edge
+semantics](../graph-construction/edge-semantics.md) before using conductance weights.
 
 ## Worked example
 

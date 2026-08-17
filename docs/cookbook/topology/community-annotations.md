@@ -13,7 +13,7 @@ python -m pip install landscapy
 This example uses NetworkX Louvain communities on a simple undirected,
 conductance-weighted graph. The algorithm, weight key, resolution, and seed are
 fixed. Edge `weight` means conductance under the Landscapy [edge-semantics
-contract](../../edge_semantics.md).
+contract](../graph-construction/edge-semantics.md).
 
 ## Worked example
 

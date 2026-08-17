@@ -1,5 +1,7 @@
 # Statistical inference contract
 
+<!-- cookbook: reference -->
+
 The publication-facing helpers in `fitness_landscape.analysis.statistics`
 make data cleaning, randomization, and multiplicity decisions explicit. They
 do not silently convert an invalid analysis into a numerical result.

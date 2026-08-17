@@ -15,6 +15,8 @@ nullspace and degenerate-signal contract remains unresolved in
 [#182](https://github.com/RSCJacksonLab/landscapy/issues/182), so publishing a
 worked estimator example would normalize a scientifically disputed method.
 
-Formal contracts: [autocorrelation](../../autocorrelation.md), [spectral
-operators](../../spectral_operators.md), and [edge
-semantics](../../edge_semantics.md).
+## Reference contracts
+
+- [Stationary random-walk autocorrelation](autocorrelation-contract.md)
+- [Random-walk spectral operators](spectral-operators.md)
+- [Edge attributes, distance, affinity, and conductance](../graph-construction/edge-semantics.md)

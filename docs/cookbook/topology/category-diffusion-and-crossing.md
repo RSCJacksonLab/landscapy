@@ -14,7 +14,7 @@ python -m pip install landscapy
 The landscape needs a categorical or probabilistic-categorical fitness layer.
 Probability rows must sum to one. This connected path graph uses unweighted
 transitions explicitly; a conductance-weighted analysis must name the canonical
-conductance key from the [edge-semantics contract](../../edge_semantics.md).
+conductance key from the [edge-semantics contract](../graph-construction/edge-semantics.md).
 
 ## Worked example
 

@@ -1,9 +1,10 @@
 # Landscapy cookbook
 
-The cookbook is the worked-example companion to the [0.9 public API
-contract](../public_api.md). Each page is a complete recipe: it names the
-minimum installation, defines its input schema, checks alignment and graph
-invariants, interprets the output, and lists common failure modes.
+The cookbook combines worked examples with the technical contracts for the
+[0.9 public API](foundations/public-api.md). Recipe pages name the minimum
+installation, define their input schema, check alignment and graph invariants,
+interpret the output, and list common failure modes. Reference pages live beside
+the recipes they govern, and each section index identifies them separately.
 
 ## Sections
 

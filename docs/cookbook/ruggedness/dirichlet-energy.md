@@ -11,7 +11,7 @@ python -m pip install landscapy
 
 Use a finite scalar active layer on a simple undirected graph. A weighted
 analysis must name a finite non-negative conductance key; raw distance is not
-conductance. See the [edge contract](../../edge_semantics.md).
+conductance. See the [edge contract](../graph-construction/edge-semantics.md).
 
 ## Worked example
 

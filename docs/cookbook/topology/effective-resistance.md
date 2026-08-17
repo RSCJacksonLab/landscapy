@@ -2,8 +2,8 @@
 
 Effective resistance is finite only within an electrically connected component
 and depends on edge conductance. Read the [component-wise resistance
-contract](../../resistance_distance.md) and [edge-semantics
-contract](../../edge_semantics.md) first.
+contract](effective-resistance-contract.md) and [edge-semantics
+contract](../graph-construction/edge-semantics.md) first.
 
 ## Install and input
 

@@ -1,5 +1,7 @@
 # Component-wise effective resistance
 
+<!-- cookbook: reference -->
+
 Landscapy computes effective resistance only inside connected electrical
 networks. For a `FitnessLandscape`, the analysis first calls
 `FitnessLandscape.get_components()` and then refines those topological

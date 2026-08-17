@@ -13,6 +13,6 @@ has no plotting API; NetworkX, Matplotlib, and Cytoscape remain separate tools.
 
 The canonical publication format is the portable bundle described in the
 [repository README](../../../README.md#portable-landscape-export). Bundle
-classes and exceptions are part of the [0.9 public API](../../public_api.md).
+classes and exceptions are part of the [0.9 public API](../foundations/public-api.md).
 The [release scope](../../../README.md#release-scope) excludes built-in
 visualization.

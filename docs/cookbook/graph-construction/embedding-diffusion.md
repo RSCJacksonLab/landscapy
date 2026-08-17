@@ -12,8 +12,8 @@ python -m pip install "landscapy[knn]"
 
 The embedding matrix must be finite, two-dimensional, and aligned with the
 sequence list. This recipe uses the versioned PLM/PCA cache. Read the [diffusion
-contract](../../diffusion_semantics.md) and [kNN-domain
-contract](../../knn_embedding_domains.md).
+contract](diffusion-semantics.md) and [kNN-domain
+contract](knn-embedding-domains.md).
 
 ## Worked example
 
