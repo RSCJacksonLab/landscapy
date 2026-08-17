@@ -4,11 +4,7 @@ Request only the low-frequency modes needed for a declared analysis on a
 larger sparse connected component. A `k`-mode result is a projection, never a
 full spectrum or exact signal reconstruction unless `k` spans the graph.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 This example uses the combinatorial Laplacian with unit conductance on a
 20-by-20 grid. Node order is fixed before building the sparse matrix and signal.

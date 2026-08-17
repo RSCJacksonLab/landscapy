@@ -4,11 +4,7 @@ Evolutionary diffusion uses embedding kNN only as a pair prefilter, aligns those
 pairs, scores them with an instantaneous amino-acid rate generator, and then
 diffuses a reversible affinity. It is not tree inference.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[knn,alignment,parallel]"
-```
+## Input
 
 Sequences must use the 20-symbol alphabet in the package's documented
 alphabetical order. Embeddings must align with sequence order. An external

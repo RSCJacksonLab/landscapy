@@ -3,11 +3,7 @@
 The 0.9 TDA constructor reduces an embedding with PCA, builds an alpha complex,
 and exposes its one-skeleton as an undirected graph.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[tda]"
-```
+## Input
 
 Embedding rows must be finite, distinct, and aligned with sequences. PCA rank is
 bounded by centered geometric rank, sample count, feature count, and requested

@@ -4,11 +4,7 @@ A landscape can hold multiple phenotypes or representations of uncertainty.
 The active view selects a layer for methods that require one; it does not alter
 the stored data.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 Every ready-made layer must contain one row per sequence. Numeric rows may hold
 one scalar or several replicates. Categorical values must occur in the declared

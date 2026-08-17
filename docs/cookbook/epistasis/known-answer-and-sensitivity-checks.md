@@ -4,11 +4,7 @@ Before empirical use, test the chosen method against a generative signal with
 known additive or interaction terms, then perturb support without changing the
 generative biology.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[analysis]"
-```
+## Input
 
 Use independent seeds for simulated landscapes and declare missingness or
 imbalance mechanisms. Coefficient drift under changed design can be a design

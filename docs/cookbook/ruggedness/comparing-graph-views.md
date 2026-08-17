@@ -3,11 +3,7 @@
 Before comparing values, establish matched nodes, component eligibility,
 fitness scaling, edge count, and weight semantics for every graph.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[knn]"
-```
+## Input
 
 This example uses the same six rows and a predeclared standardization for both
 views. Standardization is appropriate only because the same assay and node set

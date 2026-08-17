@@ -4,11 +4,7 @@ Landscapy exports graph and analysis data; Cytoscape, NetworkX, and Matplotlib
 provide visualization. A plot is a diagnostic or communication device, not a
 separate statistical result.
 
-## Install and input
-
-```bash
-python -m pip install landscapy matplotlib
-```
+## Input
 
 Use an undirected landscape small enough to draw legibly. Select annotation
 layers and scalar fitness values intentionally before export.

@@ -3,11 +3,7 @@
 Sequence values, order, alphabet, and identifiers are separate concepts. Choose
 the narrowest class that represents the data.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 Inputs are strings or one-dimensional iterables. Binary values must be `0` or
 `1`; multiallelic values must occur in the declared alphabet; protein symbols

@@ -3,11 +3,7 @@
 Annotations store per-sequence context such as taxonomy, assay background, and
 split membership without pretending those labels are measured fitness.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 Annotation tables may be aligned by sequence index, sequence value, or unique
 sequence ID. Keys must cover all rows unless `allow_missing=True` is chosen.

@@ -5,11 +5,7 @@ signal alignment, an estimator's numerical convention, and stochastic
 reproducibility. Passing it detects implementation regressions but does not
 establish empirical model adequacy.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 Store the expected values, tolerances, package version, and seeds beside the
 analysis. Use exact assertions for discrete invariants and tolerance-based

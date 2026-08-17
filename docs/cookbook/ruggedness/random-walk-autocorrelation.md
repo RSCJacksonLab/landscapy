@@ -4,11 +4,7 @@ Autocorrelation asks how quickly a centered fitness signal decorrelates under a
 declared random walk. Discrete lag and continuous diffusion time are different
 domains.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 Use one connected component with finite non-constant scalar fitness. State the
 conductance key, stationary centering, stochastic walk count, length, and seed.

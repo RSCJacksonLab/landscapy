@@ -3,11 +3,7 @@
 Graph-aware reporting separates dataset-level independent units from dependent
 nodes/edges and preserves component, eligibility, and parameter denominators.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 This worked example summarizes paired graph-view contrasts across six
 independent datasets. The millions of edges contributing to each dataset-level

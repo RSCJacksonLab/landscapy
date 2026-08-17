@@ -3,11 +3,7 @@
 Combine an explicit fitness threshold, annotations, graph reachability, and
 monotone-path checks to separate reachable, long-path, and unreachable targets.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 Declare the wild type or training set, graph constructor, target threshold,
 fitness units, tie rule, and component support before inspecting paths.

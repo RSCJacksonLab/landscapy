@@ -1,13 +1,15 @@
 # Landscapy cookbook
 
 The cookbook combines worked examples with the technical contracts for the
-[0.9 public API](foundations/public-api.md). Recipe pages name the minimum
-installation, define their input schema, check alignment and graph invariants,
-interpret the output, and list common failure modes. Reference pages live beside
-the recipes they govern, and each section index identifies them separately.
+[0.9 public API](foundations/public-api.md). Start with installation, then use
+recipe pages that define their input schema, check alignment and graph
+invariants, interpret the output, and list common failure modes. Reference pages
+live beside the recipes they govern, and each section index identifies them
+separately.
 
 ## Sections
 
+- [Installation, system requirements, optional features, and CI coverage](installation/README.md)
 - [Foundations: empirical data and the landscape data model](foundations/README.md)
 - [Components, graph topology, communities, and annotated groups](topology/README.md)
 - [Graph construction and representation choice](graph-construction/README.md)

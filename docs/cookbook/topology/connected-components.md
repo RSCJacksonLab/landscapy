@@ -4,11 +4,7 @@ Split disconnected landscapes before applying methods that require finite
 paths, then report which components were eligible and how many observations
 were excluded.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 The graph must be undirected and each node must carry the matching `sequence`.
 Fitness and annotation layers must align with the sequence order.

@@ -4,11 +4,7 @@ A quotient landscape collapses nodes into declared groups. It is useful for
 background, taxonomy, or experimental-class summaries, but aggregation removes
 within-group variation and multiplicity.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 The partition may be an annotation layer, mapping, or aligned sequence. This
 example partitions a complete two-site binary cube by a `group` annotation and

@@ -3,11 +3,7 @@
 An `.lsbundle` is a deterministic ZIP container around the portable bundle
 schema. It is convenient for a release asset or data-repository deposit.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[parquet]"
-```
+## Input
 
 The input must be a valid undirected `FitnessLandscape`. Metadata must be
 JSON-compatible and should identify the deposited dataset and pipeline.

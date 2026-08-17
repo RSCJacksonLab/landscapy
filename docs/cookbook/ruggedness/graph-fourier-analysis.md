@@ -3,11 +3,7 @@
 Graph Fourier analysis expands a node-aligned signal in eigenvectors of a
 declared graph operator. Operator and edge-weight choices define the basis.
 
-## Install and input
-
-```bash
-python -m pip install landscapy matplotlib
-```
+## Input
 
 The signal must follow graph node order. Full bases are suitable only for small
 graphs; `k`-truncated bases cover selected modes, not the full spectrum. See the

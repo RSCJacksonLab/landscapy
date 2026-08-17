@@ -5,11 +5,7 @@ This is an introductory topology recipe for `create_phylo_graph` and
 ancestral reconstruction and known-tree evaluation, is tracked in [issue
 #228](https://github.com/RSCJacksonLab/landscapy/issues/228).
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[phylogeny]"
-```
+## Input
 
 The input is a named aligned FASTA with unique tip IDs and common sequence
 length. This smoke example uses Cogent3 neighbour joining, disables model

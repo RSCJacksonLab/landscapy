@@ -5,13 +5,9 @@ token IDs together with aligned fitness tensors. Use an explicit feature view
 in recorded pipelines; `auto` prefers an attached embedding, then tokens, then
 OHE.
 
-## Install and input
+## Input
 
-```bash
-python -m pip install "landscapy[ml]"
-```
-
-PyTorch is required for every view. Token views also need a compatible
+This recipe covers OHE and token views. Token views need a compatible
 Transformers tokenizer or tokenizer object. Variable token lengths are padded
 and returned with an attention mask.
 

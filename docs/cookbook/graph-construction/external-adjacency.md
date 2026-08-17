@@ -3,11 +3,7 @@
 External topology is supported when node order and edge meaning are made
 explicit before wrapping the graph in `FitnessLandscape`.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 This example treats nonzero matrix/table values as raw distances. A zero means
 no edge, not zero distance. Inputs must be symmetric and undirected.

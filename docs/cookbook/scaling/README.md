@@ -7,7 +7,6 @@ scientific inputs.
 
 ## Recipes
 
-- [Choose optional dependencies and portable fallbacks](optional-dependencies.md)
 - [Benchmark kNN backends](knn-backends.md)
 - [Batch, cache, and audit PLM embeddings](plm-embeddings.md)
 - [Configure Ray and parallel construction](ray-and-parallel-construction.md)

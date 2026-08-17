@@ -3,11 +3,7 @@
 Representation sensitivity must hold the node set and node order fixed. Compare
 support diagnostics before comparing any fitness estimator.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[knn,tda]"
-```
+## Input
 
 This example builds Hamming, PLM kNN, finite-time embedding diffusion, and TDA
 views over the same six protein rows and cached embedding order.

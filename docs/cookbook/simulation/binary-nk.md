@@ -4,11 +4,7 @@ The binary NK model combines contributions from `N` binary sites, each coupled
 to `K` other sites. Increasing `K` changes the model's interaction structure;
 it does not guarantee monotonic ruggedness in any one random realization.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 Choose `0 <= K < N` and a recorded seed. The factory enumerates the complete
 binary state space and constructs its Hamming graph.

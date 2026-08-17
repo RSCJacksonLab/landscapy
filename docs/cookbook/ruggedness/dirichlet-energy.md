@@ -3,11 +3,7 @@
 Dirichlet energy sums squared fitness differences once per undirected edge.
 It depends on fitness units, graph density, and optional conductance.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 Use a finite scalar active layer on a simple undirected graph. A weighted
 analysis must name a finite non-negative conductance key; raw distance is not

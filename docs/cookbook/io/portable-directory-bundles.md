@@ -3,11 +3,7 @@
 Portable bundles preserve graph structure, sequences, layers, annotations,
 embeddings, active views, metadata, and checksums without requiring pickle.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[parquet]"
-```
+## Input
 
 `pyarrow` enables Parquet payloads. Without it, Landscapy writes its
 deterministic JSON-table fallback. Both are valid portable bundles.

@@ -3,11 +3,7 @@
 Run this audit before any topology-dependent analysis. Empty, singleton, and
 disconnected graphs have legitimate but different domains of definition.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 `graph_properties` accepts an undirected NetworkX graph or a
 `FitnessLandscape`. Graph nodes are the observed support; absent sequences are

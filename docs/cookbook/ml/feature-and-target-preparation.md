@@ -4,11 +4,7 @@ Prepare features without using the target, attach the measured response as a
 separate layer, and retain split and background fields as annotations. Fit every
 data-dependent preprocessing step on training rows only.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[ml]"
-```
+## Input
 
 The fixture's primary key is `sequence`; `fitness` is the target and `split`
 and `background` are design fields. OHE is appropriate for this complete

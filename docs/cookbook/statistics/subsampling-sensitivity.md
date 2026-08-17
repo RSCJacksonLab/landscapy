@@ -3,11 +3,7 @@
 Subsampling asks whether a descriptive result is stable to reduced observed
 node and edge support. Correlated subsamples are not independent experiments.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[analysis]"
-```
+## Input
 
 Record node/edge retention, seed, sample count, active layer, serial or Ray
 execution, component policy, undefined outputs, and failures.

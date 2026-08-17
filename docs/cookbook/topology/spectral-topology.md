@@ -4,11 +4,7 @@ Spectra summarize a chosen graph operator. Operator, weighting, component
 structure, and mode count are part of the result—not optional implementation
 details.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 This recipe uses a simple undirected graph with two connected components and no
 isolates. It requests unweighted operators explicitly with `weight_key=None`.

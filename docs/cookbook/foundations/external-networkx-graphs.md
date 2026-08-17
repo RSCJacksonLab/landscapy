@@ -3,11 +3,7 @@
 Use an external graph when adjacency was defined outside Landscapy and can be
 stated as an undirected relation over the same sequences.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 Every node must carry a public sequence object in its `sequence` attribute.
 `FitnessLandscape.from_graph` also reconstructs node attributes named

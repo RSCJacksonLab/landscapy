@@ -4,11 +4,7 @@ A reproducible bundle needs scientific provenance in addition to structural
 checksums. This recipe creates a compact metadata record and independently
 audits every manifest payload.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 Record source and license, preprocessing and alignment, graph parameters,
 software versions, seeds, target definitions, node order, and the user pipeline

@@ -4,11 +4,7 @@ Effect-coded regression supports sampled 0/1 genotypes, but unregularized
 coefficients exist only when the intercept-plus-interaction design has full
 column rank.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[analysis]"
-```
+## Input
 
 Report observation and parameter counts, rank, requested order, intercept,
 penalty, alpha, sampling support, residual fit, and coefficient solution type.

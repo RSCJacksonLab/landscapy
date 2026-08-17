@@ -5,11 +5,7 @@ and depends on edge conductance. Read the [component-wise resistance
 contract](effective-resistance-contract.md) and [edge-semantics
 contract](../graph-construction/edge-semantics.md) first.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 The input must be a simple undirected graph. The selected edge key must contain
 finite non-negative conductance, not distance. Node sampling, approximation,

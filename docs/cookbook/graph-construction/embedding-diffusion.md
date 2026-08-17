@@ -4,11 +4,7 @@ Embedding diffusion starts from sparse Euclidean kNN candidate support, applies
 an RBF affinity, constructs a lazy reversible walk, and thresholds a symmetric
 finite-time or stationary diffusion kernel.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[knn]"
-```
+## Input
 
 The embedding matrix must be finite, two-dimensional, and aligned with the
 sequence list. This recipe uses the versioned PLM/PCA cache. Read the [diffusion

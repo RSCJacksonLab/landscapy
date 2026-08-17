@@ -3,13 +3,7 @@
 Use this recipe when each row contains an aligned sequence and an empirical
 numeric response.
 
-## Install and input
-
-The lightweight core is sufficient; Pandas is a required package dependency.
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 The input table must have one unique sequence per row and a numeric `fitness`
 column. This example reads the versioned [cookbook dataset](../data/README.md).

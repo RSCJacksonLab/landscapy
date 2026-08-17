@@ -4,11 +4,7 @@ An elementary landscape uses one graph-Laplacian eigenvector as its fitness
 signal. It is a known-answer control for spectral and random-walk analysis, but
 its meaning is inseparable from the chosen graph and operator.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[knn]"
-```
+## Input
 
 Select eigenvector index `j` and graph type. A kNN graph additionally requires
 a representation and neighbourhood size; the current factory uses OHE kNN for

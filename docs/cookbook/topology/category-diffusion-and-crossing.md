@@ -5,11 +5,7 @@ crossing simulates first visits between categories. Both depend on graph and
 transition semantics and are descriptive unless paired with a predeclared null
 or permutation design.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 The landscape needs a categorical or probabilistic-categorical fitness layer.
 Probability rows must sum to one. This connected path graph uses unweighted
