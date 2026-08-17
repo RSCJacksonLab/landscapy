@@ -4,11 +4,7 @@ Treat PLM embeddings as versioned derived data. Preserve caller sequence order,
 model and tokenizer provenance, dtype, pooling contract, device, and a content
 fingerprint before reusing one array across graph views.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[embeddings,knn]"
-```
+## Input
 
 `ESMEmbedder` selects CUDA when available unless a device is supplied. Tune
 batch size against measured accelerator memory; sequence length, not only row

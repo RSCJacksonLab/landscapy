@@ -4,11 +4,7 @@ Benchmark neighbour backends on a fixed feature matrix before selecting one.
 BallTree and flat FAISS are exact; HNSW and IVF are approximate candidate
 indices. Approximation can alter graph topology, not only runtime.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[faiss]"
-```
+## Input
 
 This synthetic continuous embedding has a fixed seed. Runtime and Python-level
 peak memory are deployment measurements, not portable expected values.

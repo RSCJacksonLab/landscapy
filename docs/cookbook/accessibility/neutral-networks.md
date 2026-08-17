@@ -3,11 +3,7 @@
 A neutral network is a connected component formed by represented edges whose
 endpoint fitness difference is no larger than a declared threshold.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 Choose the threshold from measurement resolution, replicate variability, or a
 predeclared scientific equivalence margin—not from a visually convenient graph.

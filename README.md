@@ -208,12 +208,13 @@ require a platform-specific FAISS build.
 
 ## Cookbook
 
-The [worked-example cookbook](docs/cookbook/README.md) starts with empirical
-tables and the layered `FitnessLandscape` data model, then covers graph
-construction, topology, and analysis. Every recipe states its assumptions,
-expected outputs, and limits of interpretation, and its executable example is
-checked in CI.
+The [worked-example cookbook](docs/cookbook/README.md) starts with installation
+and system requirements, then covers empirical tables, the layered
+`FitnessLandscape` data model, graph construction, topology, and analysis.
+Every recipe states its assumptions, expected outputs, and limits of
+interpretation, and its executable example is checked in CI.
 
+- [Installation and system requirements](docs/cookbook/installation/README.md)
 - [Foundations](docs/cookbook/foundations/README.md)
 - [Components, topology, and annotated groups](docs/cookbook/topology/README.md)
 - [Graph construction and representation choice](docs/cookbook/graph-construction/README.md)

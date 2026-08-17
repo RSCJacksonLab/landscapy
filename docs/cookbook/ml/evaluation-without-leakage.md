@@ -4,11 +4,7 @@ Before model fitting, determine whether each held-out node has graph support
 from training nodes. Component membership and nearest-train distance distinguish
 interpolation from graph extrapolation; neither alone proves predictive validity.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[ml]"
-```
+## Input
 
 Construct the graph from sequence or other target-independent inputs. This
 worked example preregisters `111` as outside the represented adjacency support,

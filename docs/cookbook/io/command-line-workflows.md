@@ -4,14 +4,10 @@ The CLI is useful for reproducible graph construction from FASTA/alignment
 files. Its current graph commands write trusted local compatibility pickles;
 convert them immediately to a portable bundle for sharing.
 
-## Install and input
+## Input
 
-```bash
-python -m pip install "landscapy[cli,knn]"
-```
-
-Quote extras in the shell. OHE kNN requires one aligned FASTA with unique IDs
-and equal aligned length. BallTree is the portable exact backend.
+OHE kNN requires one aligned FASTA with unique IDs and equal aligned length.
+BallTree is the portable exact backend.
 
 ## Worked example
 

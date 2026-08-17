@@ -4,11 +4,7 @@ The ensemble and reference-free APIs compute the same hierarchical Möbius
 decomposition of observed empirical marginal means. They support complete,
 incomplete, balanced, and unbalanced observed designs without imputation.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[analysis]"
-```
+## Input
 
 Duplicates represent repeated observations and make genotype-cell counts
 unbalanced. Their experimental independence must be justified outside this

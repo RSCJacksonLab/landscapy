@@ -3,11 +3,7 @@
 A basin assigns starting nodes to a declared local optimum under a particular
 walk rule. Greedy and stochastic basins are different estimands.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 The stochastic implementation uses NumPy's global random state. Report the
 seed, simulations per node, maximum steps, inverse temperature `beta`, and

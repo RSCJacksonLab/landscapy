@@ -3,11 +3,7 @@
 Greedy accessible paths move only along represented edges with strictly
 increasing active fitness.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 Start and end variants must be unique landscape rows in the same represented
 component. State the improvement direction and how equal-fitness edges are

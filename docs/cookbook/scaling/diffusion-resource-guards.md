@@ -4,11 +4,7 @@ Embedding diffusion computes exact sparse powers before applying the final
 connectivity threshold. Bound both intermediate nonzeros and estimated scalar
 products so infeasible work fails before exhausting memory.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[knn]"
-```
+## Input
 
 Candidate storage begins on the order of the symmetric union of `n * k`
 directed neighbours, but exact powers can fill in rapidly. Measure the actual

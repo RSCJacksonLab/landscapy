@@ -4,11 +4,7 @@ Landscapy 0.9 does not expose a built-in community-detection API. Run a named
 external NetworkX algorithm, record its parameters, then attach its output as an
 annotation for auditable downstream workflows.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 This example uses NetworkX Louvain communities on a simple undirected,
 conductance-weighted graph. The algorithm, weight key, resolution, and seed are

@@ -3,11 +3,7 @@
 `hypothesis_testing` provides Welch t, Mann–Whitney, and Kolmogorov–Smirnov
 tests with one explicit multiplicity family.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[analysis]"
-```
+## Input
 
 Groups must be non-empty finite samples. Define the independent experimental
 unit and estimand before testing; this example treats dataset-level scores as

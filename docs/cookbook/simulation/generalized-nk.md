@@ -5,11 +5,7 @@ template with selected variable sites, and an explicit interaction adjacency
 matrix. Here `N` is the number of variable sites, not necessarily full sequence
 length.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 An explicit interaction matrix is an `N x N` symmetric binary matrix with zero
 diagonal. Its edges describe epistatic interactions, whereas the returned

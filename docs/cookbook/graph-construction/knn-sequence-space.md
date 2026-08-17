@@ -6,11 +6,7 @@ graph even when both use Hamming geometry. The sequence alphabet does not have
 to be binary: aligned protein, DNA, RNA, or other categorical sequences can be
 represented in the OHE domain.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[knn]"
-```
+## Input
 
 OHE/sequence-domain search requires equal aligned length and compatible symbol
 alphabets. `BaseNumpySequence` is the general multi-allelic sequence class;

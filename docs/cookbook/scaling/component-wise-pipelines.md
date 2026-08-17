@@ -4,11 +4,7 @@ Inventory every connected component, declare eligibility before analysis, and
 store skip reasons. Largest-component-only analysis changes the target
 population whenever excluded nodes differ systematically.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 The example has a four-node component, a two-node component, and an isolate.
 The isolate is a held-out row with no training support.

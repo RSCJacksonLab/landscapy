@@ -3,11 +3,7 @@
 `adaptive_walk_stochastic` implements an algorithmic hill-climbing walk. It is
 not a mutation-selection process or an evolutionary-rate model.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 The function uses NumPy's process-wide random state. Set and record it before
 sampling starts or random-improvement steps, and avoid concurrent code that

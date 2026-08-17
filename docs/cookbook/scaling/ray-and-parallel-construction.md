@@ -4,11 +4,7 @@ Use one declared parallelism layer. Landscapy's public Ray workflows start a
 runtime only when needed and shut down only a runtime they own. Avoid launching
 multithreaded BLAS or nested Ray work inside every worker.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[parallel]"
-```
+## Input
 
 `create_evol_diffusion_graph(..., cpus=N)` assigns one CPU per alignment task.
 `subsample_analysis(..., use_ray=True, num_workers=N)` bounds analysis workers.

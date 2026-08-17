@@ -5,11 +5,7 @@ attributes, and fitness layers to a PyTorch Geometric `Data` object. The
 exported object is a transport format; edge semantics still come from the
 Landscapy graph schema.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[ml]"
-```
+## Input
 
 This example uses OHE features and passes `tokenizer=None`, so it performs no
 model download. Every edge must have the same attribute keys before PyG export.

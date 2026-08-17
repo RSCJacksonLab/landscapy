@@ -4,11 +4,7 @@ Choose the method from the observed design before inspecting coefficients.
 Walsh, binary regression, and empirical categorical Möbius decompositions
 answer different questions.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[analysis]"
-```
+## Input
 
 Every method requires equal-length sequences, finite scalar active fitness,
 and an interaction order no greater than sequence length.

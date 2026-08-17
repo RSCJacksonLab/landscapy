@@ -3,11 +3,7 @@
 Local contributions allocate half of each incident squared edge difference to
 each endpoint. They locate graph boundaries in the observed signal.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 Node annotations must share the landscape's sequence-index order. Use a finite
 scalar active layer and declare whether edges are weighted.

@@ -5,11 +5,7 @@ Gaussian noise. `sigma=0` gives a deterministic additive landscape relative to
 the specified optimum; positive noise can add local optima and block increasing
 paths.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 Record `N`, `slope`, `sigma`, `optimum`, and seed. The seed affects the signal
 only when `sigma > 0`.

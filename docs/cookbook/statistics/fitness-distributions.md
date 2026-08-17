@@ -3,11 +3,7 @@
 Distribution summaries describe finite scalar values in the active layer.
 Missingness, sample size, and degenerate cases remain part of the result.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 `nan_policy="raise"` is the default. Use `"omit"` only when omission is
 scientifically justified and report both the input and retained sample sizes.

@@ -3,11 +3,7 @@
 Permutation tests require exchangeable units under the null and a statistic
 whose direction and null value are explicit.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[analysis]"
-```
+## Input
 
 This example permutes independent dataset-level scores. It uses a signed mean
 difference, two-sided alternative, fixed seed, and Holm correction.

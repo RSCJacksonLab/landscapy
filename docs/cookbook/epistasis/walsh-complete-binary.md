@@ -3,11 +3,7 @@
 Walsh analysis requires every one of the `2^L` unique 0/1 genotypes. Row order
 may vary, but completeness and genotype identity must be auditable.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 This known-answer signal uses `z_i = 1 - 2x_i` and
 `f(x) = 1 + 2 z_0 - 0.5 z_1 z_2`.

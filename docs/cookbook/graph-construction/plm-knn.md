@@ -4,13 +4,7 @@ PLM kNN uses Euclidean distance between protein-language-model embeddings. It
 does not use site-wise Hamming distance, even when the source sequences are
 aligned.
 
-## Install and input
-
-Use `embeddings` to generate ESM features and `knn` to build the graph:
-
-```bash
-python -m pip install "landscapy[embeddings,knn]"
-```
+## Input
 
 The offline example loads the versioned four-component ESM/PCA cache described
 in the [data provenance](../data/README.md). The CSV primary key is `sequence`;
@@ -81,8 +75,8 @@ truth.
 
 ## Generate and cache embeddings
 
-Run this explicitly when model download and the `embeddings` extra are
-available. Record the resolved model revision as well as model name.
+Run this explicitly when model download is available. Record the resolved model
+revision as well as model name.
 
 ```python
 from pathlib import Path

@@ -3,11 +3,7 @@
 A local optimum has no represented neighbour with greater fitness. The package
 uses a non-strict convention: nodes tied with all neighbours qualify.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[knn]"
-```
+## Input
 
 Use a finite scalar active layer and report graph construction, component
 support, and tie convention. This example compares two graphs over the same six

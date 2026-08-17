@@ -3,11 +3,7 @@
 A Hamming edge joins two observed, aligned sequences that differ at exactly one
 site. It does not add unobserved single mutants.
 
-## Install and input
-
-```bash
-python -m pip install landscapy
-```
+## Input
 
 All sequences must have the same aligned length and compatible symbol
 semantics. This recipe removes `111` from the complete binary fixture to make

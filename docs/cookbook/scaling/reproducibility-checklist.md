@@ -4,11 +4,7 @@ Create the run manifest before computation, then append outputs and terminal
 status without erasing failures. A completed scientific negative result differs
 from an operational failure that produced no estimable result.
 
-## Install and input
-
-```bash
-python -m pip install "landscapy[parquet]"
-```
+## Input
 
 Record environment versions, input hashes, sequence/node order, graph and edge
 semantics, random state, independent unit, expected counts, output schema, and
