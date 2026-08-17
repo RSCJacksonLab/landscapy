@@ -12,7 +12,7 @@ and an interaction order no greater than sequence length.
 | Observed design | Method | Reported estimand |
 | --- | --- | --- |
 | Complete duplicate-free 0/1 cube | `calculate_epistasis_walsh` | Uniform-measure Fourier-Walsh coefficient |
-| Complete or sampled 0/1 design | `calculate_epistasis_regression` | Effect-coded fitted coefficient; penalty-selected if regularized |
+| Complete or sampled 0/1 design | `calculate_epistasis_regression` | Effect-coded fitted coefficient. Penalty-selected if regularized |
 | General categorical, complete or incomplete | `calculate_epistasis_ensemble` | Observed empirical-marginal Möbius coefficient |
 | Same categorical domain, no reference allele | `calculate_epistasis_reference_free` | Same observed-support Möbius estimand |
 
@@ -85,10 +85,3 @@ effect-coded columns but changes estimand when support or penalties change.
 Categorical methods recursively subtract all lower-order empirical marginal
 terms and do not impute missing cells.
 
-## Common failures
-
-- Walsh is run on a sampled or duplicate binary design.
-- Rank-deficient regression is fitted without an explicit penalty.
-- Penalized and data-identified coefficients are directly compared.
-- Categorical observed-support coefficients are called population ANOVA effects.
-- Missing cells are assumed to have been imputed.

@@ -1,7 +1,7 @@
 # Identify local optima
 
 A local optimum has no represented neighbour with greater fitness. The package
-uses a non-strict convention: nodes tied with all neighbours qualify.
+uses a non-strict convention: nodes tied with all neighbours qualify. The number of local optima is an established and important metric in fitness landscape analysis. See, for example, REF_1, REF_2, ... REF_n.
 
 ## Input
 
@@ -65,10 +65,3 @@ The same measurements have two Hamming optima but one kNN optimum because the
 represented neighbour sets differ. Sparse observation can inflate the count by
 omitting fitter single-mutant neighbours.
 
-## Common failures
-
-- A tied plateau is described as one strict optimum.
-- Internal node integers are reported without biological sequence identifiers.
-- Optima from disconnected components are compared without component support.
-- Graph views with different nodes or fitness scales are treated as matched.
-- An observed local optimum is called evolutionarily unbeatable.

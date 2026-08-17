@@ -64,8 +64,6 @@ alternative explanations.
 
 ## Common failures
 
-- Local contributions are expected to sum to twice the global energy.
 - A sorted annotation table is joined by row position rather than node ID.
 - High-degree nodes are compared without a degree-aware sensitivity analysis.
 - A descriptive boundary is labeled a causal or epistatic site.
-- Disconnected or excluded nodes disappear from the reported denominator.

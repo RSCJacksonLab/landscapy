@@ -1,8 +1,7 @@
 # Generate binary NK landscapes
 
 The binary NK model combines contributions from `N` binary sites, each coupled
-to `K` other sites. Increasing `K` changes the model's interaction structure;
-it does not guarantee monotonic ruggedness in any one random realization.
+to `K` other sites. Increasing `K` changes the model's interaction structure.
 
 ## Input
 
@@ -58,7 +57,7 @@ print(report)
 ```
 
 The node and edge counts are exact known answers. The upper bound of `K + 1`
-on Walsh order checks the construction; counts of optima and energy are
+on Walsh order checks the construction. Counts of optima and energy are
 seed-specific outcomes and need independent realizations for comparison.
 
 ## Common failures

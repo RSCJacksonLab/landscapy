@@ -2,7 +2,7 @@
 
 Before model fitting, determine whether each held-out node has graph support
 from training nodes. Component membership and nearest-train distance distinguish
-interpolation from graph extrapolation; neither alone proves predictive validity.
+interpolation from graph extrapolation.
 
 ## Input
 
@@ -84,13 +84,6 @@ print(component_report, test_report)
 ```
 
 Report the unreachable row as a non-estimable evaluation cell. A random split
-mostly measures interpolation; a support or scaffold split asks a different
-question and should be reported separately, with uncertainty and sample count.
+mostly measures interpolation. A support or scaffold split asks a different
+question and should be reported separately.
 
-## Common failures
-
-- Fitness values influence graph construction, split assignment, or feature selection.
-- Test nodes outside training components are silently removed from metrics.
-- Infinite graph distance is encoded as a large finite number.
-- Random interpolation and graph-extrapolation scores are pooled.
-- Component support is interpreted as evidence of biological generalization.

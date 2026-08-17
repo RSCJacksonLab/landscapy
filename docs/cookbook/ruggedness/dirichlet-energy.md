@@ -1,12 +1,12 @@
 # Compute Dirichlet energy
 
 Dirichlet energy sums squared fitness differences once per undirected edge.
-It depends on fitness units, graph density, and optional conductance.
+It depends on fitness units, graph density, and optional conductance. It is regularly used in literature to describe fitness landscape ruggedness when Walsh-Hadamard Transform is not defined or practical. See, for example, REF_1 (Leveraging ancestral sequence reconstruction for representation learning), REF_2 (Ancestral sequence reconstruction on cutinases reveals a rugged and unexplored PETase fitness landscape), REF_3 (RELSO transformer).
 
 ## Input
 
 Use a finite scalar active layer on a simple undirected graph. A weighted
-analysis must name a finite non-negative conductance key; raw distance is not
+analysis must name a finite non-negative conductance key. Raw distance is not
 conductance. See the [edge contract](../graph-construction/edge-semantics.md).
 
 ## Worked example

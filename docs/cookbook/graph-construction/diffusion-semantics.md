@@ -7,14 +7,14 @@ contract. Let `W` be their symmetric, finite, non-negative pair-affinity
 matrix. Embedding diffusion obtains sparse `W` from an RBF kernel evaluated
 only on the symmetric union of directed kNN candidates. Evolutionary
 diffusion exponentiates the symmetric length-normalized log-odds scores with a
-single global numerical shift; it does not apply row-dependent score shifts.
+single global numerical shift. It does not apply row-dependent score shifts.
 
 For embedding diffusion, `k` is the number of non-self candidates requested
 per row. `tiebuffer` asks the backend for additional hits, which are reranked
 in the declared exact geometry; only extra hits tied at the kth exact distance
 enter `W`. BallTree and flat FAISS define an exact candidate universe. HNSW
 and IVF FAISS define an approximate candidate universe, so missed exact
-neighbours can change the support of `W`; subsequent RBF evaluation and
+neighbours can change the support of `W`. Subsequent RBF evaluation and
 diffusion are exact conditional on that returned universe. Graph metadata
 records the backend, index, tie rule, and whether candidate selection was
 approximate.
@@ -49,7 +49,7 @@ diffusion construction, Landscapy counts the exact output structure and scalar
 products before every matrix multiplication using O(n) marker storage. It
 raises an actionable `MemoryError` before either `max_diffusion_nnz` (default
 50,000,000) or `max_diffusion_work` (default 1,000,000,000) would be exceeded.
-These are feasibility guards, not approximations: increasing them cannot
+These are feasibility guards, not approximations. Increasing them cannot
 change a result that already fits. `connectivity_threshold` cannot reduce
 intermediate work because thresholding remains post-kernel.
 

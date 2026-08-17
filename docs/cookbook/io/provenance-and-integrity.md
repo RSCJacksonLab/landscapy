@@ -76,14 +76,5 @@ with TemporaryDirectory() as tmp:
 print(manifest["node_count"], len(manifest["files"]), node_fingerprint)
 ```
 
-The manifest verifies stored bytes; the node-order fingerprint verifies the
-user-level identity/order contract. Neither substitutes for source-data
-versioning or a recorded preprocessing method.
-
-## Common failures
-
-- Only the package version is recorded, omitting graph and target definitions.
-- A checksum is computed before the final file is written.
-- Node order is treated as incidental even though layers and embeddings use it.
-- Operational failure is recorded as a completed negative scientific result.
-- Metadata claims a remote backup or source version that was never verified.
+The manifest verifies stored bytes and the node-order fingerprint verifies the
+user-level identity/order contract.

@@ -13,3 +13,5 @@ cells, and any regularization.
 ## Reference contract
 
 - [Epistasis domains, coefficients, normalization, and missing-cell behavior](estimand-contracts.md)
+
+## Useful literature:

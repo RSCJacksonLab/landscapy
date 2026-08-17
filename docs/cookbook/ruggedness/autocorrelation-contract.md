@@ -49,9 +49,7 @@ the random-walk expression in Peter F. Stadler, *Landscapes and Their
 Correlation Functions*, Journal of Mathematical Chemistry 20 (1996), 1-45,
 [DOI 10.1007/BF01165154](https://doi.org/10.1007/BF01165154). Stationary
 degree weighting is Landscapy's reversible irregular-graph generalization of
-that regular-graph derivation. [Closed issue #45](https://github.com/RSCJacksonLab/landscapy/issues/45)
-provides historical package context, but is not the mathematical validation of
-this estimand.
+that regular-graph derivation. 
 
 `equivalent_single_exponential_length` is
 `-1 / log(abs(C_discrete(1)))`, with zero and infinite limiting cases. It only
@@ -71,7 +69,7 @@ C_continuous(t) = x_c^T diag(pi) exp(-t L_rw) x_c
 ```
 
 Here `t` is continuous, dimensionless diffusion time under a unit-rate
-generator; it is not a count of graph steps. In the reversible spectral basis,
+generator. It is not a count of graph steps. In the reversible spectral basis,
 the same expression is `sum_j B_j exp(-t mu_j)`. It decays continuously even
 when the corresponding discrete walk oscillates. `elementary_correlation_time`
 is returned as `1 / mu` only when the centered signal is numerically verified

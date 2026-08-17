@@ -1,6 +1,6 @@
 # Attach external community annotations
 
-Landscapy 0.9 does not expose a built-in community-detection API. Run a named
+Landscapy does not expose a built-in community-detection API. Run a named
 external NetworkX algorithm, record its parameters, then attach its output as an
 annotation for auditable downstream workflows.
 
@@ -101,7 +101,7 @@ print(comparison)
 ```
 
 The algorithm recovers two communities of three nodes connected by one weak
-bridge. The cross-tab compares them with known metadata; the quotient and
+bridge. The cross-tab compares them with known metadata. The quotient and
 category hierarchy provide group-level views without converting community IDs
 to fitness.
 
@@ -109,17 +109,5 @@ to fitness.
 
 Community assignments and modularity describe the supplied graph under one
 algorithm and parameter set. Integer community labels are arbitrary and
-non-identifiable across runs; compare member sets, not label numbers. Agreement
-with known metadata is descriptive unless a valid, component-aware null model
-and test statistic were specified in advance.
+non-identifiable across runs: compare member sets, not label numbers.
 
-## Common failures
-
-- Algorithm, NetworkX version, resolution, seed, or weight key is omitted.
-- Raw distances are passed as `weight` even though Louvain treats larger values
-  as stronger connections.
-- Community IDs are treated as ordered or stable across runs.
-- A high modularity value is interpreted as evidence for biological classes
-  without a comparator.
-- Disconnected components force communities, but their support structure is not
-  reported separately.

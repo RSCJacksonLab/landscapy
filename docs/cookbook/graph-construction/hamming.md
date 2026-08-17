@@ -65,9 +65,7 @@ non-viable, unmeasured, or filtered upstream.
 
 ## Interpretation
 
-The graph exactly represents single-site adjacency among observed aligned rows.
-Report isolates, components, and missing theoretical neighbours before using
-fragmentation, local optima, or accessibility as biological evidence. The
+The graph exactly represents single-site adjacency among observed aligned rows. The
 canonical `distance` is a Hamming count; `weight` is conductance under the
 [edge-semantics contract](edge-semantics.md).
 

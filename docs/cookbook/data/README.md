@@ -32,8 +32,8 @@ order.
 ## Protein graph-construction fixtures
 
 `toy_proteins.fasta` contains six synthetic aligned seven-residue protein
-sequences. They were designed only to create small, auditable graph examples;
-they are not derived from a natural protein family.
+sequences. They were designed only to create small, auditable graph examples.
+They are not derived from a natural protein family.
 
 `toy_protein_embeddings.csv` is a four-component PCA cache derived from
 mean-pooled `facebook/esm2_t6_8M_UR50D` embeddings of those six sequences. The

@@ -87,16 +87,13 @@ index/ID assertions verify that annotations remain aligned after filtering.
 The induced subgraph answers which observed edges occur among the matching
 rows. It does not show that the annotation caused the topology. `taxonomy`,
 `background`, and `split` remain metadata. The example converts only a stated
-assay-derived category; even then, category codes are labels unless an ordinal
-model is separately justified.
+assay-derived category.
 
 ## Common failures
 
 - Non-unique IDs make `map_by="name"` ambiguous.
 - Sequence-keyed mapping inherits duplicate-sequence ambiguity.
 - `allow_missing=True` creates null annotation rows that later queries may
-  exclude; report their denominator.
-- Querying a category and interpreting the induced graph without comparing its
-  component support confounds label and sampling structure.
+  exclude.
 - Converting taxonomy or split labels to fitness can create an artificial
   numerical signal.

@@ -15,3 +15,5 @@ estimators, not evidence that an empirical landscape follows the same model.
 Every stochastic recipe fixes the seed, records the parameters stored in the
 fitness-layer metadata, and distinguishes repeated model realizations from
 replicate measurements of one genotype.
+
+## Useful literature:

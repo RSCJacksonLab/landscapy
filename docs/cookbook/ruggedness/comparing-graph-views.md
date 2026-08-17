@@ -72,8 +72,7 @@ print(coverage.to_dict(orient="records"))
 ```
 
 The matched standardized signal produces different energy because the kNN view
-contains more and different edges. The table makes that denominator visible;
-it does not identify which view is biologically correct.
+contains more and different edges. The table makes that denominator visible.
 
 ## Common failures
 

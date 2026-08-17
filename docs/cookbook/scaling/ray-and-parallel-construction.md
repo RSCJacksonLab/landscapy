@@ -57,7 +57,7 @@ print(parallel_config, serial["per_key"]["local_optima_count"])
 
 Run the serial result first, then compare the parallel result with the same
 seeds and stable input order on the deployment system. Collect every task
-failure and persist completed stage identifiers; Ray execution is not itself a
+failure and persist completed stage identifiers. Ray execution is not itself a
 resumable scientific pipeline.
 
 ## Common failures

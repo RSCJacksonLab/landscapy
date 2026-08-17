@@ -1,7 +1,7 @@
 # Decompose fitness into graph Fourier modes
 
 Graph Fourier analysis expands a node-aligned signal in eigenvectors of a
-declared graph operator. Operator and edge-weight choices define the basis.
+the graph Laplacian matrix. Operator and edge-weight choices define the basis.
 
 ## Input
 
@@ -70,9 +70,6 @@ with TemporaryDirectory() as tmp:
 print(eigenvalues.tolist(), residuals.max(), cumulative[-1])
 ```
 
-The cube has repeated eigenvalues. Individual vectors inside a degenerate
-eigenspace are not unique, although total power in that eigenspace is invariant.
-Cached eigenpairs must match operator, node order, weights, and graph version.
 
 ## Common failures
 
@@ -80,4 +77,3 @@ Cached eigenpairs must match operator, node order, weights, and graph version.
 - A normalized or transition spectrum is interpreted as combinatorial.
 - A `k`-truncated transform is described as a full reconstruction.
 - Individual degenerate eigenvectors receive stable biological labels.
-- Solver residuals and orthogonality are not checked or reported.

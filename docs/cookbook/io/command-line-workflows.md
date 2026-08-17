@@ -1,7 +1,7 @@
 # Run Landscapy from the command line
 
 The CLI is useful for reproducible graph construction from FASTA/alignment
-files. Its current graph commands write trusted local compatibility pickles;
+files. Its current graph commands write trusted local compatibility pickles.
 convert them immediately to a portable bundle for sharing.
 
 ## Input

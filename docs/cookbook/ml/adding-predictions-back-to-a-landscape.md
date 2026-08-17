@@ -2,12 +2,12 @@
 
 Store predictions under new, model-specific layer names and preserve the
 measured layer unchanged. Ensemble members are replicate values of the
-prediction layer; uncertainty and split membership have separate meanings.
+prediction layer.
 
 ## Input
 
 Predictions in this example exist only for held-out rows. The model values are
-already on the assay scale; real pipelines must record any inverse transform.
+already on the assay scale. Real pipelines must record any inverse transform.
 
 ## Worked example
 

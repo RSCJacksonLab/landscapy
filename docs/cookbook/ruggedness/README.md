@@ -20,3 +20,5 @@ worked estimator example would normalize a scientifically disputed method.
 - [Stationary random-walk autocorrelation](autocorrelation-contract.md)
 - [Random-walk spectral operators](spectral-operators.md)
 - [Edge attributes, distance, affinity, and conductance](../graph-construction/edge-semantics.md)
+
+## Useful literature:

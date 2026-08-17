@@ -60,10 +60,3 @@ that the underlying graph or analysis is scientifically appropriate.
 `backend="portable"` is the publication format. `backend="pickle"` exists only
 for legacy interoperability and can execute code during deserialization. Never
 load a pickle bundle from an untrusted or unverifiable source.
-
-## Common failures
-
-- The archive is renamed without preserving its checksum or metadata.
-- Non-deterministic user metadata, such as a current timestamp, changes bytes.
-- A legacy pickle is treated as safe because it has an `.lsbundle` suffix.
-- The archive is deposited without package version, license, or node-order data.

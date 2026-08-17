@@ -18,7 +18,7 @@ sequence length.
 
 A relaxed matrix has shape `(length, len(alphabet))`. Its values are finite and
 non-negative, and every row sums to one. Columns follow the configured
-`alphabet` exactly; there is no implicit left/right padding or inferred column
+`alphabet` exactly. There is no implicit left/right padding or inferred column
 order. `gap` is normalized to `-`. Unsupported alphabet entries map to
 `<unk>`, but only one such column is allowed so distinct scientific states
 cannot silently collapse onto the same model token. Model special tokens are

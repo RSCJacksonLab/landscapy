@@ -1,7 +1,7 @@
 # Enumerate greedy accessible paths
 
 Greedy accessible paths move only along represented edges with strictly
-increasing active fitness.
+increasing active fitness. Greedy accessible path analysis is a foundation of quantitative fitness landscape analysis and underpins much of the understanding on historical contingency, epistasis and fitness landscape ruggedness. See, for example, REF_1, REF_2, REF_3, ... REF_n.
 
 ## Input
 
@@ -46,13 +46,4 @@ print(paths["path_count"], paths["mean_path_length"], summary["accessibility"])
 ```
 
 The complete three-site additive cube has `3! = 6` strictly increasing
-shortest paths from `000` to `111`. This is a known-answer software check, not
-an empirical accessibility claim.
-
-## Common failures
-
-- Endpoints are absent, duplicated, reversed in fitness, or disconnected.
-- Equal-fitness steps are counted despite the strict comparison in this API.
-- Path length counts nodes rather than edges.
-- All simple increasing paths are called shortest paths without checking.
-- Missing observed variants are interpreted as biologically forbidden steps.
+shortest paths from `000` to `111`.

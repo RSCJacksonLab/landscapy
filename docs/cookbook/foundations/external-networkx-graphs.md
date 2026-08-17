@@ -7,7 +7,7 @@ stated as an undirected relation over the same sequences.
 
 Every node must carry a public sequence object in its `sequence` attribute.
 `FitnessLandscape.from_graph` also reconstructs node attributes named
-`fitness_<layer>`. Arbitrary hashable node labels are allowed; list order is not
+`fitness_<layer>`. Arbitrary hashable node labels are allowed. list order is not
 a substitute for checking the mapping.
 
 ## Worked example
@@ -80,8 +80,8 @@ contract](../graph-construction/edge-semantics.md). Do not place a raw distance 
 `weight`, because weighted Landscapy analyses interpret `weight` as
 conductance.
 
-Landscapy 0.9 supports undirected graphs only. Reject or explicitly transform a
-directed input upstream; silent symmetrization changes the scientific model.
+Landscapy 1.0 supports undirected graphs only. Reject or explicitly transform a
+directed input upstream. Silent symmetrization changes the scientific model!
 
 ## Common failures
 

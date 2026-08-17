@@ -1,7 +1,7 @@
 # Analyze neutral networks
 
 A neutral network is a connected component formed by represented edges whose
-endpoint fitness difference is no larger than a declared threshold.
+endpoint fitness difference is no larger than a declared threshold. Neutral network analysis can provide insight on evolvability and mutational robustness. See, for example, REF_1, REF_2, ... REF_n. 
 
 ## Input
 
@@ -47,10 +47,3 @@ The component partition changes sharply between thresholds, which is the point
 of reporting sensitivity. Relate neutral components to local optima or basins
 only after preserving their distinct definitions and denominators.
 
-## Common failures
-
-- A numerical tolerance is called biological neutrality without measurement support.
-- Replicate noise is reduced to a scalar without recording the rule.
-- Singleton neutral components are dropped from the denominator.
-- The threshold is tuned to create the desired component.
-- Unobserved neighbours are assumed to be non-neutral.

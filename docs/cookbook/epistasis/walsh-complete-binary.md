@@ -1,7 +1,7 @@
 # Compute Walsh epistasis on a complete binary cube
 
 Walsh analysis requires every one of the `2^L` unique 0/1 genotypes. Row order
-may vary, but completeness and genotype identity must be auditable.
+may vary, but completeness and genotype identity must be auditable. See, for example, REF_1, REF_2, .. , REF_n.
 
 ## Input
 
@@ -50,15 +50,3 @@ assert result["normalization"]["binary_coding"] == "0 -> +1; 1 -> -1"
 
 print(result["by_order"], result["variance_explained"])
 ```
-
-The orthonormal transform value is `sqrt(2^L)` times the package's reported
-uniform-measure coefficient. State this normalization and zero-based position
-labels whenever coefficients leave the package.
-
-## Common failures
-
-- A genotype is missing or duplicated, or a sequence contains a non-binary state.
-- Coefficients are assigned by input row rather than genotype identity.
-- Orthonormal and uniform-measure values are mixed without the `sqrt(2^L)` factor.
-- Position labels are reversed by assuming little-endian genotype order.
-- A known-answer transform match is treated as empirical evidence.

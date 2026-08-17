@@ -25,7 +25,7 @@ range. The interpretation threshold is the validated `alpha` argument.
 
 `hypothesis_testing` supports exactly `ttest`, `mannwhitney`, and `ks`.
 Unknown or repeated test names raise instead of being ignored. All groups must
-be non-empty after the selected NaN policy; infinities are always rejected.
+be non-empty after the selected NaN policy and infinities are always rejected.
 The independent t-test additionally requires at least two observations in
 every group. Raw statistics and p-values use the corresponding SciPy routines:
 
@@ -45,8 +45,7 @@ both with the call and with each comparison.
 `permutation_test` requires a positive integer permutation count, a supported
 alternative, at least two non-empty finite groups, and a statistic function
 that returns one finite scalar. For a two-sided test, the statistic must be a
-signed statistic whose null value is zero; the default difference in means has
-that property.
+signed statistic whose null value is zero.
 
 If `b` of `B` sampled label permutations are at least as extreme as the
 observed statistic, Landscapy reports
@@ -64,7 +63,7 @@ standard error of the corrected estimator,
 sqrt(B * p * (1 - p)) / (B + 1).
 ```
 
-Holm correction across pairwise comparisons is the default; the same explicit
+Holm correction across pairwise comparisons is the default. The same explicit
 alternatives and opt-out as `hypothesis_testing` are available.
 
 `random_state` accepts a non-negative integer seed, a NumPy `Generator`, or

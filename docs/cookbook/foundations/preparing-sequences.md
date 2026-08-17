@@ -1,7 +1,7 @@
 # Prepare sequence objects
 
 Sequence values, order, alphabet, and identifiers are separate concepts. Choose
-the narrowest class that represents the data.
+the narrowest class that represents the data. The default protein alphabet inherited from Cogent3 is the recommended alphabet for proteins, and enables pairwise alignment and other and/or other entries to phylogenetic analysis. 
 
 ## Input
 
@@ -52,6 +52,9 @@ print(binary.id, audit_text(binary))
 print(multiallele.id, multiallele.alphabet)
 print(protein.id, audit_text(protein))
 ```
+
+#TODO: ADD a simple example with the default protein alphabet
+#TODO: ADD a simple example with the default protein alphabet with aligned input sequences.
 
 Expected output round-trips all three inputs without changing site order. The
 underlying sequence view is read-only; `to_array()` returns a safe copy.

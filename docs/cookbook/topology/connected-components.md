@@ -78,7 +78,7 @@ assert set(components[0].annotation_layers) == {"context"}
 assert set().union(*(set(row["nodes"]) for row in eligibility)) == set(node_order)
 
 # This pooled mean is valid only because all eligible values share the same
-# assay scale. Report its 4/5 denominator; do not average component estimates
+# assay scale. Report its 4/5 denominator. Do not average component estimates
 # that answer incompatible questions.
 eligible_mean = float(np.mean(included_values))
 assert eligible_mean == 6.25
@@ -94,7 +94,7 @@ an edge-based analysis, so the example reports an included denominator of 4/5.
 
 Component-wise analysis prevents infinite cross-component relationships from
 being converted to finite numbers. Recombination is justified only for
-compatible estimands on a common scale; use node-weighted or otherwise stated
+compatible estimands on a common scale. Use node-weighted or otherwise stated
 weights rather than an unlabelled mean of component means.
 
 ## Common failures

@@ -61,7 +61,7 @@ print(comparison)
 ```
 
 The analytical and stochastic values target the same discrete Markov-lag
-quantity; their difference is Monte Carlo error. Continuous time uses a
+quantity. Continuous time uses a
 semigroup and cannot be substituted for integer lag. Bipartite/periodic graphs
 can show oscillating discrete correlations, so a single exponential length may
 be unavailable.

@@ -75,11 +75,3 @@ print(identified["model"], penalized)
 `R^2` is an in-sample residual diagnostic, not evidence of coefficient
 identifiability or predictive performance. Penalized solutions depend on
 penalty, alpha, scaling, and observed genotypes even when fit is nearly exact.
-
-## Common failures
-
-- Observation count alone is used instead of augmented-design rank.
-- A rank-deficient unregularized request is forced through another estimator.
-- Alpha and elastic-net `l1_ratio` are omitted.
-- Penalized coefficients are described as data-identified effects.
-- In-sample `R^2` is reported as held-out performance.

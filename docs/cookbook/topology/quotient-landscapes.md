@@ -82,9 +82,9 @@ print(annotations.to_dict(orient="records"))
 print(list(quotient.graph.edges(data=True)), pure_components)
 ```
 
-The quotient has two nodes and one cross-group edge. Numeric fitness is averaged;
-categorical fitness becomes a probability distribution; annotation strings are
-deduplicated and joined; the selected edge attribute is averaged over source
+The quotient has two nodes and one cross-group edge. Numeric fitness is averaged.
+Categorical fitness becomes a probability distribution. Annotation strings are
+deduplicated and joined and the selected edge attribute is averaged over source
 edges.
 
 ## Interpretation

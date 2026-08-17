@@ -87,5 +87,3 @@ illustrative values into evidence.
 - A fitness array with a different row order can be accepted as the wrong data;
   always audit sequence IDs and representative values.
 - Unequal sequence lengths are invalid for Hamming construction.
-- `read_csv_landscape` is not in the supported 0.9 exports, so this recipe uses
-  Pandas and public constructors rather than importing an implementation module.

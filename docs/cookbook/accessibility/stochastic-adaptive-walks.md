@@ -1,7 +1,6 @@
 # Run stochastic adaptive walks
 
-`adaptive_walk_stochastic` implements an algorithmic hill-climbing walk. It is
-not a mutation-selection process or an evolutionary-rate model.
+`adaptive_walk_stochastic` implements an algorithmic hill-climbing walk. Unlike the greedy adaptive walks, stochastic adaptive walks allow mutations that may deteriorate fitness, and are not deterministic.
 
 ## Input
 
@@ -74,11 +73,3 @@ print(report)
 Report the endpoint distribution and stopping reason, not only a representative
 path. `reached_optimum` means the implementation stopped before `max_steps`; it
 does not prove a global optimum was reached unless independently checked.
-
-## Common failures
-
-- The global NumPy seed is omitted or changed by parallel work.
-- One random walk is presented as an endpoint probability distribution.
-- Stopping at a local optimum is confused with reaching the global optimum.
-- Failed moves and maximum-step censoring are not reported.
-- Algorithmic transition choices are called evolutionary rates.

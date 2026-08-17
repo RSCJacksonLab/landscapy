@@ -1,8 +1,8 @@
 # Work with fitness layers
 
 A landscape can hold multiple phenotypes or representations of uncertainty.
-The active view selects a layer for methods that require one; it does not alter
-the stored data.
+The active view selects a layer for methods that require one. Changing the active layer does not alter
+data in other fitness layers, annotations, sequences or graph connectivity.
 
 ## Input
 
@@ -100,9 +100,7 @@ print(landscape.active_layer_name)
 
 Replicate-valued numeric layers scalarize to the row mean by default.
 Categorical layers scalarize by declared category order, while probabilistic
-categorical layers use the most probable category. Those integer codes are
-computational representations, not continuous measurements; provide an
-explicit scientifically justified rank map if ordinal meaning is intended.
+categorical layers use the most probable category. 
 
 ## Mapping policy
 

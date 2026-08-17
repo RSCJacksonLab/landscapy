@@ -1,7 +1,7 @@
 # Construct a TDA alpha-complex graph
 
-The 0.9 TDA constructor reduces an embedding with PCA, builds an alpha complex,
-and exposes its one-skeleton as an undirected graph.
+The TDA constructor reduces an embedding with PCA, builds an alpha complex,
+and exposes its one-skeleton as an undirected graph. See REF_1 for an introduction on topological data analysis and the principles that underpin this method. 
 
 ## Input
 
@@ -70,20 +70,14 @@ separately as `simplicial_weight`; it does not overwrite conductance.
 
 ## Alpha selection and scope
 
-The 0.9 public constructor automatically chooses the squared alpha threshold as
+The public constructor automatically chooses the squared alpha threshold as
 the 95th percentile of finite zero-dimensional persistence death times (or
 `0.01` when none exist). It does not expose a user alpha parameter or record the
-chosen value, so report this algorithm and test embedding/PCA sensitivity. A
-future API should expose the selected alpha for stronger provenance.
-
-Alpha-complex graph construction is in release scope. Persistent-homology
-analysis and interpretation are explicitly outside the 0.9 release scope; an
-edge set alone does not support a claim about topological features.
+chosen value, so report this algorithm and test embedding/PCA sensitivity.
 
 ## Common failures
 
 - Duplicate or geometrically degenerate points are passed to Gudhi.
-- Requested PCA dimension is reported instead of effective rank.
 - PCA-space distance is used as NetworkX conductance.
 - `simplicial_weight` is mistaken for canonical `weight`.
 - Automatic alpha selection is treated as biologically calibrated.

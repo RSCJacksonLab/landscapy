@@ -48,18 +48,7 @@ for comparison, record in first.items():
 print(first)
 ```
 
-The smallest attainable estimate here is `1/(999+1) = 0.001`, never zero.
+The smallest attainable estimate here is `1/(999+1) = 0.001`, never zero. The resolution of the test can be increased with more permutations.
 Record the full pre-comparison generator state stored in each result when exact
 comparison-level reconstruction matters.
 
-Invalid exchangeability includes permuting nodes within one graph as if they
-were independent organisms, separating paired measurements, or shuffling
-labels across batches when the null preserves batch structure.
-
-## Common failures
-
-- An absolute/non-negative statistic is used for a two-sided zero-null test.
-- `b/B` is used, allowing an impossible p-value of zero.
-- The permutation unit differs from the experimental unit.
-- Seed, bit generator, permutation count, resolution, or Monte Carlo SE is omitted.
-- Multiple comparisons are reported without a declared correction family.
