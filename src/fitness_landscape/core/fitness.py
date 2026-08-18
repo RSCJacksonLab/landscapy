@@ -1,16 +1,67 @@
+"""Represent numeric and categorical fitness layers and modifiers."""
+
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from functools import reduce
 import operator
-from typing import Dict, Literal, List, Any, Tuple, Union, Mapping, Callable, Sequence
-import torch
+from typing import TYPE_CHECKING, Dict, Literal, List, Any, Tuple, Union, Mapping, Callable, Sequence
 import numpy as np
 from scipy import stats
+from .._optional import require_optional
+
+if TYPE_CHECKING:
+    import torch
+
+
+def _torch_module():
+    return require_optional(
+        "torch",
+        extra="ml",
+        purpose="PyTorch fitness tensors",
+    )
+
+
+def _is_torch_tensor(value: object) -> bool:
+    if not type(value).__module__.startswith("torch"):
+        return False
+    return isinstance(value, _torch_module().Tensor)
+
+
+def _validated_categories(categories: Sequence[str]) -> list[str]:
+    """Return a non-empty defensive category list with unique values."""
+    values = list(categories)
+    if not values:
+        raise ValueError("categories must not be empty")
+    for index, value in enumerate(values):
+        if any(value == previous for previous in values[:index]):
+            raise ValueError("categories must contain unique values")
+    return values
+
+
+def _as_float_matrix(value: object, *, name: str) -> np.ndarray:
+    """Return a defensive two-dimensional floating-point matrix."""
+    raw = value.detach().cpu().numpy() if _is_torch_tensor(value) else value
+    try:
+        matrix = np.array(raw, dtype=float, copy=True)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must contain numeric values") from error
+    if matrix.ndim != 2:
+        raise ValueError(f"{name} must be a 2-D matrix")
+    return matrix
 
 
 # Fitness oeprates as a `layer` over the fitness landscape object.
 class BaseFitnessLayer(ABC):
     """
     Base class for fitness layers in a fitness landscape. 
+
+    Parameters
+    ----------
+    name : str
+        Layer name.
+    metadata : dict, optional
+        Additional layer metadata.
 
     Attributes
     ----------
@@ -43,16 +94,24 @@ class BaseFitnessLayer(ABC):
     @abstractmethod
     def to_scalar(self,
                   **kwargs) -> np.ndarray:
-        """
-        Method to convert the fitness layer to a scalar representation.
+        """Convert the fitness layer to a scalar representation.
+
+        Parameters
+        ----------
+        **kwargs
+            Layer-specific scalar conversion options.
         """
         pass
 
     @abstractmethod
     def get_value(self,
                   sequence_index: int) -> Any:
-        """
-        Retrieves the native fitness value(s) for a single sequence.
+        """Retrieve the native fitness value for one sequence.
+
+        Parameters
+        ----------
+        sequence_index : int
+            Zero-based sequence index.
         """
         pass
     
@@ -73,9 +132,17 @@ class BaseFitnessLayer(ABC):
 
     
 class NumericFitness(BaseFitnessLayer):
-    """
-    Fitness layer that represents numeric fitness values as scalars and
-    distributions based on replicate data.
+    """Represent scalar or replicated numeric fitness measurements.
+
+    Parameters
+    ----------
+    name : str
+        Layer name.
+    values : sequence of float, sequence of sequence of float, ndarray, or torch.Tensor
+        One scalar per sequence or one collection of replicate measurements per
+        sequence.
+    metadata : dict, optional
+        Free-form layer metadata.
 
     Attributes
     ----------
@@ -111,7 +178,7 @@ class NumericFitness(BaseFitnessLayer):
             "sequence of per-sequence replicate values."
         )
 
-        if isinstance(values, torch.Tensor):
+        if _is_torch_tensor(values):
             raw_values = values.detach().cpu().numpy().tolist()
         elif isinstance(values, np.ndarray):
             if values.ndim == 0 or values.ndim > 2:
@@ -128,7 +195,7 @@ class NumericFitness(BaseFitnessLayer):
 
         normalized: List[List[float]] = []
         for row in raw_values:
-            if isinstance(row, torch.Tensor):
+            if _is_torch_tensor(row):
                 row = row.detach().cpu().numpy()
 
             if isinstance(row, np.ndarray):
@@ -160,6 +227,7 @@ class NumericFitness(BaseFitnessLayer):
 
     @property
     def dtype(self) -> Literal['numeric']:
+        """Return the layer kind, ``'numeric'``."""
         return 'numeric'
 
     def get_tensor(self) -> torch.Tensor:
@@ -179,6 +247,7 @@ class NumericFitness(BaseFitnessLayer):
         padded_reps = [
             r + [np.nan] * (max_reps - len(r)) for r in self._replicates
         ]
+        torch = _torch_module()
         return torch.tensor(padded_reps, dtype=torch.float32)
 
     def to_scalar(self,
@@ -202,21 +271,18 @@ class NumericFitness(BaseFitnessLayer):
         return np.array([aggregate_func(r) for r in self._replicates])
 
     def get_value(self,
-                  sequence_index: int) -> Dict[str, float]:
-        """
-        Returns the full set of values for a single sequence.
+                  sequence_index: int) -> List[float]:
+        """Return replicate values for one sequence.
         
         Parameters
         ----------
         sequence_index : int
-            The index of the sequence for which to retrieve the
-            probability distribution.
+            Positional sequence index.
 
         Returns
         -------
-        Dict[str, float]
-            A dictionary mapping each category to its probability for
-            the specified sequence.
+        list of float
+            Replicate measurements for the sequence.
         """
         return self._replicates[sequence_index]
     
@@ -276,7 +342,7 @@ class NumericFitness(BaseFitnessLayer):
         metadata : Dict, optional
             Additional metadata associated with the fitness layer.
         
-            coerce_numeric : bool, default=`True`
+        coerce_numeric : bool, default=True
             If `True`, will convert all values to float.
     
         Returns
@@ -317,14 +383,14 @@ class NumericFitness(BaseFitnessLayer):
         tensor : np.ndarray OR torch.Tensor
             a 2-D array of shape (num_sequences, num_replicates).
         
-        metadata : Dict, optional
-            Additional metadata associated with the fitness layer.
-        
         pad_strategy : str, default=`keep`
             Strategy for handling missing values. Options are:
             - "keep": Keep all values, including NaNs.
             - "trim_tail_nans": Trim only trailing NaNs from each sequence,
               keeping leading/middle NaNs (safer for padding artifacts).
+
+        metadata : Dict, optional
+            Additional metadata associated with the fitness layer.
 
         Returns
         -------
@@ -332,7 +398,7 @@ class NumericFitness(BaseFitnessLayer):
             An instance of the NumericFitness class initialized with
             the provided parameters.
         """
-        arr = tensor.detach().cpu().numpy() if isinstance(tensor, torch.Tensor) else np.asarray(tensor)
+        arr = tensor.detach().cpu().numpy() if _is_torch_tensor(tensor) else np.asarray(tensor)
         if arr.ndim != 2:
             raise ValueError("NumericFitness.from_tensor expects a 2-D array (num_sequences, num_replicates)")
         vals: List[List[float]] = []
@@ -355,8 +421,25 @@ class NumericFitness(BaseFitnessLayer):
                        length: int,
                        fill: float | None = float("nan"),
                        metadata: Dict | None = None) -> "NumericFitness":
-        """
-        Build from {index -> scalar or replicate list}. Missing indices get `fill` (replicate of one).
+        """Build a numeric layer from values indexed by sequence position.
+
+        Parameters
+        ----------
+        name : str
+            Layer name.
+        mapping : mapping of int to float or list of float
+            Scalar or replicate values keyed by zero-based sequence index.
+        length : int
+            Total number of sequences in the output layer.
+        fill : float, optional
+            Value assigned to missing indices. ``None`` is represented as NaN.
+        metadata : dict, optional
+            Free-form layer metadata.
+
+        Returns
+        -------
+        NumericFitness
+            Constructed numeric layer.
         """
         vals: List[List[float]] = []
         for i in range(length):
@@ -441,8 +524,18 @@ class NumericFitness(BaseFitnessLayer):
 
 
 class CategoricalFitness(BaseFitnessLayer):
-    """
-    Fitness layer that represents categorical fitness values.
+    """Represent one categorical fitness value per sequence.
+
+    Parameters
+    ----------
+    name : str
+        Layer name.
+    values : list of str
+        Category assigned to each sequence.
+    categories : list of str, optional
+        Ordered allowed categories. If omitted, sorted unique values are used.
+    metadata : dict, optional
+        Free-form layer metadata.
 
     Attributes
     ----------
@@ -464,20 +557,30 @@ class CategoricalFitness(BaseFitnessLayer):
                  metadata: Dict = None) -> None:
         super().__init__(name=name,
                          metadata=metadata)
-        self._values = values
-        
-        if categories is None:
-            self.categories = sorted(list(set(values)))  # Unique categories from values
-        else:
-            self.categories = categories
+        self._values = list(values)
 
-        self.category_map = {cat: i for i, cat in enumerate(self.categories)}
+        if categories is None:
+            try:
+                inferred_categories = sorted(set(self._values))
+            except TypeError as error:
+                raise ValueError("categorical values must be hashable") from error
+            self._categories = tuple(_validated_categories(inferred_categories))
+        else:
+            self._categories = tuple(_validated_categories(categories))
+
+        self.category_map = {cat: i for i, cat in enumerate(self._categories)}
 
         if not all(v in self.category_map for v in self._values):
             raise ValueError("All fitness 'values' must be present in the 'categories' list.")
 
     @property
+    def categories(self) -> list[str]:
+        """Return a defensive copy of the ordered categories."""
+        return list(self._categories)
+
+    @property
     def dtype(self) -> Literal['categorical']:
+        """Return the layer kind, ``'categorical'``."""
         return 'categorical'
 
     def get_tensor(self) -> torch.Tensor:
@@ -495,6 +598,7 @@ class CategoricalFitness(BaseFitnessLayer):
             (num_sequences, num_categories).
         """
         num_classes = len(self.categories)
+        torch = _torch_module()
         one_hot = torch.zeros(len(self._values), num_classes, dtype=torch.float32)
         
         for i, val in enumerate(self._values):
@@ -530,21 +634,18 @@ class CategoricalFitness(BaseFitnessLayer):
         return np.array([_rank_map[v] for v in self._values], dtype=int)
     
     def get_value(self,
-                  sequence_index: int) -> Dict[str, float]:
-        """
-        Returns the full set of values for a single sequence.
+                  sequence_index: int) -> str:
+        """Return the category assigned to one sequence.
         
         Parameters
         ----------
         sequence_index : int
-            The index of the sequence for which to retrieve the
-            probability distribution.
+            Positional sequence index.
 
         Returns
         -------
-        Dict[str, float]
-            A dictionary mapping each category to its probability for
-            the specified sequence.
+        str
+            Assigned category.
         """
         return self._values[sequence_index]
     
@@ -625,9 +726,16 @@ class CategoricalFitness(BaseFitnessLayer):
             An instance of the CategoricalFitness class initialized
             with the provided parameters.
         """
-        mat = one_hot.detach().cpu().numpy() if isinstance(one_hot, torch.Tensor) else np.asarray(one_hot)
-        if mat.ndim != 2:
-            raise ValueError("CategoricalFitness.from_one_hot expects a 2-D array")
+        categories = _validated_categories(categories)
+        mat = _as_float_matrix(one_hot, name="one_hot")
+        if mat.shape[1] != len(categories):
+            raise ValueError("one_hot width must match categories")
+        if not np.all(np.isfinite(mat)):
+            raise ValueError("one_hot must contain only finite values")
+        if not np.all((mat == 0.0) | (mat == 1.0)):
+            raise ValueError("one_hot must contain only zero and one")
+        if not np.all(mat.sum(axis=1) == 1.0):
+            raise ValueError("one_hot rows must contain exactly one active category")
         idx = np.argmax(mat, axis=1)
         vals = [categories[i] for i in idx]
         return cls(name=name, values=vals, categories=categories, metadata=metadata)
@@ -641,6 +749,33 @@ class CategoricalFitness(BaseFitnessLayer):
                        default: str | None = None,
                        categories: List[str] | None = None,
                        metadata: Dict | None = None) -> "CategoricalFitness":
+        """Build a categorical layer from values indexed by sequence position.
+
+        Parameters
+        ----------
+        name : str
+            Layer name.
+        mapping : mapping of int to str
+            Categories keyed by zero-based sequence index.
+        length : int
+            Total number of sequences in the output layer.
+        default : str, optional
+            Category assigned to indices absent from ``mapping``.
+        categories : list of str, optional
+            Ordered allowed categories. If omitted, infer them from values.
+        metadata : dict, optional
+            Free-form layer metadata.
+
+        Returns
+        -------
+        CategoricalFitness
+            Constructed categorical layer.
+
+        Raises
+        ------
+        ValueError
+            If an index is missing and ``default`` is not provided.
+        """
         vals: List[str] = []
         for i in range(length):
             v = mapping.get(i, default)
@@ -691,17 +826,34 @@ class CategoricalFitness(BaseFitnessLayer):
             with the provided parameters.
         """
         rng = np.random.default_rng(seed)
-        cats = list(categories)
+        cats = _validated_categories(categories)
         if p is None:
             p = [1.0 / len(cats)] * len(cats)
-        idx = rng.choice(len(cats), size=length, p=p)
+        probabilities = np.asarray(p, dtype=float)
+        if probabilities.shape != (len(cats),):
+            raise ValueError("p must provide one probability per category")
+        if not np.all(np.isfinite(probabilities)) or np.any(probabilities < 0.0):
+            raise ValueError("p must contain finite non-negative probabilities")
+        if not np.isclose(probabilities.sum(), 1.0, rtol=0.0, atol=1e-8):
+            raise ValueError("p probabilities must sum to one")
+        idx = rng.choice(len(cats), size=length, p=probabilities)
         vals = [cats[i] for i in idx]
         return cls(name=name, values=vals, categories=cats, metadata=metadata)
 
 class ProbabilisticCategoricalFitness(BaseFitnessLayer):
-    """
-    Categorical fitness layer that represents probabilities
-    of each category for each sequence.
+    """Represent a categorical probability distribution per sequence.
+
+    Parameters
+    ----------
+    name : str
+        Layer name.
+    probabilities : ndarray
+        Finite non-negative matrix with shape ``(n_sequences, n_categories)``.
+        Rows must sum to one within an absolute tolerance of ``1e-8``.
+    categories : list of str
+        Ordered category names corresponding to matrix columns.
+    metadata : dict, optional
+        Free-form layer metadata.
 
     Attributes
     ----------
@@ -715,24 +867,51 @@ class ProbabilisticCategoricalFitness(BaseFitnessLayer):
     metadata : Dict, optional
         Additional metadata associated with the fitness layer.
     """
+    _NORMALIZATION_ATOL = 1e-8
+
     def __init__(self,
                  name: str,
                  probabilities: np.ndarray,
                  categories: List[str],
                  metadata: Dict = None) -> None:
         super().__init__(name=name, metadata=metadata)
-        
+
+        categories = _validated_categories(categories)
+        probabilities = _as_float_matrix(probabilities, name="probabilities")
         if probabilities.shape[1] != len(categories):
             raise ValueError("Shape of probabilities matrix must match the number of categories.")
-        if not np.allclose(np.sum(probabilities, axis=1), 1.0):
+        if not np.all(np.isfinite(probabilities)):
+            raise ValueError("probabilities must contain only finite values")
+        if np.any(probabilities < 0.0):
+            raise ValueError("probabilities must contain non-negative values")
+        if not np.allclose(
+            probabilities.sum(axis=1),
+            1.0,
+            rtol=0.0,
+            atol=self._NORMALIZATION_ATOL,
+        ):
             raise ValueError("Rows in the probabilities matrix must sum to 1.")
-            
-        self.probabilities = probabilities
-        self.categories = categories
-        self.category_map = {cat: i for i, cat in enumerate(self.categories)}
+
+        self._probabilities = probabilities
+        self._probabilities.setflags(write=False)
+        self._categories = tuple(categories)
+        self.category_map = {cat: i for i, cat in enumerate(self._categories)}
+
+    @property
+    def probabilities(self) -> np.ndarray:
+        """Return a read-only view of the probability matrix."""
+        view = self._probabilities.view()
+        view.setflags(write=False)
+        return view
+
+    @property
+    def categories(self) -> list[str]:
+        """Return a defensive copy of the ordered categories."""
+        return list(self._categories)
 
     @property
     def dtype(self) -> Literal['categorical']:
+        """Return the layer kind, ``'categorical'``."""
         return 'categorical'
 
     def get_tensor(self) -> torch.Tensor:
@@ -747,6 +926,7 @@ class ProbabilisticCategoricalFitness(BaseFitnessLayer):
             category. The tensor will have shape (num_sequences,
             num_categories).
         """
+        torch = _torch_module()
         return torch.tensor(self.probabilities, dtype=torch.float32)
 
     def get_value(self,
@@ -834,15 +1014,13 @@ class ProbabilisticCategoricalFitness(BaseFitnessLayer):
         ProbabilisticCategoricalFitness
             An instance of the ProbabilisticCategoricalFitness class.
         """
-        arr = probabilities.detach().cpu().numpy() if isinstance(probabilities, torch.Tensor) else np.asarray(probabilities, dtype=float)
-        if arr.ndim != 2:
-            raise ValueError("from_probabilities expects 2-D (num_sequences, num_categories)")
-        # row-normalize defensively
-        row_sum = arr.sum(axis=1, keepdims=True)
-        if not np.all(row_sum > 0):
-            raise ValueError("Rows with all-zero probabilities are invalid")
-        norm = arr / row_sum
-        return cls(name=name, probabilities=norm, categories=list(categories), metadata=metadata)
+        arr = _as_float_matrix(probabilities, name="probabilities")
+        return cls(
+            name=name,
+            probabilities=arr,
+            categories=categories,
+            metadata=metadata,
+        )
 
     @classmethod
     def from_logits(cls,
@@ -880,9 +1058,12 @@ class ProbabilisticCategoricalFitness(BaseFitnessLayer):
         ProbabilisticCategoricalFitness
             An instance of the ProbabilisticCategoricalFitness class.
         """
-        z = logits.detach().cpu().numpy() if isinstance(logits, torch.Tensor) else np.asarray(logits, dtype=float)
-        if z.ndim != 2:
-            raise ValueError("from_logits expects 2-D (num_sequences, num_categories)")
+        categories = _validated_categories(categories)
+        z = _as_float_matrix(logits, name="logits")
+        if z.shape[1] != len(categories):
+            raise ValueError("logits width must match categories")
+        if not np.all(np.isfinite(z)):
+            raise ValueError("logits must contain only finite values")
         z = z - z.max(axis=1, keepdims=True)  # numerical stability
         exp = np.exp(z)
         probs = exp / exp.sum(axis=1, keepdims=True)
@@ -913,14 +1094,14 @@ class ProbabilisticCategoricalFitness(BaseFitnessLayer):
             each sequence. Each row corresponds to a sequence and each
             column corresponds to a category.
 
-        alpha : float, default=`0.0`
-            Laplace smoothing parameter. If greater than 0, adds `alpha`
-            to each count before normalizing to probabilities.
-
         categories : List[str]
             A list of unique categories that values can take. The order
             of categories must match the columns of the probabilities
             matrix.
+
+        alpha : float, default=`0.0`
+            Laplace smoothing parameter. If greater than 0, adds `alpha`
+            to each count before normalizing to probabilities.
             
         metadata : Dict, optional
             Additional metadata associated with the fitness layer.
@@ -930,11 +1111,21 @@ class ProbabilisticCategoricalFitness(BaseFitnessLayer):
         ProbabilisticCategoricalFitness
             An instance of the ProbabilisticCategoricalFitness class.
         """
-        c = counts.detach().cpu().numpy() if isinstance(counts, torch.Tensor) else np.asarray(counts, dtype=float)
-        if c.ndim != 2:
-            raise ValueError("from_counts expects 2-D (num_sequences, num_categories)")
-        if alpha > 0:
-            c = c + alpha
+        categories = _validated_categories(categories)
+        c = _as_float_matrix(counts, name="counts")
+        if c.shape[1] != len(categories):
+            raise ValueError("counts width must match categories")
+        if not np.all(np.isfinite(c)):
+            raise ValueError("counts must contain only finite values")
+        if np.any(c < 0.0):
+            raise ValueError("counts must contain non-negative values")
+        if not np.isscalar(alpha) or not np.isfinite(alpha) or alpha < 0.0:
+            raise ValueError("alpha must be a finite non-negative scalar")
+        c = c + float(alpha)
+        row_sums = c.sum(axis=1, keepdims=True)
+        if np.any(row_sums == 0.0):
+            raise ValueError("count rows must have positive mass after smoothing")
+        c = c / row_sums
         return cls.from_probabilities(name=name, probabilities=c, categories=categories, metadata=metadata)
 
     @classmethod
@@ -971,7 +1162,7 @@ class ProbabilisticCategoricalFitness(BaseFitnessLayer):
         ProbabilisticCategoricalFitness
             An instance of the ProbabilisticCategoricalFitness class.
         """
-        cats = list(categories)
+        cats = _validated_categories(categories)
         idx_map = {c: i for i, c in enumerate(cats)}
         num_seq = len(samples)
         num_cat = len(cats)
@@ -987,7 +1178,14 @@ class ProbabilisticCategoricalFitness(BaseFitnessLayer):
 # TODO: wrapper classes for fitness layers modifiers.
 
 class BaseFitnessWrapper(BaseFitnessLayer):
-    """
+    """Delegate fitness access to another layer.
+
+    Parameters
+    ----------
+    layer : BaseFitnessLayer
+        Wrapped fitness layer.
+    **kwargs
+        Optional ``name`` and ``metadata`` overrides.
     """
     def __init__(self,
                  layer: BaseFitnessLayer,
@@ -999,22 +1197,44 @@ class BaseFitnessWrapper(BaseFitnessLayer):
 
     @property
     def dtype(self):
+        """Return the wrapped layer data type."""
         return self._wrapped_layer.dtype
 
     # Delegate core methods to the wrapped layer
     def get_tensor(self):
+        """Return the wrapped layer tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Native tensor representation.
+        """
         return self._wrapped_layer.get_tensor()
 
     def to_scalar(self, **kwargs):
+        """Return a scalar representation of the wrapped layer.
+
+        Parameters
+        ----------
+        **kwargs
+            Scalar conversion options passed to the wrapped layer.
+
+        Returns
+        -------
+        numpy.ndarray
+            Scalar fitness values.
+        """
         return self._wrapped_layer.to_scalar(**kwargs)
     
 # Modifier interfaces
 
 class BaseFitnessModifier(ABC):
-    """
-    Base class for objects that transform one fitness layer into
-    another. Implementors only need to override `apply`; validation and
-    naming defaults are handled here.
+    """Transform one fitness layer into another.
+
+    Parameters
+    ----------
+    name : str, optional
+        Explicit output-layer name.
     """
 
     # tuple of acceptable input dtypes reported by BaseFitnessLayer.dtype
@@ -1026,6 +1246,18 @@ class BaseFitnessModifier(ABC):
         self._custom_name = name
 
     def default_name(self, source_name: str) -> str:
+        """Return the default output-layer name.
+
+        Parameters
+        ----------
+        source_name : str
+            Source-layer name.
+
+        Returns
+        -------
+        str
+            Derived output-layer name.
+        """
         return f"{source_name}_{self.modifier_name}"
 
     def __call__(self, layer: BaseFitnessLayer, *, name: str | None = None) -> BaseFitnessLayer:
@@ -1039,9 +1271,19 @@ class BaseFitnessModifier(ABC):
 
     @abstractmethod
     def apply(self, layer: BaseFitnessLayer, *, name: str) -> BaseFitnessLayer:
-        """
-        Transform `layer` into a new BaseFitnessLayer. Implementations
-        must set the returned layer's name to `name`.
+        """Transform a fitness layer.
+
+        Parameters
+        ----------
+        layer : BaseFitnessLayer
+            Source fitness layer.
+        name : str
+            Output-layer name.
+
+        Returns
+        -------
+        BaseFitnessLayer
+            Transformed fitness layer.
         """
         raise NotImplementedError
 
@@ -1055,9 +1297,21 @@ def apply_fitness_modifier(layer: BaseFitnessLayer,
                            modifier: FitnessModifierLike,
                            *,
                            name: str | None = None) -> BaseFitnessLayer:
-    """
-    Run a modifier (object or simple callable) on a fitness layer and
-    return the transformed layer.
+    """Apply a modifier to a fitness layer.
+
+    Parameters
+    ----------
+    layer : BaseFitnessLayer
+        Source fitness layer.
+    modifier : BaseFitnessModifier or callable
+        Modifier object or callable to apply.
+    name : str, optional
+        Output-layer name override.
+
+    Returns
+    -------
+    BaseFitnessLayer
+        Transformed fitness layer.
     """
     if isinstance(modifier, BaseFitnessModifier):
         return modifier(layer, name=name)
@@ -1074,10 +1328,14 @@ def apply_fitness_modifier(layer: BaseFitnessLayer,
 
 
 class EntropyFitnessModifier(BaseFitnessModifier):
-    """
-    Convert a probabilistic categorical fitness layer into a numeric
-    fitness layer where each value is the entropy of the input
-    distribution.
+    """Convert category probabilities to entropy.
+
+    Parameters
+    ----------
+    base : float, optional
+        Logarithm base; use natural logarithms when omitted.
+    name : str, optional
+        Explicit output-layer name.
     """
 
     modifier_name = "entropy"
@@ -1097,6 +1355,20 @@ class EntropyFitnessModifier(BaseFitnessModifier):
         self.base = base
 
     def apply(self, layer: BaseFitnessLayer, *, name: str) -> BaseFitnessLayer:
+        """Return entropy values for a probabilistic layer.
+
+        Parameters
+        ----------
+        layer : BaseFitnessLayer
+            Probabilistic categorical source layer.
+        name : str
+            Output-layer name.
+
+        Returns
+        -------
+        BaseFitnessLayer
+            Numeric entropy layer.
+        """
         if not isinstance(layer, ProbabilisticCategoricalFitness):
             raise TypeError(
                 "EntropyFitnessModifier expects a ProbabilisticCategoricalFitness layer."
@@ -1116,10 +1388,14 @@ class EntropyFitnessModifier(BaseFitnessModifier):
 
 
 class ProbabilitySliceFitnessModifier(BaseFitnessModifier):
-    """
-    Extract the probability of a specific category/index from a
-    probabilistic categorical fitness layer and emit it as a numeric
-    fitness layer.
+    """Extract one category probability as numeric fitness.
+
+    Parameters
+    ----------
+    category : int or str
+        Category index or label to extract.
+    name : str, optional
+        Explicit output-layer name.
     """
 
     modifier_name = "probability"
@@ -1152,11 +1428,37 @@ class ProbabilitySliceFitnessModifier(BaseFitnessModifier):
         return layer.category_map[label], label
 
     def default_name(self, source_name: str) -> str:
+        """Return a name containing the selected category.
+
+        Parameters
+        ----------
+        source_name : str
+            Source-layer name.
+
+        Returns
+        -------
+        str
+            Derived output-layer name.
+        """
         if isinstance(self.category, str):
             return f"{source_name}_prob_{self.category}"
         return f"{source_name}_prob_{int(self.category)}"
 
     def apply(self, layer: BaseFitnessLayer, *, name: str) -> BaseFitnessLayer:
+        """Return the selected category probability.
+
+        Parameters
+        ----------
+        layer : BaseFitnessLayer
+            Probabilistic categorical source layer.
+        name : str
+            Output-layer name.
+
+        Returns
+        -------
+        BaseFitnessLayer
+            Numeric probability layer.
+        """
         if not isinstance(layer, ProbabilisticCategoricalFitness):
             raise TypeError(
                 "ProbabilitySliceFitnessModifier expects a ProbabilisticCategoricalFitness layer."
@@ -1187,8 +1489,18 @@ def _numeric_to_scalar(layer: BaseFitnessLayer,
 
 
 class GaussianNoiseFitnessModifier(BaseFitnessModifier):
-    """
-    Add Gaussian noise to a numeric fitness layer.
+    """Add Gaussian noise to numeric fitness values.
+
+    Parameters
+    ----------
+    scale : float, default=1.0
+        Noise standard deviation.
+    loc : float, default=0.0
+        Noise mean.
+    seed : int, optional
+        Random seed.
+    name : str, optional
+        Explicit output-layer name.
     """
 
     modifier_name = "gaussian_noise"
@@ -1220,6 +1532,20 @@ class GaussianNoiseFitnessModifier(BaseFitnessModifier):
         self.seed = seed
 
     def apply(self, layer: BaseFitnessLayer, *, name: str) -> BaseFitnessLayer:
+        """Add Gaussian noise to a numeric layer.
+
+        Parameters
+        ----------
+        layer : BaseFitnessLayer
+            Numeric source layer.
+        name : str
+            Output-layer name.
+
+        Returns
+        -------
+        BaseFitnessLayer
+            Noise-perturbed numeric layer.
+        """
         rng = np.random.default_rng(self.seed)
         meta = dict(layer.metadata) if getattr(layer, "metadata", None) else {}
         meta.update(
@@ -1252,8 +1578,20 @@ class GaussianNoiseFitnessModifier(BaseFitnessModifier):
 
 
 class GaussianDistributionFitnessModifier(BaseFitnessModifier):
-    """
-    Convert scalar values into Gaussian replicate distributions.
+    """Convert numeric values into Gaussian replicate distributions.
+
+    Parameters
+    ----------
+    scale : float
+        Distribution standard deviation.
+    reps : int, default=10
+        Replicates per sequence.
+    seed : int, optional
+        Random seed.
+    aggregate_func : callable, optional
+        Function used to reduce input replicates.
+    name : str, optional
+        Explicit output-layer name.
     """
 
     modifier_name = "gaussian_distribution"
@@ -1293,6 +1631,20 @@ class GaussianDistributionFitnessModifier(BaseFitnessModifier):
         self.aggregate_func = aggregate_func
 
     def apply(self, layer: BaseFitnessLayer, *, name: str) -> BaseFitnessLayer:
+        """Sample Gaussian replicates around numeric fitness values.
+
+        Parameters
+        ----------
+        layer : BaseFitnessLayer
+            Numeric source layer.
+        name : str
+            Output-layer name.
+
+        Returns
+        -------
+        BaseFitnessLayer
+            Numeric replicate layer.
+        """
         values = np.asarray(_numeric_to_scalar(layer, self.aggregate_func), dtype=float).ravel()
         rng = np.random.default_rng(self.seed)
         samples = rng.normal(loc=values[:, None], scale=self.scale, size=(len(values), self.reps))
@@ -1311,8 +1663,16 @@ class GaussianDistributionFitnessModifier(BaseFitnessModifier):
 
 
 class ResampleFitnessModifier(BaseFitnessModifier):
-    """
-    Resample values from a distribution defined by numeric replicates.
+    """Resample distributions estimated from numeric replicates.
+
+    Parameters
+    ----------
+    reps : int, default=1
+        Resampled replicates per sequence.
+    seed : int, optional
+        Random seed.
+    name : str, optional
+        Explicit output-layer name.
     """
 
     modifier_name = "resample"
@@ -1340,6 +1700,20 @@ class ResampleFitnessModifier(BaseFitnessModifier):
         self.seed = seed
 
     def apply(self, layer: BaseFitnessLayer, *, name: str) -> BaseFitnessLayer:
+        """Resample a numeric replicate layer.
+
+        Parameters
+        ----------
+        layer : BaseFitnessLayer
+            Numeric source layer.
+        name : str
+            Output-layer name.
+
+        Returns
+        -------
+        BaseFitnessLayer
+            Resampled numeric layer.
+        """
         if not isinstance(layer, NumericFitness):
             raise TypeError("ResampleFitnessModifier expects a NumericFitness layer.")
 
@@ -1372,8 +1746,18 @@ class ResampleFitnessModifier(BaseFitnessModifier):
 
 
 class ArithmeticFitnessModifier(BaseFitnessModifier):
-    """
-    Perform arithmetic operations between numeric fitness layers.
+    """Combine numeric fitness layers arithmetically.
+
+    Parameters
+    ----------
+    other_layers : BaseFitnessLayer or sequence of BaseFitnessLayer
+        Additional layers to combine with the source.
+    op : str or callable, default="add"
+        Arithmetic operation.
+    aggregate_func : callable, optional
+        Function used to reduce input replicates.
+    name : str, optional
+        Explicit output-layer name.
     """
 
     modifier_name = "arithmetic"
@@ -1430,6 +1814,20 @@ class ArithmeticFitnessModifier(BaseFitnessModifier):
         raise ValueError(f"Unsupported operation: {self.op!r}")
 
     def apply(self, layer: BaseFitnessLayer, *, name: str) -> BaseFitnessLayer:
+        """Combine the source with configured numeric layers.
+
+        Parameters
+        ----------
+        layer : BaseFitnessLayer
+            Numeric source layer.
+        name : str
+            Output-layer name.
+
+        Returns
+        -------
+        BaseFitnessLayer
+            Combined numeric layer.
+        """
         for other in self.other_layers:
             if other.dtype not in self.input_dtypes:
                 raise TypeError(
@@ -1475,12 +1873,16 @@ class ArithmeticFitnessModifier(BaseFitnessModifier):
     
 # Batch factory functions
 
-FitnessLike = Union[
-    BaseFitnessLayer,
-    List[float],                 # numeric scalars
-    List[List[float]],           # numeric replicates
-    np.ndarray, torch.Tensor,    # numeric (vector/matrix) or categorical (one-hot / probs)
-]
+if TYPE_CHECKING:
+    FitnessLike = Union[
+        BaseFitnessLayer,
+        List[float],
+        List[List[float]],
+        np.ndarray,
+        torch.Tensor,
+    ]
+else:
+    FitnessLike = Any
 
 def make_fitness_layer(name: str,
                        obj: FitnessLike,
@@ -1526,10 +1928,15 @@ def make_fitness_layer(name: str,
     if isinstance(obj, BaseFitnessLayer):
         return obj
 
-    is_tensor = isinstance(obj, torch.Tensor)
+    is_tensor = _is_torch_tensor(obj)
 
     # Fast-path: replicate lists (ragged)
-    if isinstance(obj, list) and obj and isinstance(obj[0], (list, tuple, np.ndarray)):
+    if (
+        dtype != "categorical"
+        and isinstance(obj, list)
+        and obj
+        and isinstance(obj[0], (list, tuple, np.ndarray))
+    ):
         return NumericFitness.from_replicates(name, obj, metadata=metadata)
 
     # Try to coerce numerically

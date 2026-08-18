@@ -1,3 +1,5 @@
+"""Infer phylogenies and reconstruct ancestral sequences."""
+
 from pathlib import Path
 from typing import (
     Union,
@@ -9,6 +11,10 @@ from typing import (
 )
 import numpy as np
 import networkx as nx
+from .._optional import require_optional
+
+require_optional("cogent3", extra="phylogeny", purpose="phylogenetic reconstruction")
+require_optional("piqtree", extra="phylogeny", purpose="phylogenetic reconstruction")
 from cogent3 import (
     load_aligned_seqs,
     load_tree,
@@ -38,9 +44,26 @@ from .._const import (
 from ..utils import sanitize_alignment
 
 class ASRConstructor:
-    """
-    Class to manage phylogenetic tree inference and reconstruction of
-    internal node probability distributions.
+    """Infer an undirected phylogeny and ancestral sequence posteriors.
+
+    Parameters
+    ----------
+    alignment : cogent3.Alignment or pathlib.Path
+        Protein alignment or FASTA path.
+    phylogenetic_tree : cogent3.core.tree.PhyloNode or pathlib.Path, optional
+        Precomputed tree or Newick path. If omitted, infer a tree.
+    model_fitting : bool, default=False
+        Select a substitution model by AICc when supported by the backend.
+    replacement_matrix : list of str, default=['NQ.pfam']
+        Candidate protein substitution models.
+    phylo_backend : {'iqtree', 'cogent_nj'}, default='cogent_nj'
+        Tree-inference backend used when no tree is supplied.
+    _dist_calc : {'paralinear', 'pdist', 'hamming'}, default='pdist'
+        Pairwise-distance calculator for neighbour joining.
+    reconstruct_ancestral_states : bool, default=True
+        Fit ancestral amino-acid posterior distributions for internal nodes.
+    _log_progress : bool, default=False
+        Emit progress logs for long-running inference steps.
 
     Attributes
     ----------
@@ -51,9 +74,9 @@ class ASRConstructor:
         A precomputed phylogenetic tree. If None, the tree is inferred.
     
     replacement_matrix : List, defualt=`NQ_pfam`
-        The replacement matrix used for tree-search. Multiple can be
-        provided to fit the ML model. If `NQ_pfam`, output will be
-        directed. If LG, output will byteste undirected.
+        The replacement matrix used for tree-search. Multiple models can be
+        provided for model fitting. The constructed topology is always
+        undirected in the 0.9 publication API.
 
     model_fitting : bool, default=`False`
         Boolean for whether or not to include ML model fitting and
@@ -143,10 +166,10 @@ class ASRConstructor:
         Method to construct a phylogenetiphyloc tree using the piqtree
         Python binding.
         
-        Parameters:
-        -----------
-        model : List
-            The substitution models to use.
+        Parameters
+        ----------
+        replacement_matrix : list of str, default=['NQ.pfam']
+            Substitution models considered by the selected backend.
 
         model_fitting : bool, default=`True`
             Whether to fit the ML model by AICC.
@@ -154,11 +177,11 @@ class ASRConstructor:
         _model_override : str, default=`None`
             A IQTREE convention model string to override the model. 
 
-        _dist_cal : str, default=`pdist`
+        _dist_calc : {'paralinear', 'pdist', 'hamming'}, default='pdist'
             The distance calculation to use in computing neighbors and 
             distance matrices for neighbor-joining algorithms.
 
-        phylo_backend : str, default=`iqtree`
+        phylo_backend : {'iqtree', 'cogent_nj'}, default='cogent_nj'
             The phylogenetic reconstruction backend to use. 
 
         """
@@ -457,10 +480,24 @@ class ASRConstructor:
             _logger.info('ASR.build_tree: complete')
 
     def reconstruct_ancestral_states(self, model_name: str = "WG01") -> None:
-        """
+        """Run maximum-likelihood ancestral-state reconstruction.
+
         Run maximum-likelihood ancestral state reconstruction using cogent3's
         composable ``model`` / ``ancestral_states`` applications. Raises an
         informative exception if model fitting or posterior extraction fails.
+
+        Parameters
+        ----------
+        model_name : str, default='WG01'
+            Preferred Cogent3 protein substitution model. Configured tree
+            models and common protein-model fallbacks are tried if it fails.
+
+        Raises
+        ------
+        ValueError
+            If no tree or tip sequences are available.
+        RuntimeError
+            If every substitution model fails or posterior output is invalid.
         """
         import logging as _logging
 
@@ -714,24 +751,16 @@ class ASRConstructor:
                                                             self._boolean_gap_alignment,
                                                             tip_name_to_index)
         
-    def construct_dag(self,
-                      graph_type: Literal['undirected', 'directed'] = 'undirected') -> Union[nx.DiGraph, nx.Graph]:
+    def construct_topology(self) -> nx.Graph:
         """
-        Method to construct a directed acyclic graph (DAG) from the
-        phylogenetic tree and the alignment.
-
-        Parameters
-        ----------
-        type : str, default=`undirected`
-            Whether the graph will be directed or undirected.
+        Construct an undirected topology from the phylogenetic tree.
 
         Returns
         -------
-        nx.DiGraph
-            A directed acyclic graph where nodes are the tips and
-            internal nodes of the phylogenetic tree, and edges are
-            directed from parent to child nodes. Each node contains
-            the following attributes:
+        nx.Graph
+            An undirected graph whose nodes are the tips and internal
+            nodes of the phylogenetic tree. Each node contains the
+            following attributes:
             - `sequence`: The sequence at that node, either as a
             `BaseNumpySequence` or `SoftSequence`.
             - `fitness`: Fitness value, initialized to NaN.
@@ -740,14 +769,11 @@ class ASRConstructor:
             - `ungapped_arr`: A (L, 20) array representing the ungapped
             sequence in one-hot encoding.
         """
-        if graph_type != 'undirected' and graph_type != 'directed':
-            raise ValueError(f"Expected `graph_type` parameter to be `directed` or `undirected`, found {graph_type}")
-        
         import logging as _logging
         _logger = _logging.getLogger('fitness_landscape')
         if self._log_progress:
-            _logger.info('ASR.construct_dag: start (graph_type=%s)', graph_type)
-        G = (nx.Graph() if graph_type == 'undirected' else nx.DiGraph())
+            _logger.info('ASR.construct_topology: start')
+        G = nx.Graph()
         
         for child, parent in self.phylogenetic_tree.child_parent_map().items():
             G.add_edge(parent, child)
@@ -792,7 +818,7 @@ class ASRConstructor:
                 soft_seq = SoftSequence(
                     aa_posterior=post,
                     gap_posterior=gap,
-                    alphabet=ALPHABET_21,
+                    alphabet=PROT_20,
                     hard_rule="argmax",
                 )
                 post = soft_seq.remove_gap_arr()
@@ -825,5 +851,5 @@ class ASRConstructor:
                     asr_placeholder=True,
                 )
         if self._log_progress:
-            _logger.info('ASR.construct_dag: complete (nodes=%d, edges=%d)', G.number_of_nodes(), G.number_of_edges())
+            _logger.info('ASR.construct_topology: complete (nodes=%d, edges=%d)', G.number_of_nodes(), G.number_of_edges())
         return G

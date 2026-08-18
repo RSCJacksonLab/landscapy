@@ -1,3 +1,5 @@
+"""Read and write deterministic portable fitness-landscape bundles."""
+
 from __future__ import annotations
 
 import hashlib
@@ -28,6 +30,10 @@ from ..core.fitness import (
     ProbabilisticCategoricalFitness,
 )
 from ..core.sequence import BaseNumpySequence, SoftSequence
+from ..core.edge_schema import (
+    EDGE_SCHEMA_GRAPH_KEY,
+    migrate_legacy_edge_semantics,
+)
 from .exceptions import BundleValidationError, ChecksumMismatchError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -69,6 +75,35 @@ def save_bundle_dir(
     include_legacy_pickle: bool = False,
     overwrite: bool = False,
 ) -> Path:
+    """Write a canonical portable landscape directory.
+
+    Parameters
+    ----------
+    landscape : FitnessLandscape
+        Undirected landscape to serialize.
+    path : str or pathlib.Path
+        Destination directory.
+    metadata : mapping, optional
+        User metadata stored separately from the structural manifest.
+    include_embeddings : bool, default=True
+        Include embedding arrays and their provenance.
+    include_legacy_pickle : bool, default=False
+        Add an unsafe compatibility pickle under ``legacy/``.
+    overwrite : bool, default=False
+        Replace an existing destination.
+
+    Returns
+    -------
+    pathlib.Path
+        Written directory.
+
+    Raises
+    ------
+    FileExistsError
+        If the destination exists and ``overwrite`` is false.
+    BundleValidationError
+        If the landscape cannot be represented by the portable schema.
+    """
     destination = Path(path)
     parent = destination.parent
     parent.mkdir(parents=True, exist_ok=True)
@@ -92,7 +127,28 @@ def save_bundle_dir(
     return destination
 
 
-def load_bundle_dir(path: str | Path):
+def load_bundle_dir(path: str | Path) -> "FitnessLandscape":
+    """Load a canonical portable landscape directory.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Existing bundle directory.
+
+    Returns
+    -------
+    FitnessLandscape
+        Reconstructed undirected landscape.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``path`` is not a directory.
+    BundleValidationError
+        If the manifest or payload schema is unsupported or inconsistent.
+    ChecksumMismatchError
+        If a payload checksum differs from the manifest.
+    """
     bundle_dir = Path(path)
     if not bundle_dir.is_dir():
         raise FileNotFoundError(f"Bundle directory not found: {bundle_dir}")
@@ -159,6 +215,37 @@ def export_lsbundle(
     backend: str = PORTABLE_BACKEND,
     overwrite: bool = False,
 ) -> Path:
+    """Export a landscape to a deterministic ``.lsbundle`` archive.
+
+    Parameters
+    ----------
+    landscape : FitnessLandscape
+        Landscape to serialize.
+    path : str or pathlib.Path
+        Destination archive path.
+    metadata : mapping, optional
+        User metadata stored with the artifact.
+    backend : {'portable', 'pickle'}, default='portable'
+        Serialization backend. ``'portable'`` is the release format;
+        ``'pickle'`` exists only for explicit legacy interoperability and is
+        unsafe to deserialize from untrusted sources.
+    overwrite : bool, default=False
+        Replace an existing destination.
+
+    Returns
+    -------
+    pathlib.Path
+        Written archive.
+
+    Raises
+    ------
+    FileExistsError
+        If the destination exists and ``overwrite`` is false.
+    ValueError
+        If ``backend`` is unsupported.
+    BundleValidationError
+        If a portable archive cannot represent the landscape.
+    """
     destination = Path(path)
     if destination.exists():
         if not overwrite:
@@ -229,8 +316,10 @@ def _write_portable_bundle_dir(
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
     graph = getattr(landscape, "graph", None)
-    if not isinstance(graph, nx.Graph):
-        raise BundleValidationError("FitnessLandscape.graph must be a networkx Graph or DiGraph.")
+    if not isinstance(graph, nx.Graph) or graph.is_directed():
+        raise BundleValidationError(
+            "Portable landscape bundles require an undirected networkx Graph."
+        )
 
     original_node_order = _resolve_original_node_order(landscape)
     node_to_sequence_index = _match_nodes_to_sequence_indices(landscape, original_node_order)
@@ -361,8 +450,6 @@ def _write_portable_bundle_dir(
         "serializer_backend": PORTABLE_BACKEND,
         "serializer_version": PORTABLE_SERIALIZER_VERSION,
         "landscape_class": _class_path(type(landscape)),
-        "graph_class": _class_path(type(graph)),
-        "graph_directed": bool(graph.is_directed()),
         "node_count": len(canonical_records),
         "edge_count": int(graph.number_of_edges()),
         "sequence_length": len(canonical_sequence_objects[0]) if canonical_sequence_objects else 0,
@@ -548,8 +635,6 @@ def _write_graph_edges(
     def normalize_endpoints(u: Any, v: Any) -> tuple[int, int]:
         src = int(node_to_canonical_index[u])
         dst = int(node_to_canonical_index[v])
-        if graph.is_directed():
-            return src, dst
         return (src, dst) if src <= dst else (dst, src)
 
     ordered_edges = []
@@ -584,6 +669,9 @@ def _write_graph_edges(
         "path": GRAPH_FILENAME,
         "storage_backend": storage_backend,
         "edge_attributes": attribute_manifest,
+        "edge_schema": _normalize_json(
+            graph.graph.get(EDGE_SCHEMA_GRAPH_KEY)
+        ),
     }
 
 
@@ -969,8 +1057,7 @@ def _load_sequences(
 
 
 def _load_graph(bundle_dir: Path, manifest: Mapping[str, Any], node_keys: Sequence[Any]) -> nx.Graph:
-    graph_class = _load_graph_class(manifest)
-    graph = graph_class()
+    graph = nx.Graph()
     graph.add_nodes_from(node_keys)
 
     graph_manifest = manifest["graph"]
@@ -989,6 +1076,15 @@ def _load_graph(bundle_dir: Path, manifest: Mapping[str, Any], node_keys: Sequen
             attrs[spec["name"]] = _decode_attribute_value(value, codec=spec["codec"])
         attrs = {key: value for key, value in attrs.items() if value is not None}
         graph.add_edge(node_keys[src_index], node_keys[dst_index], **attrs)
+
+    declared_schema = graph_manifest.get("edge_schema")
+    if isinstance(declared_schema, Mapping):
+        graph.graph[EDGE_SCHEMA_GRAPH_KEY] = dict(declared_schema)
+    else:
+        migrate_legacy_edge_semantics(
+            graph,
+            sequence_length=int(manifest.get("sequence_length") or 0),
+        )
 
     return graph
 
@@ -1123,6 +1219,22 @@ def _validate_portable_manifest(manifest: Mapping[str, Any]) -> None:
             f"Unsupported serializer_backend {manifest['serializer_backend']!r}; "
             f"expected {PORTABLE_BACKEND!r}."
         )
+    if manifest.get("graph_directed") is True:
+        raise BundleValidationError(
+            "Directed graph bundles are outside the 0.9 publication format."
+        )
+    graph_class_path = manifest.get("graph_class")
+    if graph_class_path:
+        try:
+            graph_class = _import_symbol(graph_class_path)
+        except Exception as error:
+            raise BundleValidationError(
+                f"Unable to resolve graph_class {graph_class_path!r}."
+            ) from error
+        if isinstance(graph_class, type) and issubclass(graph_class, nx.DiGraph):
+            raise BundleValidationError(
+                "Directed graph bundles are outside the 0.9 publication format."
+            )
 
 
 def _validate_file_checksums(bundle_dir: Path, manifest: Mapping[str, Any]) -> None:
@@ -1159,18 +1271,6 @@ def _validate_sequence_index_column(frame: pd.DataFrame, node_count: int) -> Non
     indices = frame["sequence_index"].tolist()
     if indices != list(range(node_count)):
         raise BundleValidationError("sequence_index column is not in canonical order.")
-
-
-def _load_graph_class(manifest: Mapping[str, Any]):
-    class_path = manifest.get("graph_class")
-    if class_path:
-        try:
-            graph_class = _import_symbol(class_path)
-            if isinstance(graph_class, type) and issubclass(graph_class, nx.Graph):
-                return graph_class
-        except Exception:
-            pass
-    return nx.DiGraph if manifest.get("graph_directed") else nx.Graph
 
 
 def _normalize_bundle_metadata(metadata: Mapping[str, Any] | None) -> dict[str, Any]:

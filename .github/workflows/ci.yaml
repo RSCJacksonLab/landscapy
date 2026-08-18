@@ -10,6 +10,47 @@ permissions:
   contents: read
 
 jobs:
+  documentation:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package and documentation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[dev]"
+
+      - name: Validate public API and non-private source docstrings
+        run: python scripts/check_public_api_docs.py
+
+      - name: Execute cookbook examples
+        run: python scripts/check_cookbook_examples.py
+
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install lint dependencies
+        run: python -m pip install "ruff>=0.5"
+
+      - name: Check executable names, duplicate definitions, and exports
+        run: python -m ruff check src tests
+
   test:
     runs-on: ubuntu-latest
     env:
@@ -33,10 +74,28 @@ jobs:
       - name: Install package and test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install ".[dev,parquet]"
+          python -m pip install ".[dev]"
 
       - name: Run test suite
-        run: python -m pytest -q
+        run: |
+          python -m pytest -q \
+            --cov=fitness_landscape \
+            --cov-branch \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --cov-report=json:coverage.json \
+            --cov-fail-under=56
+
+      - name: Enforce publication-module coverage floors
+        run: python scripts/check_coverage_floors.py coverage.json
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-python-${{ matrix.python-version }}
+          path: |
+            coverage.xml
+            coverage.json
 
   build:
     runs-on: ubuntu-latest
@@ -55,3 +114,55 @@ jobs:
           python -m pip install --upgrade pip build twine
           python -m build
           python -m twine check dist/*
+
+  minimal-install:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel --outdir minimal-dist
+
+      - name: Install default dependencies in a clean environment
+        run: |
+          python -m venv .minimal-venv
+          .minimal-venv/bin/python -m pip install minimal-dist/*.whl
+
+      - name: Exercise sequence, fitness, Hamming graph, and portable export
+        run: .minimal-venv/bin/python scripts/minimal_install_smoke.py
+
+  comprehensive-install:
+    name: Comprehensive install (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install the default feature set
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "."
+
+      - name: Exercise the installed CLI and a kNN landscape
+        run: python scripts/comprehensive_install_smoke.py

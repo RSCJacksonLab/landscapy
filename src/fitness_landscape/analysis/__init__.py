@@ -1,112 +1,60 @@
-from .adaptive_walk import (
-    find_greedy_accessible_paths,
-    analyze_path_accessibility,
-    calculate_basin_of_attraction_greedy,
-    calculate_basin_of_attraction_stochastic,
-    adaptive_walk_stochastic,
-    neutral_network_analysis,
-)
+"""Analysis API with optional backends loaded on first use."""
 
-from .dirichlet_energy import (
-    calculate_ruggedness_dirichlet_energy,
-    local_dirichlet_energy_contribution)
+from importlib import import_module
 
-from .graph_induction_alignment import (
-    procrustes,
-    edge_prf_on_observed,
-    sp_rmse,
-    spectral_rmse,
-    edge_length_stats,
-    leaf_spanning_tree,
-    leaf_splits,
-    rf_distance,
-    tree_rf_dissimilarity,
-    evaluate_reconstruction,
-    evaluate_isorank_alignment,
-)
 
-from .statistics import (
-    analyze_fitness_distribution,
-    hypothesis_testing,
-    permutation_test,
-    subsample_analysis,
-)
+_EXPORTS = {
+    "find_greedy_accessible_paths": "adaptive_walk",
+    "analyze_path_accessibility": "adaptive_walk",
+    "calculate_basin_of_attraction_greedy": "adaptive_walk",
+    "calculate_basin_of_attraction_stochastic": "adaptive_walk",
+    "adaptive_walk_stochastic": "adaptive_walk",
+    "neutral_network_analysis": "adaptive_walk",
+    "calculate_ruggedness_dirichlet_energy": "dirichlet_energy",
+    "local_dirichlet_energy_contribution": "dirichlet_energy",
+    "graph_spectral_analysis": "graph",
+    "calculate_epistasis_walsh": "epistasis",
+    "calculate_epistasis_regression": "epistasis",
+    "calculate_epistasis_ensemble": "epistasis",
+    "calculate_epistasis_reference_free": "epistasis",
+    "graph_properties": "graph",
+    "calculate_ruggedness_local_optima": "graph",
+    "resistance_distance_matrix": "graph",
+    "category_diffusion_hierarchy": "graph",
+    "calculate_ruggedness_autocorrelation_analytical": "random_walk",
+    "time_continuous_autocorrelation": "random_walk",
+    "calculate_ruggedness_autocorrelation_stochastic": "random_walk",
+    "category_boundary_crossing_times": "random_walk",
+    "compute_ruggedness_diffusion_scale": "diffusion_scale",
+    "compute_ruggedness_variance_energy": "diffusion_scale",
+    "fit_t_bayesian_laplace": "diffusion_scale",
+    "fit_t_grid_posterior": "diffusion_scale",
+    "fit_t_profile_likelihood": "diffusion_scale",
+    "fit_t_bootstrap": "diffusion_scale",
+    "procrustes": "graph_induction_alignment",
+    "edge_prf_on_observed": "graph_induction_alignment",
+    "sp_rmse": "graph_induction_alignment",
+    "spectral_rmse": "graph_induction_alignment",
+    "edge_length_stats": "graph_induction_alignment",
+    "leaf_spanning_tree": "graph_induction_alignment",
+    "leaf_splits": "graph_induction_alignment",
+    "rf_distance": "graph_induction_alignment",
+    "tree_rf_dissimilarity": "graph_induction_alignment",
+    "evaluate_reconstruction": "graph_induction_alignment",
+    "evaluate_isorank_alignment": "graph_induction_alignment",
+    "analyze_fitness_distribution": "statistics",
+    "hypothesis_testing": "statistics",
+    "permutation_test": "statistics",
+    "subsample_analysis": "statistics",
+}
 
-from .diffusion_scale import (
-    compute_ruggedness_diffusion_scale,
-    compute_ruggedness_variance_energy,
-    fit_t_bayesian_laplace,
-    fit_t_grid_posterior,
-    fit_t_profile_likelihood,
-    fit_t_bootstrap,
-)
+__all__ = list(_EXPORTS)
 
-from .epistasis import (
-    calculate_epistasis_walsh,
-    calculate_epistasis_regression,
-    calculate_epistasis_ensemble,
-    calculate_epistasis_reference_free,
-)
 
-from .graph import (
-    graph_properties,
-    calculate_ruggedness_local_optima,
-    graph_spectral_analysis,
-    resistance_distance_matrix,
-    category_diffusion_hierarchy,
-)
-
-from .random_walk import (
-    calculate_ruggedness_autocorrelation_analytical,
-    calculate_ruggedness_autocorrelation_stochastic,
-    category_boundary_crossing_times,
-
-)
-
-from .persistent_homology import (
-    compute_persistent_homology
-)
-
-__all__ = [
-    'find_greedy_accessible_paths',
-    'analyze_path_accessibility',
-    'calculate_basin_of_attraction',
-    'adaptive_walk_stochastic',
-    'neutral_network_analysis',
-    'calculate_ruggedness_dirichlet_energy',
-    'calculate_local_dirichlet_energy',
-    'graph_spectral_analysis',
-    'calculate_epistasis_walsh',
-    'calculate_epistasis_regression',
-    'calculate_epistasis_ensemble',
-    'calculate_epistasis_reference_free',
-    'graph_properties',
-    'calculate_ruggedness_local_optima',
-    'resistance_distance_matrix',
-    'category_diffusion_hierarchy',
-    'calculate_ruggedness_autocorrelation_analytical',
-    'calculate_ruggedness_autocorrelation_stochastic',
-    'category_boundary_crossing_times',
-    'compute_persistent_homology',
-    'compute_ruggedness_diffusion_scale',
-    'compute_ruggedness_variance_energy',
-    'fit_t_bayesian_laplace',
-    'fit_t_grid_posterior',
-    'fit_t_profile_likelihood',
-    'fit_t_bootstrap',
-    'procrustes',
-    'edge_prf_on_observed',
-    'sp_rmse',
-    'spectral_rmse',
-    'edge_length_stats',
-    'leaf_spanning_tree',
-    'leaf_splits',
-    'rf_distance',
-    'tree_rf_dissimilarity',
-    'evaluate_reconstruction',
-    'evaluate_isorank_alignment',
-    'analyze_fitness_distribution',
-    'hypothesis_testing',
-    'permutation_test',
-    'subsample_analysis',
-]
+def __getattr__(name):
+    module_name = _EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(name)
+    value = getattr(import_module(f"{__name__}.{module_name}"), name)
+    globals()[name] = value
+    return value

@@ -11,6 +11,9 @@ from __future__ import annotations
 try:  # pragma: no cover - thin compatibility wrapper
     from phylo_landscapy.core.superscape import *  # type: ignore
 except ModuleNotFoundError as exc:  # pragma: no cover
+    if exc.name and not exc.name.startswith("phylo_landscapy"):
+        raise
+    _IMPORT_ERROR = exc
     _ERR = (
         "Superscape utilities have moved to 'phylo-landscapy'. "
         "Install phylo-landscapy to access FitnessSuperscape and related APIs."
@@ -20,11 +23,11 @@ except ModuleNotFoundError as exc:  # pragma: no cover
 
     class FitnessSuperscape:  # type: ignore[override]
         def __init__(self, *args, **kwargs):
-            raise ModuleNotFoundError(_ERR) from exc
+            raise ModuleNotFoundError(_ERR) from _IMPORT_ERROR
 
     class NullAligner:  # pragma: no cover - placeholder for type checkers
         def __init__(self, *args, **kwargs):
-            raise ModuleNotFoundError(_ERR) from exc
+            raise ModuleNotFoundError(_ERR) from _IMPORT_ERROR
 
     def __getattr__(name):  # type: ignore
-        raise ModuleNotFoundError(_ERR) from exc
+        raise ModuleNotFoundError(_ERR) from _IMPORT_ERROR

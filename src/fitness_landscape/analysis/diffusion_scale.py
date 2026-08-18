@@ -1,12 +1,24 @@
+"""Estimate fitness-landscape diffusion scales and uncertainty."""
+
 import networkx as nx
 import numpy as np
 from scipy.optimize import minimize_scalar
 from scipy.special import logsumexp
 from scipy.stats import chi2
-from typing import Tuple, Union, Literal, Optional
+from typing import Literal, Optional, Tuple, TypedDict, Union
 from ..transforms.eigenmode import eigenmode_decomposition
 from ..transforms.graph_fourier import graph_fourier_transform
 from ..core.landscape import FitnessLandscape
+
+
+class DiffusionScaleResult(TypedDict):
+    """Result schema for diffusion-scale estimation."""
+
+    t_map: float
+    t_lower_confidence_interval: float
+    t_upper_confidence_interval: float
+    t_logposterior_map: float
+    variance_approximate: float
 
 def _precompute_GMRF_stats(G: nx.Graph,
                            signal: np.ndarray,
@@ -38,7 +50,8 @@ def _precompute_GMRF_stats(G: nx.Graph,
         eigenvectors = np.asarray(_eigenvectors, dtype=float)
     else:
         eigenvalues, eigenvectors = eigenmode_decomposition(G,
-                                                            matrix = 'norm_laplacian')
+                                                            matrix='norm_laplacian',
+                                                            weight_key=None)
 
     mu = np.mean(signal)
     
@@ -65,7 +78,11 @@ def _precompute_GMRF_stats_with_evecs(G: nx.Graph,
         eigenvalues = np.asarray(_eigenvalues, dtype=float)
         eigenvectors = np.asarray(_eigenvectors, dtype=float)
     else:
-        eigenvalues, eigenvectors = eigenmode_decomposition(G, matrix='norm_laplacian')
+        eigenvalues, eigenvectors = eigenmode_decomposition(
+            G,
+            matrix='norm_laplacian',
+            weight_key=None,
+        )
     mu = np.mean(signal)
     signal_centered = signal - mu
     f_hat = eigenvectors.T @ signal_centered
@@ -140,37 +157,34 @@ def compute_log_likelihood_H0(f_hat: np.ndarray,
                               t: float,
                               sigma_squared: float,
                               epsilon: float = 1e-8) -> tuple:
-    """
-    Function to compute the log likelihood under a GMRF landscape
-    model. 
+    """Compute the Gaussian log likelihood under the heat-kernel GMRF.
 
-    Arguments:
+    Parameters
     ----------
-    f_hat : np.array    
-        The graph signal transformed into the Fourier basis. 
-    
-    eigenvalues : np.ndarray    
-        The Graph Laplacian eigenvalues. 
-    
+    f_hat : ndarray
+        Mean-centred graph signal expressed in the Laplacian eigenbasis.
+    eigenvalues : ndarray
+        Graph-Laplacian eigenvalues corresponding to ``f_hat``.
     t : float
-        The heat diffusion kernel timestep parameter. 
-    
+        Non-negative heat-kernel diffusion scale.
     sigma_squared : float
-        The empirical variance in the signal. 
-    
-    epsilon : float, default = `1e-8`.
-        Small float for numerical stability.
-    
-    Returns:
-    --------
+        Empirical variance of the centred signal.
+    epsilon : float, default=1e-8
+        Positive eigenvalue offset for numerical stability.
+
+    Returns
+    -------
     log_likelihood : float
-        The log likelihood. 
-    
+        Gaussian log likelihood.
     log_det : float
-        The log determinant of the Gaussian. 
-    
-    quadratic form : float
-        The qudratic form of the Gaussian. 
+        Log determinant of the scaled heat-kernel covariance.
+    quadratic_form : float
+        Signal quadratic form under the inverse covariance.
+
+    Notes
+    -----
+    Heat-kernel eigenvalues are ``exp(-t * (lambda + epsilon))`` and
+    rescaled so their sum equals ``n * sigma_squared``.
     """
 
     n = len(f_hat)
@@ -202,7 +216,7 @@ def compute_log_likelihood_H0(f_hat: np.ndarray,
     return log_likelihood, log_det, quadratic_form
 
 def fit_t_bayesian_laplace(G: nx.Graph,
-                           signal: float,
+                           signal: np.ndarray,
                            t_min: float = 0.01,
                            t_max: float = 1000.0,
                            epsilon: float = 1e-8,
@@ -217,6 +231,9 @@ def fit_t_bayesian_laplace(G: nx.Graph,
     G : nx.Graph
         The fitness landscape graph. 
 
+    signal : ndarray
+        Scalar graph signal in graph-node order.
+
     t_min : float
         The prior lower bound on t. 
     
@@ -226,8 +243,10 @@ def fit_t_bayesian_laplace(G: nx.Graph,
     epsilon : float
         Small float for numerical stability.
     
-    verbose : bool, default=`False`
-        Boolean for verbose output. 
+    _eigenvalues : ndarray, optional
+        Precomputed normalized-Laplacian eigenvalues.
+    _eigenvectors : ndarray, optional
+        Precomputed normalized-Laplacian eigenvectors.
 
     Returns
     -------
@@ -330,9 +349,46 @@ def fit_t_grid_posterior(G: nx.Graph,
                          _eigenvalues: Optional[np.ndarray] = None,
                          _eigenvectors: Optional[np.ndarray] = None,
                          ) -> Tuple:
-    """
-    Estimate t using a grid posterior approximation in log-space.
-    Returns MAP, 95% credible interval, log-posterior at MAP, and posterior variance.
+    """Estimate diffusion scale with a grid posterior in log-space.
+
+    Parameters
+    ----------
+    G : networkx.Graph
+        Undirected landscape graph.
+    signal : ndarray
+        Scalar graph signal in graph-node order.
+    t_min : float, default=0.01
+        Lower grid bound; must be positive.
+    t_max : float, default=1000.0
+        Upper grid bound.
+    epsilon : float, default=1e-8
+        Eigenvalue offset for likelihood stability.
+    grid_size : int, default=512
+        Number of logarithmically spaced candidate scales.
+    prior : {'uniform', 'log_uniform'}, default='log_uniform'
+        Prior density evaluated on the scale grid.
+    _eigenvalues : ndarray, optional
+        Precomputed normalized-Laplacian eigenvalues.
+    _eigenvectors : ndarray, optional
+        Precomputed normalized-Laplacian eigenvectors.
+
+    Returns
+    -------
+    t_map : float
+        Maximum-a-posteriori scale.
+    ci_lower : float
+        Lower bound of the equal-tail 95% credible interval.
+    ci_upper : float
+        Upper bound of the equal-tail 95% credible interval.
+    logpost_map : float
+        Log posterior at ``t_map``.
+    var_approx : float
+        Posterior variance on the discrete grid.
+
+    Raises
+    ------
+    ValueError
+        If fewer than ten grid points are requested.
     """
     f_hat, eigenvalues, sigma_squared = _precompute_GMRF_stats(
         G,
@@ -365,8 +421,46 @@ def fit_t_profile_likelihood(G: nx.Graph,
                              _eigenvalues: Optional[np.ndarray] = None,
                              _eigenvectors: Optional[np.ndarray] = None,
                              ) -> Tuple:
-    """
-    Estimate t using a profile likelihood interval on a grid.
+    """Estimate diffusion scale with a profile-likelihood grid.
+
+    Parameters
+    ----------
+    G : networkx.Graph
+        Undirected landscape graph.
+    signal : ndarray
+        Scalar graph signal in graph-node order.
+    t_min : float, default=0.01
+        Lower scale-grid bound.
+    t_max : float, default=1000.0
+        Upper scale-grid bound.
+    epsilon : float, default=1e-8
+        Eigenvalue offset for likelihood stability.
+    grid_size : int, default=512
+        Number of logarithmically spaced candidate scales.
+    alpha : float, default=0.05
+        Tail probability for the chi-square likelihood-ratio interval.
+    _eigenvalues : ndarray, optional
+        Precomputed normalized-Laplacian eigenvalues.
+    _eigenvectors : ndarray, optional
+        Precomputed normalized-Laplacian eigenvectors.
+
+    Returns
+    -------
+    t_map : float
+        Maximum-likelihood scale.
+    ci_lower : float
+        Lower profile-likelihood confidence bound.
+    ci_upper : float
+        Upper profile-likelihood confidence bound.
+    logpost_map : float
+        Log likelihood at ``t_map``.
+    var_approx : float
+        Variance proxy derived from the interval width.
+
+    Raises
+    ------
+    ValueError
+        If fewer than ten grid points are requested.
     """
     f_hat, eigenvalues, sigma_squared = _precompute_GMRF_stats(
         G,
@@ -439,8 +533,50 @@ def fit_t_bootstrap(G: nx.Graph,
                     _eigenvalues: Optional[np.ndarray] = None,
                     _eigenvectors: Optional[np.ndarray] = None,
                     ) -> Tuple:
-    """
-    Estimate t using a parametric bootstrap under the fitted GMRF.
+    """Estimate diffusion-scale uncertainty by parametric bootstrap.
+
+    Parameters
+    ----------
+    G : networkx.Graph
+        Undirected landscape graph.
+    signal : ndarray
+        Scalar graph signal in graph-node order.
+    t_min : float, default=0.01
+        Lower scale-grid bound.
+    t_max : float, default=1000.0
+        Upper scale-grid bound.
+    epsilon : float, default=1e-8
+        Eigenvalue offset for likelihood stability.
+    grid_size : int, default=256
+        Number of candidate scales used in each refit.
+    n_bootstrap : int, default=200
+        Number of parametric bootstrap signals.
+    random_state : int, optional
+        Random-number-generator seed.
+    prior : {'uniform', 'log_uniform'}, default='log_uniform'
+        Prior used for the initial fit and bootstrap refits.
+    _eigenvalues : ndarray, optional
+        Precomputed normalized-Laplacian eigenvalues.
+    _eigenvectors : ndarray, optional
+        Precomputed normalized-Laplacian eigenvectors.
+
+    Returns
+    -------
+    t_map : float
+        Initial maximum-a-posteriori scale.
+    ci_lower : float
+        2.5th percentile of bootstrap scale estimates.
+    ci_upper : float
+        97.5th percentile of bootstrap scale estimates.
+    logpost_map : float
+        Initial log posterior at ``t_map``.
+    var_approx : float
+        Sample variance of bootstrap scale estimates.
+
+    Raises
+    ------
+    ValueError
+        If fewer than ten bootstrap replicates are requested.
     """
     if n_bootstrap < 10:
         raise ValueError("n_bootstrap must be >= 10 for a stable bootstrap estimate.")
@@ -539,8 +675,62 @@ def _compute_variances(eigenvectors: np.ndarray,
     
     return Sigma_H0
 
+
+def _resolve_diffusion_scale_signal(
+    landscape: FitnessLandscape,
+    fitness_layer: str | None,
+) -> np.ndarray:
+    """Return a finite scalar signal without changing the active layer."""
+    if fitness_layer is None:
+        layer_name = landscape.active_layer_name
+        if layer_name is None:
+            raise ValueError(
+                "Diffusion-scale analysis requires an active fitness layer or "
+                "an explicit fitness_layer."
+            )
+        layer = landscape.active_layer
+    else:
+        layer_name = fitness_layer
+        layer = landscape.get_layer(fitness_layer, allow_active_default=False)
+
+    try:
+        scalar_values = np.asarray(layer.to_scalar(), dtype=float)
+    except (AttributeError, TypeError, ValueError, OverflowError) as error:
+        raise ValueError(
+            f"Fitness layer {layer_name!r} must be scalarizable to numeric values."
+        ) from error
+
+    expected_rows = len(landscape.sequences)
+    if scalar_values.ndim != 1 or scalar_values.shape[0] != expected_rows:
+        actual_shape = scalar_values.shape
+        raise ValueError(
+            f"Fitness layer {layer_name!r} must provide one scalar per sequence; "
+            f"got shape {actual_shape}, expected ({expected_rows},)."
+        )
+
+    node_order = list(landscape.graph.nodes())
+    if len(node_order) != expected_rows:
+        raise ValueError(
+            "Diffusion-scale analysis requires one graph node per sequence; "
+            f"found {len(node_order)} nodes and {expected_rows} sequences."
+        )
+
+    signal = np.asarray(
+        [
+            scalar_values[landscape.sequence_index_for_node(node)]
+            for node in node_order
+        ],
+        dtype=float,
+    )
+    if not np.all(np.isfinite(signal)):
+        raise ValueError(
+            f"Fitness layer {layer_name!r} contains missing or non-finite values; "
+            "diffusion-scale analysis requires a complete finite signal."
+        )
+    return signal
+
 def compute_ruggedness_diffusion_scale(landscape: FitnessLandscape,
-                                       fitness_layer: str = None,
+                                       fitness_layer: str | None = None,
                                        t_min: float = 0.01,
                                        t_max: float = 100.0,
                                        epsilon: float = 1e-8,
@@ -551,16 +741,17 @@ def compute_ruggedness_diffusion_scale(landscape: FitnessLandscape,
                                        random_state: Optional[int] = None,
                                        _eigenvalues: Optional[np.ndarray] = None,
                                        _eigenvectors: Optional[np.ndarray] = None,
-                                       ) -> float:
-    """
-    Function to compute the diffusion scale (T_map) of a single fitness
-    landscape.
+                                       ) -> DiffusionScaleResult:
+    """Estimate the heat-kernel diffusion scale of a fitness signal.
 
     Parameters
     ----------
-    lanscape : FitnessLandscape
-        The fitness landscape to analyze. Default behabviour will
-        measure only the current active fitness layer.
+    landscape : FitnessLandscape
+        Landscape to analyse.
+    fitness_layer : str, optional
+        Layer to fit without changing the landscape's active view. If omitted,
+        use the active layer. The selected layer must yield one finite numeric
+        scalar per sequence; missing values are not supported.
 
     t_min : float
         The prior lower bound on t. 
@@ -591,37 +782,29 @@ def compute_ruggedness_diffusion_scale(landscape: FitnessLandscape,
 
     _eigenvectors : np.ndarray, optional
         Precomputed eigenvectors of the normalized Laplacian (private override).
-
-    _eigenvalues : np.ndarray, optional
-        Precomputed eigenvalues of the normalized Laplacian (private override).
-
-    _eigenvectors : np.ndarray, optional
-        Precomputed eigenvectors of the normalized Laplacian (private override).
     
     Returns
     -------
-    Dict
-        The results dictionary with
-        - t_map : the maximum a posteriori diffusion scale.
-        - t_lower_confidence_interval : the lower confidence bound on
-        the diffusion scale.
-        - t_upper_confidence_interval : the upper confidence bound on
-        the diffusion scale.
-        - t_logposterior_map : the log posterior likelihood of the 
-        maximum a posteriori diffusion scale value.
-        - var_approx : the approximated variance in the signal.
+    DiffusionScaleResult
+        Dictionary containing ``t_map``,
+        ``t_lower_confidence_interval``,
+        ``t_upper_confidence_interval``, ``t_logposterior_map``, and
+        ``variance_approximate``.
+
+    Notes
+    -----
+    The model is a zero-mean Gaussian Markov random field with covariance
+    spectrum proportional to ``exp(-t * lambda)`` and normalized to the
+    empirical signal variance. Larger ``t`` concentrates variance in smoother
+    graph modes. Interval semantics depend on ``method``: Bayesian credible
+    intervals for ``grid`` and ``laplace``, a likelihood-ratio confidence
+    interval for ``profile``, and percentile uncertainty for ``bootstrap``.
     """
-    # Use current active fitness layer.
-    if fitness_layer is None:
-        signal = landscape.get_signal()
-    # View a key valued fitness layer instead.
-    else:
-        _ = fitness_landscape.view(fitness_layer)
-        signal = landscape.get_signal()
-    
     # Make sure not directed graph.
     if not isinstance(landscape.graph, nx.Graph):
         raise ValueError(f"Expected `landscape.graph` to be `nx.Graph`, found `{type(landscape.graph)}`")
+
+    signal = _resolve_diffusion_scale_signal(landscape, fitness_layer)
 
     if method == "laplace":
         t_map, ci_lower, ci_upper, logpost_map, var_approx = fit_t_bayesian_laplace(
@@ -677,11 +860,11 @@ def compute_ruggedness_diffusion_scale(landscape: FitnessLandscape,
         )
 
     return {
-        't_map': t_map,
-        't_lower_confidence_interval': ci_lower,
-        't_upper_confidence_interval': ci_upper,
-        't_logposterior_map': logpost_map,
-        'variance_approximate': var_approx,
+        't_map': float(t_map),
+        't_lower_confidence_interval': float(ci_lower),
+        't_upper_confidence_interval': float(ci_upper),
+        't_logposterior_map': float(logpost_map),
+        'variance_approximate': float(var_approx),
         }
     
 def _expected_local_global_dirichlet_energy(G: nx.Graph,
@@ -812,6 +995,8 @@ def compute_ruggedness_variance_energy(landscape: FitnessLandscape,
     
     Parameters
     ----------
+    landscape : FitnessLandscape
+        Landscape whose active scalar fitness signal defines the GMRF.
     t : float
         The heat diffusion scale. 
     
@@ -827,7 +1012,7 @@ def compute_ruggedness_variance_energy(landscape: FitnessLandscape,
     normalized : bool, default=`True`
         Whether to use the normalized Laplacian. 
     
-    weight_key: str, default=`weight`
+    weight_key : str, default=`weight`
         The key that edge weights are stored under.
 
     method : {"grid", "profile", "bootstrap", "laplace"}
@@ -844,6 +1029,11 @@ def compute_ruggedness_variance_energy(landscape: FitnessLandscape,
 
     random_state : int, optional
         RNG seed for method="bootstrap".
+
+    _eigenvalues : ndarray, optional
+        Precomputed normalized-Laplacian eigenvalues.
+    _eigenvectors : ndarray, optional
+        Precomputed normalized-Laplacian eigenvectors.
     
     Returns
     -------
@@ -859,7 +1049,8 @@ def compute_ruggedness_variance_energy(landscape: FitnessLandscape,
         expected local energy.
     """
     G = landscape.graph
-    signal = landscape.get_signal() 
+    node_order = list(G.nodes())
+    signal = landscape.get_node_signal(node_order)
 
     # Estimate t if not given
     if t is None:
@@ -884,7 +1075,11 @@ def compute_ruggedness_variance_energy(landscape: FitnessLandscape,
         eigenvalues = np.asarray(_eigenvalues, dtype=float)
         eigenvectors = np.asarray(_eigenvectors, dtype=float)
     else:
-        eigenvalues, eigenvectors = eigenmode_decomposition(G, matrix='norm_laplacian')
+        eigenvalues, eigenvectors = eigenmode_decomposition(
+            G,
+            matrix='norm_laplacian',
+            weight_key=None,
+        )
 
     # Centered mean used in the likelihood is zero-mean; keep both:
     mu_emp = float(np.mean(signal))
@@ -908,6 +1103,10 @@ def compute_ruggedness_variance_energy(landscape: FitnessLandscape,
     return {
         'covariance_matrix': Sigma,
         'expected_local_energy': local_E,
+        'expected_local_energy_by_node': {
+            node: float(local_E[index]) for index, node in enumerate(node_order)
+        },
         'expected_global_energy': float(global_E),
         't_used': t_value,
+        'node_order': node_order,
     }

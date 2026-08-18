@@ -1,4 +1,5 @@
-from networkx.algorithms.bipartite import matrix
+"""Compute graph topology, community, resistance, and category summaries."""
+
 from networkx.algorithms.community import louvain_communities
 from networkx.algorithms.community.quality import modularity
 import numpy as np
@@ -7,6 +8,7 @@ from functools import lru_cache
 from ..core.annotation import AnnotationLayer
 from ..core.fitness import CategoricalFitness, ProbabilisticCategoricalFitness
 from ..core.landscape import FitnessLandscape
+from ..core.edge_schema import AUTO_EDGE_KEY, resolve_edge_attribute
 from ..transforms.eigenmode import eigenmode_decomposition
 from typing import Any, Mapping, Union, Dict, Literal, Sequence, Optional, Iterable, Hashable
 import scipy.sparse as sp
@@ -27,9 +29,30 @@ def graph_properties(graph: Union[FitnessLandscape, nx.Graph]) -> Dict:
     Returns
     -------
     dict
-        Dictionary of graph properties.
+        Dictionary of graph properties. Empty graphs return zero component
+        count and density, with ``numpy.nan`` for undefined degree,
+        clustering, and path-length statistics. Singleton graphs return zero
+        degree, clustering, path length, and density.
     """
     
+    graph = graph.graph if isinstance(graph, FitnessLandscape) else graph
+    if not isinstance(graph, nx.Graph):
+        raise TypeError("graph must be a NetworkX graph or FitnessLandscape")
+    if graph.number_of_nodes() == 0:
+        return {
+            "degree": {
+                "mean": np.nan,
+                "std": np.nan,
+                "min": np.nan,
+                "max": np.nan,
+            },
+            "clustering": np.nan,
+            "path_length": np.nan,
+            "path_length_note": "Undefined for an empty graph",
+            "components": {"count": 0, "largest_size": 0, "sizes": []},
+            "density": 0.0,
+        }
+
     properties = ['degree', 'clustering', 'path_length', 'components', 'density']
     
     results = {}
@@ -83,7 +106,7 @@ def annotate_louvain_communities(
     landscape: FitnessLandscape,
     *,
     annotation_name: str = "louvain_communities",
-    weight: Optional[str] = "weight",
+    weight: Optional[str] = AUTO_EDGE_KEY,
     resolution: float = 1.0,
     threshold: float = 1e-7,
     seed: Optional[Union[int, np.random.Generator, np.random.RandomState]] = None,
@@ -94,19 +117,20 @@ def annotate_louvain_communities(
 
     Parameters
     ----------
-    landscape :
+    landscape : FitnessLandscape
         Target landscape with an instantiated graph.
-    annotation_name :
+    annotation_name : str
         Name for the annotation layer that will store community metadata.
-    weight :
-        Edge attribute representing weights. ``None`` treats the graph as unweighted.
-    resolution :
+    weight : str or None, default="auto"
+        Conductance attribute. ``"auto"`` resolves constructor metadata;
+        ``None`` treats the graph as unweighted.
+    resolution : float, default=1.0
         Resolution parameter passed to :func:`networkx.algorithms.community.louvain_communities`.
-    threshold :
+    threshold : float, default=1e-7
         Convergence threshold for the Louvain optimiser.
-    seed :
+    seed : int, numpy.random.Generator, numpy.random.RandomState, or None
         Optional seed controlling the stochastic parts of the algorithm.
-    overwrite :
+    overwrite : bool, default=False
         Replace an existing annotation layer with ``annotation_name`` if present.
 
     Returns
@@ -119,6 +143,12 @@ def annotate_louvain_communities(
         raise ValueError("Cannot compute communities: landscape graph is missing.")
     if graph.number_of_nodes() == 0:
         raise ValueError("Cannot compute communities: landscape graph has no nodes.")
+    resolved_weight = resolve_edge_attribute(
+        graph,
+        "conductance",
+        weight,
+        required=False,
+    )
 
     if annotation_name in landscape.annotation_layers:
         if not overwrite:
@@ -129,7 +159,13 @@ def annotate_louvain_communities(
         landscape.detach_annotation(annotation_name)
 
     communities = list(
-        louvain_communities(graph, weight=weight, resolution=resolution, threshold=threshold, seed=seed)
+        louvain_communities(
+            graph,
+            weight=resolved_weight,
+            resolution=resolution,
+            threshold=threshold,
+            seed=seed,
+        )
     )
     if not communities:
         raise RuntimeError("Louvain community detection returned no communities.")
@@ -142,13 +178,13 @@ def annotate_louvain_communities(
             node_to_comm[node] = cid
 
     try:
-        modularity_score = float(modularity(graph, communities, weight=weight))
+        modularity_score = float(
+            modularity(graph, communities, weight=resolved_weight)
+        )
     except Exception:
         modularity_score = None
 
-    node_index_map = getattr(landscape, "_nodes_by_index", None)
-    if node_index_map is None:
-        raise RuntimeError("Landscape is missing node index mapping; cannot align annotations.")
+    node_index_map = landscape.sequence_index_to_node
 
     n = len(landscape.sequences)
     community_ids: list[Optional[int]] = [None] * n
@@ -177,7 +213,7 @@ def annotate_louvain_communities(
 
     metadata = {
         "algorithm": "louvain",
-        "weight_key": weight,
+        "weight_key": resolved_weight,
         "resolution": resolution,
         "threshold": threshold,
         "seed": metadata_seed,
@@ -207,13 +243,14 @@ def calculate_ruggedness_local_optima(landscape: FitnessLandscape,
     ----------
     landscape : FitnessLandscape
         The fitness landscape to analyze. 
+    **kwargs
+        Reserved for compatibility. No keyword is currently consumed.
     
     Returns
     -------
     Dict
         The results dictionary.
     """
-    # Extract sequences
     sequences = landscape.sequences
     
     if not sequences:
@@ -222,32 +259,25 @@ def calculate_ruggedness_local_optima(landscape: FitnessLandscape,
     assert landscape.graph is not None, \
     'Landscape graph must be initialised.'
     
-    # Find local optima
+    signal = landscape.get_signal()
     local_optima = []
-    
-    for i, seq in enumerate(sequences):
-        # Get fitness of current sequence
-        fitness = landscape.get_fitness(seq)
-        
-        # Get neighbors
-        neighbors = list(landscape.graph.neighbors(i))
-        
-        # Check if fitness is higher than all neighbors
-        is_local_optimum = True
-        for neighbor in neighbors:
-            neighbor_fitness = landscape.get_fitness(sequences[neighbor])
-            if neighbor_fitness > fitness:
-                is_local_optimum = False
-                break
-        
-        if is_local_optimum:
-            local_optima.append(i)
+    for node in landscape.graph.nodes():
+        sequence_index = landscape.sequence_index_for_node(node)
+        fitness = signal[sequence_index]
+        if all(
+            signal[landscape.sequence_index_for_node(neighbor)] <= fitness
+            for neighbor in landscape.graph.neighbors(node)
+        ):
+            local_optima.append(node)
     
     # Calculate density of local optima
     density = len(local_optima) / len(sequences)
     
     # Calculate fitness statistics of local optima
-    local_optima_fitness = [landscape.get_fitness(sequences[i]) for i in local_optima]
+    local_optima_indices = [
+        landscape.sequence_index_for_node(node) for node in local_optima
+    ]
+    local_optima_fitness = [signal[index] for index in local_optima_indices]
     
     if local_optima_fitness:
         mean_fitness = np.mean(local_optima_fitness)
@@ -260,7 +290,8 @@ def calculate_ruggedness_local_optima(landscape: FitnessLandscape,
     return {
         'local_optima_count': len(local_optima),
         'local_optima_density': density,
-        'local_optima_indices': local_optima,
+        'local_optima': local_optima,
+        'local_optima_indices': local_optima_indices,
         'mean_fitness': mean_fitness,
         'std_fitness': std_fitness,
         'max_fitness': max_fitness,
@@ -270,26 +301,56 @@ def calculate_ruggedness_local_optima(landscape: FitnessLandscape,
     
 def graph_spectral_analysis(landscape: FitnessLandscape,
                             matrix: Literal['laplacian', 'norm_laplacian'] = 'laplacian',
-                            k: int = None) -> Dict:
+                            k: int = None,
+                            weight_key: str | None = AUTO_EDGE_KEY) -> Dict:
     """
     Analyze the eigenmodes of a graph.
     
     Parameters
     ----------
-    graph : networkx.Graph or FitnessLandscape
-        Graph to analyze.
-    k : int or None, optional
-        Number of eigenmodes to analyze.
+    landscape : FitnessLandscape
+        Landscape whose graph topology is analysed.
     matrix : str, default=`laplacian`
         The matrix to use for spectral analysis. Options are
         `laplacian` or `norm_laplcian`.
+    k : int or None, optional
+        Number of eigenmodes to analyze.
+    weight_key : str or None, default="auto"
+        Conductance attribute used for the spectral operator. ``None``
+        requests an unweighted operator.
         
     Returns
     -------
     dict
-        Eigenspectral analysis results. 
+        Eigenspectral analysis results. Empty graphs return consistently empty
+        arrays and omit ``spectral_gap``. Singleton graphs return one zero
+        eigenvalue and also omit ``spectral_gap``.
     """
-    eigenvalues, eigenvectors = eigenmode_decomposition(landscape, matrix=matrix, k=k)
+    if landscape.graph.number_of_nodes() == 0:
+        return {
+            "eigenvalues": np.empty(0, dtype=float),
+            "participation_ratios": np.empty(0, dtype=float),
+            "localization": np.empty(0, dtype=float),
+            "node_centralities": np.empty((0, 0), dtype=float),
+            "node_order": [],
+            "weight_key": resolve_edge_attribute(
+                landscape.graph,
+                "conductance",
+                weight_key,
+                required=False,
+            ),
+            "spectral_density": {
+                "histogram": np.empty(0, dtype=int),
+                "bin_edges": np.empty(0, dtype=float),
+            },
+        }
+
+    eigenvalues, eigenvectors = eigenmode_decomposition(
+        landscape,
+        matrix=matrix,
+        k=k,
+        weight_key=weight_key,
+    )
     
     w = np.asarray(eigenvalues, dtype=float)
     U = np.asarray(eigenvectors, dtype=float)
@@ -309,6 +370,13 @@ def graph_spectral_analysis(landscape: FitnessLandscape,
         'participation_ratios': pr,
         'localization': ipr,
         'node_centralities': node_c,
+        'node_order': list(landscape.graph.nodes()),
+        'weight_key': resolve_edge_attribute(
+            landscape.graph,
+            "conductance",
+            weight_key,
+            required=False,
+        ),
     }
     if m >= 2:
         # ascending-ordered eigenvalues => spectral gap between first two
@@ -375,6 +443,35 @@ def _wasserstein_distance(cost: np.ndarray,
         raise ValueError("Cost matrix must be square.")
     if mu_a.shape[0] != n or mu_b.shape[0] != n:
         raise ValueError("Distribution lengths must match cost matrix.")
+
+    if np.any(np.isnan(cost)):
+        raise ValueError("Cost matrix must not contain NaN values.")
+    if np.any(np.isinf(cost)):
+        finite_adjacency = sp.csr_matrix(np.isfinite(cost), dtype=int)
+        _, component_ids = sp.csgraph.connected_components(
+            finite_adjacency,
+            directed=False,
+        )
+        total_cost = 0.0
+        for component_id in np.unique(component_ids):
+            indices = np.flatnonzero(component_ids == component_id)
+            mass_a = float(mu_a[indices].sum())
+            mass_b = float(mu_b[indices].sum())
+            if not np.isclose(mass_a, mass_b, rtol=1e-10, atol=1e-12):
+                return np.inf
+            if mass_a <= 0.0:
+                continue
+            component_cost = cost[np.ix_(indices, indices)]
+            if np.any(~np.isfinite(component_cost)):
+                raise ValueError(
+                    "Finite-cost components must contain only finite costs."
+                )
+            total_cost += _wasserstein_distance(
+                component_cost,
+                mu_a[indices],
+                mu_b[indices],
+            )
+        return float(total_cost)
 
     constraint_mat = constraint if constraint is not None else _transport_constraint_matrix(n)
     b_eq = np.concatenate([mu_a, mu_b]).astype(float, copy=False)
@@ -443,6 +540,28 @@ def _aggregate_distance_matrix(cost: np.ndarray | None,
         if diag_scaled is None:
             if cost is None:
                 raise ValueError("Cost matrix required for expected_pairwise when diag_scaled is missing.")
+            if np.any(np.isnan(cost)):
+                raise ValueError("Cost matrix must not contain NaN values.")
+            if np.any(np.isinf(cost)):
+                for a in range(n_classes):
+                    if masses[a] <= 0:
+                        continue
+                    for b in range(a, n_classes):
+                        if masses[b] <= 0:
+                            continue
+                        if a == b:
+                            dist[a, b] = 0.0
+                            continue
+                        pair_mass = np.outer(probs[:, a], probs[:, b])
+                        if np.any((pair_mass > 0.0) & np.isinf(cost)):
+                            value = np.inf
+                        else:
+                            finite_cost = np.where(np.isfinite(cost), cost, 0.0)
+                            value = float(np.sum(pair_mass * finite_cost)) / (
+                                masses[a] * masses[b]
+                            )
+                        dist[a, b] = dist[b, a] = value
+                return dist
             numer = probs.T @ cost @ probs
             denom = masses[:, None] * masses[None, :]
             with np.errstate(divide="ignore", invalid="ignore"):
@@ -639,12 +758,19 @@ def _compute_resistance_matrix(G: nx.Graph,
                                weight_normalisation: bool,
                                compute_full_matrix: bool,
                                hutchinson_samples: int = 32,
-                               hutchinson_seed: int | None = None) -> tuple[Optional[np.ndarray], np.ndarray, float, Optional[dict[str, Any]], Optional[np.ndarray]]:
+                               hutchinson_seed: int | None = None) -> tuple[Optional[np.ndarray], np.ndarray, float, Optional[dict[str, Any]], Optional[np.ndarray], bool]:
     """
     Core resistance distance computation for a provided node ordering.
     """
     if not node_order:
-        return np.zeros((0, 0), dtype=float), np.zeros((0,), dtype=float), 1.0, None, None
+        return (
+            np.zeros((0, 0), dtype=float),
+            np.zeros((0,), dtype=float),
+            1.0,
+            None,
+            None,
+            False,
+        )
 
     sub = G.subgraph(node_order)
     L_sparse = nx.laplacian_matrix(sub, nodelist=list(node_order), weight=weight_key).astype(float)
@@ -660,36 +786,75 @@ def _compute_resistance_matrix(G: nx.Graph,
             L_sparse = L_sparse / norm_factor
     n = L_sparse.shape[0]
     if n == 0:
-        return np.zeros((0, 0), dtype=float), np.zeros((0,), dtype=float), norm_factor, None, None
+        return (
+            np.zeros((0, 0), dtype=float),
+            np.zeros((0,), dtype=float),
+            norm_factor,
+            None,
+            None,
+            False,
+        )
 
     if n <= sparse_threshold:
         L = L_sparse.toarray()
+        jitter_used = False
         if np.linalg.matrix_rank(L) < n - 1:
-            L = L + jitter * np.eye(n)
+            if jitter <= 0.0:
+                raise ValueError(
+                    "Connected-component Laplacian is numerically rank deficient; "
+                    "provide positive jitter for conditioning."
+                )
+            projector = np.eye(n) - np.ones((n, n), dtype=float) / n
+            L = L + jitter * projector
+            jitter_used = True
         try:
-            L_pinv = np.linalg.pinv(L)
+            L_pinv = np.linalg.pinv(L, hermitian=True)
         except np.linalg.LinAlgError:
-            L = L + jitter * np.eye(n)
-            L_pinv = np.linalg.pinv(L)
+            if jitter <= 0.0:
+                raise
+            if not jitter_used:
+                projector = np.eye(n) - np.ones((n, n), dtype=float) / n
+                L = L + jitter * projector
+                jitter_used = True
+            L_pinv = np.linalg.pinv(L, hermitian=True)
         diag = np.diag(L_pinv)
         R = None
         if compute_full_matrix:
             R = diag[:, None] + diag[None, :] - 2.0 * L_pinv
             R[R < 0] = 0.0
             R = R / norm_factor
-        return R, diag, norm_factor, None, L_pinv
+        return R, diag, norm_factor, None, L_pinv, jitter_used
 
     if n <= 1:
-        return np.zeros((n, n), dtype=float), np.zeros((n,), dtype=float), norm_factor, None, None
+        return (
+            np.zeros((n, n), dtype=float),
+            np.zeros((n,), dtype=float),
+            norm_factor,
+            None,
+            None,
+            False,
+        )
 
     ground = n - 1
     keep = list(range(n - 1))
     L_reduced = L_sparse[keep, :][:, keep].tocsc()
-    if jitter:
-        L_reduced = L_reduced + jitter * sp.eye(n - 1, format="csc")
+    jitter_used = False
     try:
         solver = splu(L_reduced)
     except RuntimeError:
+        if jitter <= 0.0:
+            raise ValueError(
+                "Grounded component Laplacian factorization failed; provide "
+                "positive jitter for conditioning."
+            )
+        L_reduced = L_reduced + jitter * sp.eye(n - 1, format="csc")
+        jitter_used = True
+        try:
+            solver = splu(L_reduced)
+        except RuntimeError:
+            solver = None
+
+    if solver is None:
         L = L_sparse.toarray()
         attempts = 0
         rank = n
@@ -698,17 +863,23 @@ def _compute_resistance_matrix(G: nx.Graph,
                 rank = np.linalg.matrix_rank(L)
                 break
             except np.linalg.LinAlgError:
-                L = L + (10 ** attempts) * jitter * np.eye(n)
+                projector = np.eye(n) - np.ones((n, n), dtype=float) / n
+                L = L + (10 ** attempts) * jitter * projector
+                jitter_used = True
                 attempts += 1
         if rank < n - 1:
-            L = L + jitter * np.eye(n)
+            projector = np.eye(n) - np.ones((n, n), dtype=float) / n
+            L = L + jitter * projector
+            jitter_used = True
         attempts = 0
         while attempts < 5:
             try:
-                L_pinv = np.linalg.pinv(L)
+                L_pinv = np.linalg.pinv(L, hermitian=True)
                 break
             except np.linalg.LinAlgError:
-                L = L + (10 ** attempts) * jitter * np.eye(n)
+                projector = np.eye(n) - np.ones((n, n), dtype=float) / n
+                L = L + (10 ** attempts) * jitter * projector
+                jitter_used = True
                 attempts += 1
         else:
             raise
@@ -718,7 +889,7 @@ def _compute_resistance_matrix(G: nx.Graph,
             R = diag[:, None] + diag[None, :] - 2.0 * L_pinv
             R[R < 0] = 0.0
             R = R / norm_factor
-        return R, diag, norm_factor, None, L_pinv
+        return R, diag, norm_factor, None, L_pinv, jitter_used
 
     diag_full = np.zeros(n, dtype=float)
     R = None
@@ -741,7 +912,14 @@ def _compute_resistance_matrix(G: nx.Graph,
         R[: n - 1, ground] = diag
         R[ground, : n - 1] = diag
         diag_full[: n - 1] = diag
-        return R / norm_factor, diag_full, norm_factor, solver_data, None
+        return (
+            R / norm_factor,
+            diag_full,
+            norm_factor,
+            solver_data,
+            None,
+            jitter_used,
+        )
 
     # Approximate diagonal via Hutchinson to avoid building full matrix
     rng = np.random.default_rng(hutchinson_seed)
@@ -755,16 +933,57 @@ def _compute_resistance_matrix(G: nx.Graph,
         diag_est += z0 * x_full
     diag_est = diag_est / max(1, hutchinson_samples)
     diag_full[:] = diag_est
-    return R, diag_full, norm_factor, solver_data, None
+    return R, diag_full, norm_factor, solver_data, None, jitter_used
+
+
+def _resistance_component_node_orders(
+    source: FitnessLandscape | nx.Graph,
+    graph: nx.Graph,
+    node_order: Sequence,
+    weight_key: str | None,
+) -> tuple[nx.Graph, list[list[Hashable]]]:
+    """Return the positive-conductance graph and ordered components."""
+    selected_nodes = set(node_order)
+    if isinstance(source, FitnessLandscape):
+        topological_components = [
+            set(component.graph.nodes()) for component in source.get_components()
+        ]
+    else:
+        topological_components = [
+            set(component) for component in nx.connected_components(graph)
+        ]
+
+    electrical_graph = nx.Graph()
+    electrical_graph.graph.update(graph.graph)
+    electrical_graph.add_nodes_from(
+        (node, dict(graph.nodes[node])) for node in node_order
+    )
+    for u, v, data in graph.subgraph(selected_nodes).edges(data=True):
+        if weight_key is None or float(data[weight_key]) > 0.0:
+            electrical_graph.add_edge(u, v, **dict(data))
+
+    position = {node: index for index, node in enumerate(node_order)}
+    component_orders: list[list[Hashable]] = []
+    for topological_nodes in topological_components:
+        retained = selected_nodes & topological_nodes
+        if not retained:
+            continue
+        subgraph = electrical_graph.subgraph(retained)
+        for component_nodes in nx.connected_components(subgraph):
+            component_orders.append(
+                sorted(component_nodes, key=position.__getitem__)
+            )
+    component_orders.sort(key=lambda nodes: position[nodes[0]])
+    return electrical_graph, component_orders
 
 
 def resistance_distance_matrix(graph: Union[FitnessLandscape, nx.Graph],
                                nodes: Optional[Sequence] = None,
                                *,
-                               weight_key: Optional[str] = None,
+                               weight_key: Optional[str] = AUTO_EDGE_KEY,
                                jitter: float = 1e-10,
                                sparse_threshold: int = 1000,
-                               weight_epsilon: float = 1e-8,
+                               weight_epsilon: float = 0.0,
                                weight_normalisation: bool = True,
                                compute_resistance_matrix: bool = False,
                                hutchinson_samples: int = 32,
@@ -788,18 +1007,20 @@ def resistance_distance_matrix(graph: Union[FitnessLandscape, nx.Graph],
     nodes : Sequence, optional
         Optional ordered sequence of nodes to include. Defaults to all
         nodes present in the graph.
-    weight_key : str, optional
-        Edge attribute representing conductance/weight. When ``None``,
-        edges are treated as unweighted.
+    weight_key : str or None, default="auto"
+        Edge attribute representing conductance. ``"auto"`` uses the
+        constructor-declared conductance; ``None`` treats edges as unweighted.
     jitter : float, default=1e-10
-        Diagonal regularisation added when the Laplacian is not full
-        rank to ensure a stable pseudoinverse.
-    weight_epsilon : float, default=1e-8
-        Small positive value added to every edge weight (via an
-        unweighted Laplacian) before factorisation to prevent the sparse
-        solver from encountering zero-weight conductances. This does
-        not modify the underlying graph; it only affects the temporary
-        Laplacian used for resistance calculations.
+        Numerical regularisation used only when factorization fails within a
+        connected component. It is never used to bridge disconnected
+        components, and the result reports whether it was applied.
+    sparse_threshold : int, default=1000
+        Node count above which sparse grounded-Laplacian factorization replaces
+        the dense pseudoinverse path.
+    weight_epsilon : float, default=0.0
+        Optional positive perturbation added only to positive-conductance
+        edges within each electrical component. Zero-conductance edges remain
+        disconnected and are never converted to finite resistance paths.
     weight_normalisation : bool, default=True
         If ``True``, rescales the temporary Laplacian so its largest
         absolute entry is 1.0, improving numerical stability. The final
@@ -846,16 +1067,50 @@ def resistance_distance_matrix(graph: Union[FitnessLandscape, nx.Graph],
     Dict[str, Any]
         Dictionary containing:
             - ``"resistance_mat"`` : full node-by-node resistance matrix
-              (present only when computed).
+              (present only when computed), with ``numpy.inf`` between
+              disconnected electrical components.
+            - ``"components"`` and ``"component_ids"`` : component membership
+              in the sampled node order.
+            - ``"jitter_used"`` and ``"jittered_components"`` : whether
+              numerical regularisation was required within any component.
             - One entry per aggregated layer with ``"categories"`` (index
               to label mapping) and ``"distance_max"``/``"distance_mat"``
               holding the aggregated class-by-class distances.
+
+    Notes
+    -----
+    Cross-component resistance is ``numpy.inf``. Off-diagonal expected-pairwise
+    category distance is therefore infinite whenever positive pair mass spans
+    distinct components; category self-distances remain zero by convention.
+    Optimal transport is finite only when the two category
+    distributions assign equal total mass to every component; in that case,
+    transport is solved independently inside each component. Otherwise its
+    distance is infinite.
     """
     G = graph.graph if isinstance(graph, FitnessLandscape) else graph
     if G is None:
         raise ValueError("Graph is required to compute resistance distances.")
+    if not isinstance(G, nx.Graph) or G.is_directed() or G.is_multigraph():
+        raise TypeError(
+            "Resistance distance requires a simple undirected NetworkX graph."
+        )
+    if not np.isfinite(jitter) or jitter < 0.0:
+        raise ValueError("jitter must be a finite non-negative value.")
+    if not np.isfinite(weight_epsilon) or weight_epsilon < 0.0:
+        raise ValueError("weight_epsilon must be a finite non-negative value.")
+    resolved_weight_key = resolve_edge_attribute(
+        G,
+        "conductance",
+        weight_key,
+        required=False,
+    )
 
     node_order = list(G.nodes()) if nodes is None else list(nodes)
+    if len(set(node_order)) != len(node_order):
+        raise ValueError("nodes must not contain duplicates.")
+    missing_nodes = [node for node in node_order if node not in G]
+    if missing_nodes:
+        raise KeyError(f"Requested nodes are not in the graph: {missing_nodes[:3]!r}.")
     n_total = len(node_order)
     if sample_nodes is not None and sample_nodes < 1:
         raise ValueError("sample_nodes must be a positive integer when provided.")
@@ -871,7 +1126,8 @@ def resistance_distance_matrix(graph: Union[FitnessLandscape, nx.Graph],
             raise ValueError(f"Unknown sample_method '{sample_method}'.")
         if sample_method == "random":
             rng = np.random.default_rng(sample_seed)
-            node_order = rng.choice(node_order, size=target, replace=False).tolist()
+            positions = rng.choice(len(node_order), size=target, replace=False)
+            node_order = [node_order[int(position)] for position in positions]
         else:
             node_order = node_order[:target]
     agg_mode = aggregation_function.lower()
@@ -883,21 +1139,94 @@ def resistance_distance_matrix(graph: Union[FitnessLandscape, nx.Graph],
     require_matrix = agg_mode in {"wasserstein", "ot"} or layers is None
     compute_matrix = compute_resistance_matrix or require_matrix
 
-    R, diag_scaled, norm_factor, solver_data, laplacian_pinv = _compute_resistance_matrix(
+    electrical_graph, component_orders = _resistance_component_node_orders(
+        graph,
         G,
         node_order,
-        weight_key=weight_key,
-        jitter=jitter,
-        sparse_threshold=sparse_threshold,
-        weight_epsilon=weight_epsilon,
-        weight_normalisation=weight_normalisation,
-        compute_full_matrix=compute_matrix,
-        hutchinson_samples=hutchinson_samples,
-        hutchinson_seed=hutchinson_seed,
+        resolved_weight_key,
     )
-    result: Dict[str, Any] = {}
-    result["sampled_nodes"] = list(node_order)
-    if R is not None:
+    internal_matrix_required = compute_matrix or len(component_orders) != 1
+    jittered_components: list[int] = []
+
+    if not component_orders:
+        R = np.zeros((0, 0), dtype=float)
+        diag_scaled = np.zeros(0, dtype=float)
+        norm_factor = 1.0
+        solver_data = None
+        laplacian_pinv = None
+    elif len(component_orders) == 1:
+        (
+            R,
+            diag_scaled,
+            norm_factor,
+            solver_data,
+            laplacian_pinv,
+            jitter_used,
+        ) = _compute_resistance_matrix(
+            electrical_graph,
+            component_orders[0],
+            weight_key=resolved_weight_key,
+            jitter=jitter,
+            sparse_threshold=sparse_threshold,
+            weight_epsilon=weight_epsilon,
+            weight_normalisation=weight_normalisation,
+            compute_full_matrix=internal_matrix_required,
+            hutchinson_samples=hutchinson_samples,
+            hutchinson_seed=hutchinson_seed,
+        )
+        if jitter_used:
+            jittered_components.append(0)
+    else:
+        R = np.full((len(node_order), len(node_order)), np.inf, dtype=float)
+        np.fill_diagonal(R, 0.0)
+        position = {node: index for index, node in enumerate(node_order)}
+        for component_id, component_nodes in enumerate(component_orders):
+            (
+                component_resistance,
+                _,
+                _,
+                _,
+                _,
+                jitter_used,
+            ) = _compute_resistance_matrix(
+                electrical_graph,
+                component_nodes,
+                weight_key=resolved_weight_key,
+                jitter=jitter,
+                sparse_threshold=sparse_threshold,
+                weight_epsilon=weight_epsilon,
+                weight_normalisation=weight_normalisation,
+                compute_full_matrix=True,
+                hutchinson_samples=hutchinson_samples,
+                hutchinson_seed=hutchinson_seed,
+            )
+            indices = [position[node] for node in component_nodes]
+            R[np.ix_(indices, indices)] = component_resistance
+            if jitter_used:
+                jittered_components.append(component_id)
+        diag_scaled = None
+        norm_factor = 1.0
+        solver_data = None
+        laplacian_pinv = None
+
+    component_id_by_node = {
+        node: component_id
+        for component_id, component_nodes in enumerate(component_orders)
+        for node in component_nodes
+    }
+    result: Dict[str, Any] = {
+        "sampled_nodes": list(node_order),
+        "weight_key": resolved_weight_key,
+        "component_count": len(component_orders),
+        "components": [list(nodes) for nodes in component_orders],
+        "component_ids": [component_id_by_node[node] for node in node_order],
+        "cross_component_resistance": np.inf,
+        "jitter": float(jitter),
+        "jitter_used": bool(jittered_components),
+        "jittered_components": jittered_components,
+        "weight_epsilon": float(weight_epsilon),
+    }
+    if R is not None and compute_matrix:
         result["resistance_mat"] = R
 
     if not isinstance(graph, FitnessLandscape):
@@ -1003,7 +1332,7 @@ def category_diffusion_hierarchy(
     annotation_field: str | None = None,
     embedding_dim: int = 10,
     diffusion_matrix: Literal["norm_laplacian", "laplacian"] = "norm_laplacian",
-    weight_key: Optional[str] = "weight",
+    weight_key: Optional[str] = AUTO_EDGE_KEY,
     skip_first: bool = True,
     embedding: Optional[np.ndarray] = None,
     filter_small_embedding: bool = True,
@@ -1028,8 +1357,9 @@ def category_diffusion_hierarchy(
         the first eigenvector when ``skip_first`` is True).
     diffusion_matrix : {"norm_laplacian", "laplacian"}, default="norm_laplacian"
         Graph matrix passed to :func:`eigenmode_decomposition`.
-    weight_key : str, optional
-        Edge weight attribute forwarded to the Laplacian construction.
+    weight_key : str or None, default="auto"
+        Conductance attribute forwarded to the Laplacian construction.
+        ``None`` requests an unweighted operator.
     skip_first : bool, default=True
         Drop the leading eigenvector (often the constant mode) from the
         diffusion embedding.
@@ -1165,5 +1495,10 @@ def category_diffusion_hierarchy(
         "linkage": linkage_matrix,
         "dendrogram_order": dendrogram_order,
         "kept_node_indices": kept_indices,
+        "kept_nodes": [node_order[index] for index in kept_indices],
+        "kept_sequence_indices": [
+            landscape.sequence_index_for_node(node_order[index])
+            for index in kept_indices
+        ],
         "filtered_node_count": len(node_order) - len(kept_indices),
     }

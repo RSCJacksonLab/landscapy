@@ -1,3 +1,5 @@
+"""Store and query per-sequence annotation layers."""
+
 from __future__ import annotations
 
 from typing import Any, Iterable, Mapping, Sequence, Hashable
@@ -12,14 +14,14 @@ class AnnotationLayer:
 
     Parameters
     ----------
-    name :
+    name : str
         Layer identifier.
-    data :
+    data : pandas.DataFrame or mapping of str to sequence
         Annotation records provided either as a pandas DataFrame or as a
         dictionary mapping column names to sequences of values. The number of
         rows must match the number of sequences associated with the landscape
         the layer will be attached to.
-    metadata :
+    metadata : mapping, optional
         Optional free-form metadata associated with the annotation layer.
     """
 
@@ -77,17 +79,41 @@ class AnnotationLayer:
 
     @property
     def columns(self) -> list[str]:
+        """Return annotation column names in stored order."""
         return list(self._frame.columns)
 
     def to_dataframe(self, copy: bool = True) -> pd.DataFrame:
-        """
-        Return the annotation layer as a pandas DataFrame.
+        """Return the annotation layer as a pandas DataFrame.
+
+        Parameters
+        ----------
+        copy : bool, default=True
+            Return a deep copy when true; otherwise return the internal frame.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Tabular annotation records.
         """
         return self._frame.copy(deep=True) if copy else self._frame
 
     def get_record(self, index: int) -> dict[str, Any]:
-        """
-        Retrieve annotation values for a specific sequence index.
+        """Retrieve annotation values for a specific sequence index.
+
+        Parameters
+        ----------
+        index : int
+            Zero-based record position.
+
+        Returns
+        -------
+        dict
+            Mapping from column names to values.
+
+        Raises
+        ------
+        IndexError
+            If ``index`` is outside the layer.
         """
         if index < 0 or index >= len(self):
             raise IndexError(
@@ -96,8 +122,19 @@ class AnnotationLayer:
         return self._frame.iloc[index].to_dict()
 
     def validate_length(self, expected: int, *, context: str = "") -> None:
-        """
-        Ensure the layer length matches an expected number of sequences.
+        """Ensure the layer length matches an expected number of sequences.
+
+        Parameters
+        ----------
+        expected : int
+            Required record count.
+        context : str, optional
+            Diagnostic context appended to a mismatch error.
+
+        Raises
+        ------
+        ValueError
+            If the record count differs from ``expected``.
         """
         if len(self) != expected:
             label = f" for layer '{self.name}'" if self.name else ""
@@ -112,12 +149,29 @@ class AnnotationLayer:
         *,
         copy: bool = True,
     ) -> pd.DataFrame:
-        """
-        Filter annotations by matching column values against a dictionary of criteria.
+        """Filter annotations by matching column values against criteria.
 
         The criteria mapping supports scalar equality and membership checks
         (when the criterion value is an iterable such as list, tuple, set,
         numpy array, or pandas Series).
+
+        Parameters
+        ----------
+        criteria : mapping, optional
+            Column requirements. Scalar requirements use equality; iterable
+            requirements use membership.
+        copy : bool, default=True
+            Return a deep copy of matching records when true.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Matching annotation records.
+
+        Raises
+        ------
+        KeyError
+            If a requested column is absent.
         """
         if not criteria:
             return self.to_dataframe(copy=copy)
@@ -138,8 +192,17 @@ class AnnotationLayer:
         return result.copy(deep=True) if copy else result
 
     def matching_indices(self, criteria: Mapping[str, Any] | None = None) -> list[int]:
-        """
-        Return positional indices of records that satisfy the provided criteria.
+        """Return positions of records that satisfy criteria.
+
+        Parameters
+        ----------
+        criteria : mapping, optional
+            Column requirements accepted by :meth:`query`.
+
+        Returns
+        -------
+        list of int
+            Zero-based positions of matching records.
         """
         filtered = self.query(criteria, copy=False)
         return filtered.index.to_list()
@@ -158,9 +221,18 @@ def register_auto_annotation(
     *,
     metadata: Mapping[str, Any] | None = None,
 ) -> None:
-    """
-    Attach per-node annotation specifications so that Landscape.build
-    can materialise them later as full AnnotationLayer objects.
+    """Register annotations for later landscape construction.
+
+    Parameters
+    ----------
+    graph : networkx.Graph
+        Graph on which to store the annotation specification.
+    layer_name : str
+        Annotation-layer name.
+    records : mapping
+        Mapping from node identifiers to annotation records or values.
+    metadata : mapping, optional
+        Metadata to attach to the materialised layer.
     """
     store = graph.graph.setdefault("_auto_annotations", {})
     formatted = {}

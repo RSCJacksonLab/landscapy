@@ -5,9 +5,11 @@ from fitness_landscape._const import PROT_20
 from fitness_landscape.core.graph import (
     _evolutionary_log_odds_matrix,
     _length_normalized_gapped_soft_score,
-    _row_softmax_csr,
+    _reversible_lazy_transition,
+    _symmetric_affinity_from_scores,
     create_evol_diffusion_graph,
 )
+from fitness_landscape.core.edge_schema import EDGE_SCHEMA_GRAPH_KEY
 from fitness_landscape.core.sequence import BaseNumpySequence
 from fitness_landscape.phylo._sub_matrices import lg
 
@@ -82,7 +84,7 @@ def test_length_normalized_score_is_symmetric_ranked_and_length_invariant():
     assert np.isclose(mutation_score, repeated_score)
 
 
-def test_sparse_row_softmax_does_not_collapse_large_negative_scores():
+def test_sparse_reversible_affinity_does_not_collapse_large_negative_scores():
     rows = np.array([0, 0, 1, 1, 2, 2], dtype=np.int32)
     cols = np.array([1, 2, 0, 2, 0, 1], dtype=np.int32)
     values = np.array(
@@ -91,14 +93,17 @@ def test_sparse_row_softmax_does_not_collapse_large_negative_scores():
     )
     scores = coo_matrix((values, (rows, cols)), shape=(3, 3)).tocsr()
 
-    transition = _row_softmax_csr(scores, tau=1.0)
+    affinity = _symmetric_affinity_from_scores(scores, tau=1.0)
+    transition, stationary, _ = _reversible_lazy_transition(affinity)
     row_sums = np.asarray(transition.sum(axis=1)).ravel()
+    flux = stationary[:, None] * transition.toarray()
 
     assert transition.dtype == np.float64
     assert transition.nnz > 0
     assert np.all(np.isfinite(transition.data))
     assert np.all(transition.data > 0.0)
     assert np.allclose(row_sums, 1.0)
+    assert np.allclose(flux, flux.T)
 
 
 def test_long_protein_construction_retains_edges_after_scoring():
@@ -122,8 +127,11 @@ def test_long_protein_construction_retains_edges_after_scoring():
 
     assert graph.number_of_nodes() == 3
     assert graph.number_of_edges() == 3
+    assert graph.graph[EDGE_SCHEMA_GRAPH_KEY]["conductance"]["key"] == "weight"
     assert all(
-        np.isfinite(data["kernel_weight"]) and data["kernel_weight"] > 0.0
+        np.isfinite(data["kernel_weight"])
+        and data["kernel_weight"] == data["affinity"] == data["weight"]
+        and data["weight"] > 0.0
         for _, _, data in graph.edges(data=True)
     )
 

@@ -47,6 +47,9 @@ try:  # pragma: no cover
 
     __all__ += sorted(_ALIGNER_NAMES)
 except ModuleNotFoundError as exc:  # pragma: no cover
+    if exc.name and not exc.name.startswith("phylo_landscapy"):
+        raise
+    _IMPORT_ERROR = exc
     _ERR = (
         "RJMCMC alignment utilities have moved to 'phylo-landscapy'. "
         "Install phylo-landscapy to access RJMCMCAligner and related helpers."
@@ -54,5 +57,5 @@ except ModuleNotFoundError as exc:  # pragma: no cover
 
     def __getattr__(name):  # type: ignore
         if name in _ALIGNER_NAMES:
-            raise ModuleNotFoundError(_ERR) from exc
+            raise ModuleNotFoundError(_ERR) from _IMPORT_ERROR
         raise AttributeError(name)

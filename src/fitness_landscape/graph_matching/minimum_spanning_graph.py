@@ -1,3 +1,5 @@
+"""Reconstruct latent graph structure from sparse observations."""
+
 import networkx as nx
 import numpy as np
 from scipy import sparse as sp
@@ -383,8 +385,12 @@ def add_steiner_chains(pairs: List[Tuple[int, int]],
 
     Parameters
     ----------
-    pairs, deltas, weights
-        Existing sparse stress system (observed-observed).
+    pairs : list of tuple
+        Observed-node pairs in the sparse stress system.
+    deltas : numpy.ndarray
+        Target distance for each pair.
+    weights : numpy.ndarray
+        Stress weight for each pair.
     gap_pairs : list of tuple
         High-gap pairs (i,j) where geodesic >> Euclidean.
     n_obs : int
@@ -521,10 +527,10 @@ def reconstruct_latent_graph_with_steiner(G_obs: nx.Graph,
         Edge attribute name for weights.
     length_transform : {'neglog','reciprocal'}, default='neglog'
         Similarity→length transform for geodesics.
-    max_iter_smacof : int, default=150
-        Max iterations for sparse SMACOF.
     _keep_steiner_in_graph : bool, default=`True`
         Boolean to keep the steiner points in the latent graph.
+    max_iter_smacof : int, default=150
+        Max iterations for sparse SMACOF.
 
     Returns
     -------
@@ -661,6 +667,8 @@ def heuristic_regular_supergraph_sparse(positions: np.ndarray,
         The list of edge weights observed in the induced graph.
     d_max : int
         The regular degree of the latent graph.
+    k : int, default=20
+        Nearest neighbours considered per node.
     
     Returns
     -------
@@ -721,7 +729,7 @@ def reconstruct_latent_graph_midpoint(G_obs: nx.Graph,
     k_gap : int, default=10,
         The k value for pairwise embedding comparisons. 
     
-    k_edge : int, default=20,
+    k_edges : int, default=20,
         The k value to use for heuristic search pairwise comparisons.
 
     Returns

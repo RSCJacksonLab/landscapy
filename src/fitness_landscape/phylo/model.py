@@ -1,3 +1,5 @@
+"""Define phylogenetic substitution models and rate matrices."""
+
 import numpy as np
 
 def lower_triangle_to_symmetric(tril_values: np.ndarray,
@@ -99,7 +101,7 @@ def build_Q(tril_values: np.ndarray,
     lower triangle (flat) array. 
 
     Parameters
-    -----------
+    ----------
     tril_values : np.ndarray
         The lower triangle values. 
     

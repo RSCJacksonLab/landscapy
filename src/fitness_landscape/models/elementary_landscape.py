@@ -1,3 +1,5 @@
+"""Construct elementary fitness landscapes with controlled interactions."""
+
 from typing import Optional, List, Literal
 import numpy as np
 from ..core.landscape import FitnessLandscape
@@ -26,6 +28,10 @@ def create_elementary_landscape(j: int,
     
     graph_type : str, default=`hamming`
         The graph type to use.
+
+    **kwargs
+        Model and graph settings. ``N`` and ``alphabet`` control generated
+        sequences; ``k`` controls the KNN graph when selected.
 
         
     Returns

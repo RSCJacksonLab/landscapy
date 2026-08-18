@@ -16,7 +16,6 @@ from fitness_landscape.core.fitness import (
 import torch
 import pandas as pd
 from torch_geometric.data import Data
-from fitness_landscape.core.fitness import NumericFitness, CategoricalFitness, ProbabilisticCategoricalFitness
 from pathlib import Path
 from unittest.mock import patch
 from cogent3 import get_moltype
@@ -481,7 +480,7 @@ def test_landscape_getitem(basic_landscape):
     assert isinstance(seq, BaseNumpySequence)
     assert isinstance(fitness, float)
 
-def test_sequence_distance_errors():
+def test_sequence_distance_rejects_mismatched_lengths_and_metrics():
     """Tests error handling in sequence distance calculations."""
     seq1 = BaseNumpySequence([0, 1])
     seq2 = BaseNumpySequence([0, 1, 2])
@@ -521,7 +520,7 @@ def test_landscape_attach_mismatched_length(basic_landscape):
 def test_sequence_creation_and_properties():
     """Covers __init__ branches for moltype and cogent3 sequences."""
     # Test initialization with a cogent3 sequence object
-    c3_seq = get_moltype("text").make_seq("ABC", name="seq1")
+    c3_seq = get_moltype("text").make_seq(seq="ABC", name="seq1")
     seq1 = BaseNumpySequence(c3_seq)
     assert np.array_equal(seq1.to_array(), ['A', 'B', 'C'])
     assert seq1.id == "seq1"
@@ -535,7 +534,7 @@ def test_sequence_creation_and_properties():
     seq3 = BaseNumpySequence(['X', 'Y', 'Z'], moltype="invalid_moltype")
     assert seq3._c3_seq is None
 
-def test_sequence_distance_errors():
+def test_sequence_distance_reports_specific_errors():
     """Covers error handling in the distance method."""
     seq_a = BaseNumpySequence([1, 2])
     seq_b = BaseNumpySequence([1, 2, 3])
@@ -636,11 +635,13 @@ def test_create_phylo_graph_registers_auto_annotations(monkeypatch):
         def __init__(self, *args, **kwargs):
             self.tip_names = ["tip1", "tip2"]
 
-        def construct_dag(self, graph_type: str = "undirected"):
-            assert graph_type == "undirected"
+        def construct_topology(self):
             return fake_graph.copy()
 
-    monkeypatch.setattr("fitness_landscape.core.graph.ASRConstructor", DummyCtor)
+    monkeypatch.setattr(
+        "fitness_landscape.phylo.phylogenetic_asr.ASRConstructor",
+        DummyCtor,
+    )
 
     graph = create_phylo_graph(sequences="dummy_alignment", model_fitting=False, replacement_matrix=["LG"])
     auto = graph.graph.get("_auto_annotations")
@@ -779,15 +780,14 @@ def test_landscape_from_phylogeny_infers_missing_nodes(monkeypatch):
         def __init__(self, alignment, phylogenetic_tree=None, **kwargs):
             DummyCtor.calls.append({'alignment': alignment, 'tree': phylogenetic_tree, 'kwargs': kwargs})
 
-        def construct_dag(self, graph_type: str = 'undirected'):
-            assert graph_type == 'undirected'
+        def construct_topology(self):
             return fake_graph.copy()
 
     def stub_make_aligned_seqs(mapping: dict[str, str], moltype: str | None = None):
         return StubAlignment(mapping)
 
-    monkeypatch.setattr('fitness_landscape.core.landscape.ASRConstructor', DummyCtor)
-    monkeypatch.setattr('fitness_landscape.core.landscape.make_aligned_seqs', stub_make_aligned_seqs)
+    monkeypatch.setattr('fitness_landscape.phylo.phylogenetic_asr.ASRConstructor', DummyCtor)
+    monkeypatch.setattr('cogent3.make_aligned_seqs', stub_make_aligned_seqs)
 
     landscape = FitnessLandscape.from_phylogeny(
         tree=root,
@@ -852,14 +852,14 @@ def test_from_phylogeny_respects_reconstruct_flag(monkeypatch):
         def __init__(self, alignment, phylogenetic_tree=None, **kwargs):
             DummyCtor.flags.append(kwargs.get('reconstruct_ancestral_states'))
 
-        def construct_dag(self, graph_type: str = 'undirected'):
+        def construct_topology(self):
             return fake_graph.copy()
 
     def stub_make_aligned_seqs(mapping: dict[str, str], moltype: str | None = None):
         return StubAlignment(mapping)
 
-    monkeypatch.setattr('fitness_landscape.core.landscape.ASRConstructor', DummyCtor)
-    monkeypatch.setattr('fitness_landscape.core.landscape.make_aligned_seqs', stub_make_aligned_seqs)
+    monkeypatch.setattr('fitness_landscape.phylo.phylogenetic_asr.ASRConstructor', DummyCtor)
+    monkeypatch.setattr('cogent3.make_aligned_seqs', stub_make_aligned_seqs)
 
     FitnessLandscape.from_phylogeny(
         tree=root,
@@ -913,7 +913,9 @@ def test_hamming_graph_binary_hypercube_degree_and_edges():
     # default edge attributes present
     for u, v, d in G.edges(data=True):
         assert d.get('weight') == 1.0
-        assert d.get('distance') == 0.25
+        assert d.get('distance') == 1.0
+        assert d.get('normalized_distance') == 0.25
+        assert d.get('affinity') == 1.0
 
 
 def test_hamming_graph_binary_dispatch_auto_backend():
@@ -1011,7 +1013,8 @@ def test_hamming_graph_multiallele_attributes_alignment():
         assert np.array_equal(G.nodes[i]['sequence'].to_array(), s.to_array())
     for u, v, d in G.edges(data=True):
         assert d.get('weight') == 1.0
-        assert d.get('distance') == 0.5
+        assert d.get('distance') == 1.0
+        assert d.get('normalized_distance') == 0.5
 
 def _toy_binary_seqs_L4():
     # 16 nodes = all 4-bit strings
@@ -1028,7 +1031,8 @@ def test_knn_balltree_degree_union_symmetrize():
         assert G.degree[v] >= k
     for u, v, d in G.edges(data=True):
         assert "distance" in d and "weight" in d
-        assert d["distance"] == d["weight"]
+        assert d["weight"] == pytest.approx(np.exp(-d["normalized_distance"]))
+        assert d["knn_weight"] == d["distance"]
     A = nx.to_numpy_array(G, weight="distance")
     assert np.allclose(A, A.T)
 
@@ -1203,12 +1207,6 @@ def test_hamming_multiallele_all_identical_sequences_yields_no_edges():
     G = create_hamming_graph(sequences=seqs, _backend="masked")
     assert G.number_of_nodes() == 5
     assert G.number_of_edges() == 0
-
-def test_knn_balltree_all_ties_reaches_degree_at_least_L_on_hypercube():
-    seqs = _toy_binary_seqs_L4()  # L = 4
-    G = create_knn_graph(sequences=seqs, k=2, backend="balltree", tie_policy="all")
-    L = len(seqs[0])
-    assert min(dict(G.degree()).values()) >= L  # union with all ties
 
 def test_knn_balltree_all_ties_reaches_degree_at_least_L_on_hypercube():
     seqs = _toy_binary_seqs_L4()  # L = 4
@@ -1595,7 +1593,7 @@ def test_base_from_string_and_iterable_defaults():
 
 def test_base_from_cogent3_preserves_moltype_and_alphabet():
     prot = get_moltype("protein")
-    c3 = prot.make_seq("ACDEFG")
+    c3 = prot.make_seq(seq="ACDEFG")
     s = BaseNumpySequence.from_cogent3(c3)
     assert s.to_str() == "ACDEFG"
     # Alphabet should come from cogent3 moltype

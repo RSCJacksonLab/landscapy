@@ -1,14 +1,13 @@
+"""Define the layered fitness-landscape container and related queries."""
+
 from __future__ import annotations
 
 import pickle
 import numpy as np
 import pandas as pd
 import networkx as nx
-import torch
-from torch_geometric.data import Data
-from torch_geometric.utils import from_networkx
 from networkx.algorithms.minors import equivalence_classes
-from typing import List, Union, Dict, Any, Iterable, Literal, Protocol, runtime_checkable, Hashable, Tuple, Mapping, Callable, Optional, Sequence
+from typing import TYPE_CHECKING, List, Union, Dict, Any, Iterable, Literal, Protocol, runtime_checkable, Hashable, Tuple, Mapping, Callable, Optional, Sequence
 from dataclasses import dataclass
 from .sequence import BaseNumpySequence, SoftSequence, make_sequence
 from .graph import (
@@ -19,7 +18,7 @@ from .graph import (
     _encode_multiallele,
     create_phylo_graph,
     create_evol_diffusion_graph,
-    compute_edge_mutations_star,
+    _annotate_existing_edges_hamming,
 )
 from .fitness import (
     NumericFitness,
@@ -30,22 +29,22 @@ from .fitness import (
     apply_fitness_modifier,
 )
 from .annotation import AnnotationLayer
+from .edge_schema import declare_edge_semantics
 from abc import ABC, abstractmethod
 from ..utils import _compute_embeddings_from_sequences, alignment_to_base_numpy_sequences
+from .._optional import require_optional
 import inspect
 from collections import defaultdict
-from cogent3 import load_aligned_seqs, load_tree
-from cogent3.core.alignment import Alignment, make_aligned_seqs
-try:
-    from cogent3.core.tree import PhyloNode
-except Exception:  # pragma: no cover - optional during typing only environments
-    PhyloNode = None  # type: ignore
 from pathlib import Path
 import warnings
 from .._const import PROT_20, ALPHABET_21
-from ..phylo.phylogenetic_asr import ASRConstructor
 from xml.etree.ElementTree import Element, SubElement, ElementTree
 
+if TYPE_CHECKING:
+    import torch
+    from cogent3.core.alignment import Alignment
+    from cogent3.core.tree import PhyloNode
+    from torch_geometric.data import Data
 
 
 GraphCtor = Callable[..., nx.Graph]
@@ -74,6 +73,25 @@ _GRAPH_REGISTRY: dict[str, _GraphRegistryItem] = {
 
 @dataclass(frozen=True)
 class AnnotationQueryResult:
+    """Store records and graph entities selected by an annotation query.
+
+    Parameters
+    ----------
+    layer : str
+        Queried annotation-layer name.
+    criteria : dict
+        Normalized query criteria.
+    dataframe : pandas.DataFrame
+        Matching annotation records.
+    sequence_indices : list of int
+        Matching sequence positions.
+    node_ids : list of hashable
+        Graph nodes corresponding to matching sequences.
+    edges : list of tuple
+        Edges induced by ``node_ids`` when requested.
+    sequences : list of BaseNumpySequence
+        Matching sequence objects.
+    """
     layer: str
     criteria: dict[str, Any]
     dataframe: pd.DataFrame
@@ -83,6 +101,20 @@ class AnnotationQueryResult:
     sequences: list[BaseNumpySequence]
 
     def to_subgraph(self, graph: nx.Graph, *, copy: bool = True) -> nx.Graph:
+        """Extract the graph induced by the query result.
+
+        Parameters
+        ----------
+        graph : networkx.Graph
+            Source graph containing ``node_ids``.
+        copy : bool, default=True
+            Return an independent graph when true; otherwise return a view.
+
+        Returns
+        -------
+        networkx.Graph
+            Induced subgraph or view.
+        """
         sub = graph.subgraph(self.node_ids)
         return sub.copy() if copy else sub
 
@@ -132,11 +164,18 @@ def _resolve_embeddings_for_graph(sequences: list[BaseNumpySequence],
         with additional keyword arguments for the graph constructor.
     """
     reg = _GRAPH_REGISTRY.get(graph_type)
-    if reg is None or not reg.needs_embeddings:
-        return embeddings, {}
+    knn_uses_embeddings = graph_type == "knn" and embedding_domain == "plm"
+    domain_aware_graphs = {"knn", "diffusion", "evol_diffusion", "diffusion_evol"}
+    domain_kwargs = (
+        {"embedding_domain": embedding_domain}
+        if graph_type in domain_aware_graphs
+        else {}
+    )
+    if reg is None or (not reg.needs_embeddings and not knn_uses_embeddings):
+        return embeddings, domain_kwargs
 
     if embeddings is not None:
-        return embeddings, {"embeddings": embeddings}
+        return embeddings, {"embeddings": embeddings, **domain_kwargs}
 
     use_soft = embedding_domain == "plm" and any(isinstance(seq, SoftSequence) for seq in sequences)
 
@@ -148,11 +187,11 @@ def _resolve_embeddings_for_graph(sequences: list[BaseNumpySequence],
             device=device,
             embedding_mode="soft" if use_soft else "hard",
         )
-        return E, {"embeddings": E}
+        return E, {"embeddings": E, **domain_kwargs}
 
     if embedding_domain == "ohe":
         E, _ = _encode_multiallele(sequences)
-        return E, {"embeddings": E}
+        return E, {"embeddings": E, **domain_kwargs}
 
     raise ValueError(f"embedding_domain must be 'plm' or 'ohe', got {embedding_domain!r}")
 
@@ -250,10 +289,30 @@ def _merge_annotation_layers(
 SeqKey = Union['BaseNumpySequence', str, Tuple]
 
 class FitnessLandscape:
-    """
-    FitnessLandscape is a class that represents a fitness landscape
-    constructed from a networkx graph. It allows for the analysis of
-    fitness layers, sequences, and their relationships.
+    """Represent sequences and measured fitness on an undirected graph.
+
+    Parameters
+    ----------
+    sequences : list of BaseNumpySequence
+        Sequence objects ordered consistently with graph nodes.
+    graph : networkx.Graph
+        Undirected landscape topology.
+    fitness_layers : dict of str to BaseFitnessLayer, optional
+        Per-sequence fitness layers.
+    annotation_layers : dict of str to AnnotationLayer, optional
+        Per-sequence annotation layers.
+    embeddings : mapping of str to ndarray or ndarray, optional
+        Per-sequence embedding arrays. A bare array is stored under the active
+        or ``'default'`` domain.
+    emb_arr_key : str, default='emb_arr'
+        Graph-node attribute used for active embeddings.
+    active_embedding_domain : str, optional
+        Embedding domain used by graph annotations and tensor exports.
+    embedding_metadata : mapping, optional
+        Provenance metadata keyed by embedding domain.
+    _build_sequence_indexes : bool, default=True
+        Build duplicate-safe sequence lookup indexes. Disabling this is only
+        supported when no fitness or annotation layers are attached.
 
     Attributes
     ---------- 
@@ -293,12 +352,14 @@ class FitnessLandscape:
                 "FitnessLandscape requires an undirected networkx graph."
             )
 
-        # Initialize Core Attributes with pre-computed objects
-        self.sequences = sequences
+        # Initialize core attributes with pre-computed objects.  A validated
+        # node-to-sequence-row map is the single source of truth for all
+        # aligned landscape data.
+        self.sequences = list(sequences)
         self.graph = graph
-        self.fitness_layers = fitness_layers if fitness_layers is not None else {}
+        self.fitness_layers = dict(fitness_layers) if fitness_layers is not None else {}
         self.annotation_layers = (
-            annotation_layers if annotation_layers is not None else {}
+            dict(annotation_layers) if annotation_layers is not None else {}
         )
         if embeddings is None:
             self.embeddings: dict[str, np.ndarray] = {}
@@ -306,7 +367,9 @@ class FitnessLandscape:
             key = active_embedding_domain or "default"
             self.embeddings = {key: embeddings}
         else:
-            self.embeddings = {str(domain): np.asarray(arr) for domain, arr in embeddings.items()}
+            self.embeddings = {
+                str(domain): np.asarray(arr) for domain, arr in embeddings.items()
+            }
         if active_embedding_domain is not None and active_embedding_domain not in self.embeddings:
             raise KeyError(
                 f"Active embedding domain {active_embedding_domain!r} not found in provided embeddings."
@@ -321,9 +384,19 @@ class FitnessLandscape:
         }
         self._emb_arr_key = emb_arr_key
 
-        # Finalize Setup and Annotate Graph
-        # Safe canonical node ordering.
-        self._node_order = list(graph.nodes())  
+        # Finalize setup and annotate the graph only after every supplied
+        # object has passed alignment validation.
+        self._node_order = list(graph.nodes())
+        self._index_by_node = self._resolve_node_sequence_mapping()
+        self._nodes_by_index = {
+            index: node for node, index in self._index_by_node.items()
+        }
+        self._validate_data_against_graph(
+            self.sequences,
+            self.fitness_layers,
+            self.annotation_layers,
+            self.embeddings,
+        )
         if not _build_sequence_indexes and (self.fitness_layers or self.annotation_layers):
             raise ValueError(
                 "_build_sequence_indexes=False is only valid without fitness or annotation layers."
@@ -331,7 +404,6 @@ class FitnessLandscape:
         self._seq_to_nodes = (
             self._build_seq_multimap() if _build_sequence_indexes else {}
         )  # duplicate-safe
-        self._nodes_by_index = {i: n for i, n in enumerate(self._node_order)}  # 0..N-1 -> node key
         self._annotate_graph_nodes_with_fitness()
         self._annotate_graph_nodes_with_annotations()
         if self.get_embedding() is not None:
@@ -363,6 +435,164 @@ class FitnessLandscape:
             arr = tuple(data['sequence'].to_array())
             mm.setdefault(arr, []).append(n)
         return mm
+
+    def _resolve_node_sequence_mapping(self) -> dict[Hashable, int]:
+        """Resolve a one-to-one graph-node to sequence-row mapping."""
+        if len(self.sequences) != self.graph.number_of_nodes():
+            raise ValueError(
+                f"Data inconsistency: The number of provided sequences ({len(self.sequences)}) "
+                f"does not match the number of nodes in the graph ({self.graph.number_of_nodes()})."
+            )
+
+        by_identity: dict[int, list[int]] = defaultdict(list)
+        by_signature: dict[tuple[tuple[Any, ...], Any], list[int]] = defaultdict(list)
+        by_key: dict[tuple[Any, ...], list[int]] = defaultdict(list)
+        for index, sequence in enumerate(self.sequences):
+            key = tuple(sequence.to_array())
+            by_identity[id(sequence)].append(index)
+            by_signature[(key, getattr(sequence, "id", None))].append(index)
+            by_key[key].append(index)
+
+        used: set[int] = set()
+        mapping: dict[Hashable, int] = {}
+        for node_position, node in enumerate(self._node_order):
+            node_data = self.graph.nodes[node]
+            if "sequence" not in node_data:
+                raise ValueError(
+                    f"Data inconsistency: graph node {node!r} is missing its 'sequence' attribute."
+                )
+            graph_sequence = node_data["sequence"]
+            if not hasattr(graph_sequence, "to_array"):
+                raise ValueError(
+                    f"Data inconsistency: graph node {node!r} has an invalid 'sequence' attribute."
+                )
+
+            key = tuple(graph_sequence.to_array())
+            signature = (key, getattr(graph_sequence, "id", None))
+            candidates = [
+                index for index in by_identity.get(id(graph_sequence), []) if index not in used
+            ]
+            if not candidates:
+                candidates = [
+                    index for index in by_signature.get(signature, []) if index not in used
+                ]
+            if not candidates:
+                candidates = [index for index in by_key.get(key, []) if index not in used]
+            if not candidates:
+                raise ValueError(
+                    f"Data inconsistency: graph node {node!r} has no matching provided sequence."
+                )
+            if len(candidates) > 1:
+                if node_position in candidates:
+                    selected = node_position
+                else:
+                    raise ValueError(
+                        "Data inconsistency: graph-node sequence correspondence is ambiguous "
+                        f"for node {node!r}; use the provided sequence objects or unique identifiers."
+                    )
+            else:
+                selected = candidates[0]
+            mapping[node] = selected
+            used.add(selected)
+
+        if len(used) != len(self.sequences):
+            raise ValueError(
+                "Data inconsistency: not every provided sequence maps to exactly one graph node."
+            )
+        return mapping
+
+    @property
+    def node_to_sequence_index(self) -> dict[Hashable, int]:
+        """Return the canonical graph-node to sequence-index mapping."""
+        return dict(self._index_by_node)
+
+    @property
+    def sequence_index_to_node(self) -> dict[int, Hashable]:
+        """Return the canonical sequence-index to graph-node mapping."""
+        return dict(self._nodes_by_index)
+
+    def sequence_index_for_node(self, node: Hashable) -> int:
+        """Return the canonical sequence row for a graph node.
+
+        Parameters
+        ----------
+        node : hashable
+            Graph-node label.
+
+        Returns
+        -------
+        int
+            Position in :attr:`sequences` and every aligned data layer.
+
+        Raises
+        ------
+        KeyError
+            If the node is not part of this landscape.
+        """
+        try:
+            return self._index_by_node[node]
+        except KeyError as error:
+            raise KeyError(f"Graph node {node!r} is not part of this landscape.") from error
+
+    def node_for_sequence_index(self, sequence_index: int) -> Hashable:
+        """Return the graph node aligned with a sequence row.
+
+        Parameters
+        ----------
+        sequence_index : int
+            Zero-based position in :attr:`sequences`.
+
+        Returns
+        -------
+        hashable
+            Graph-node label.
+
+        Raises
+        ------
+        IndexError
+            If the sequence index is outside the landscape.
+        """
+        try:
+            return self._nodes_by_index[sequence_index]
+        except KeyError as error:
+            raise IndexError(
+                f"Sequence index {sequence_index} is outside [0, {len(self.sequences)})."
+            ) from error
+
+    def sequence_for_node(self, node: Hashable) -> BaseNumpySequence:
+        """Return the sequence row aligned with a graph node.
+
+        Parameters
+        ----------
+        node : hashable
+            Graph-node label.
+
+        Returns
+        -------
+        BaseNumpySequence
+            Sequence aligned with ``node``.
+        """
+        return self.sequences[self.sequence_index_for_node(node)]
+
+    def get_node_signal(self, nodes: Sequence[Hashable] | None = None) -> np.ndarray:
+        """Return active fitness values in an explicit graph-node order.
+
+        Parameters
+        ----------
+        nodes : sequence of hashable, optional
+            Requested graph-node order. Defaults to NetworkX iteration order.
+
+        Returns
+        -------
+        ndarray
+            Scalar fitness values aligned with ``nodes``.
+        """
+        node_order = list(self.graph.nodes()) if nodes is None else list(nodes)
+        signal = self.get_signal()
+        return np.asarray(
+            [signal[self.sequence_index_for_node(node)] for node in node_order],
+            dtype=float,
+        )
     
     def _build_sequence_index(self) -> Dict[Tuple, int]:
         """
@@ -423,8 +653,17 @@ class FitnessLandscape:
         return self._active_embedding_domain
     
     def set_active_embedding_domain(self, domain: str) -> None:
-        """
-        Set the active embedding domain used for downstream exports.
+        """Set the active embedding domain used for downstream exports.
+
+        Parameters
+        ----------
+        domain : str
+            Key in :attr:`embeddings` to activate.
+
+        Raises
+        ------
+        KeyError
+            If the domain is unavailable.
         """
         self._ensure_embedding_state()
         if domain not in self.embeddings:
@@ -438,8 +677,17 @@ class FitnessLandscape:
         return self._embedding_metadata
     
     def get_embedding_metadata(self, domain: str | None = None) -> dict[str, Any] | None:
-        """
-        Retrieve embedding provenance for a given domain (or the active domain).
+        """Retrieve embedding provenance for a domain.
+
+        Parameters
+        ----------
+        domain : str, optional
+            Domain key. If omitted, use the active domain.
+
+        Returns
+        -------
+        dict or None
+            Copy-free provenance mapping, or ``None`` when unavailable.
         """
         self._ensure_embedding_state()
         key = domain if domain is not None else self._active_embedding_domain
@@ -458,8 +706,17 @@ class FitnessLandscape:
         return meta.get("model_name")
     
     def get_embedding(self, domain: str | None = None) -> np.ndarray | None:
-        """
-        Retrieve the embedding array for the requested domain.
+        """Retrieve the embedding array for a domain.
+
+        Parameters
+        ----------
+        domain : str, optional
+            Domain key. If omitted, use or establish the active domain.
+
+        Returns
+        -------
+        ndarray or None
+            Per-sequence embedding matrix, or ``None`` when unavailable.
         """
         self._ensure_embedding_state()
         if not self.embeddings:
@@ -489,29 +746,22 @@ class FitnessLandscape:
         """
         Helper function to add all fitness layer data to graph nodes.
         """
-        if not self.graph or not self.fitness_layers:
+        if self.graph is None or not self.fitness_layers:
             return
             
         for name, layer in self.fitness_layers.items():
             # Raise error if sequences are missing labels
             layer._validate_length(len(self.sequences), name=f"during annotation ({name})")
 
-        for i, seq in enumerate(self.sequences):
-            key = tuple(seq.to_array())
-            nodes = self._seq_to_nodes.get(key, [])
-            if not nodes:
-                # Skip quietly, or raise error?
-                continue
-            
-            for node in nodes:
-                for name, layer in self.fitness_layers.items():
-                    self.graph.nodes[node][f"fitness_{name}"] = layer.get_value(i)
+        for index, node in self._nodes_by_index.items():
+            for name, layer in self.fitness_layers.items():
+                self.graph.nodes[node][f"fitness_{name}"] = layer.get_value(index)
 
     def _annotate_graph_nodes_with_annotations(self) -> None:
         """
         Helper function to add annotation layer data to graph nodes.
         """
-        if not self.graph or not self.annotation_layers:
+        if self.graph is None or not self.annotation_layers:
             return
 
         for name, layer in self.annotation_layers.items():
@@ -522,18 +772,13 @@ class FitnessLandscape:
         """
         Attach a single annotation layer to graph nodes.
         """
-        if not self.graph:
+        if self.graph is None:
             return
 
-        for idx, seq in enumerate(self.sequences):
-            key = tuple(seq.to_array())
-            nodes = self._seq_to_nodes.get(key, [])
-            if not nodes:
-                continue
+        for idx, node in self._nodes_by_index.items():
             record = layer.get_record(idx)
-            for node in nodes:
-                annotations = self.graph.nodes[node].setdefault("annotations", {})
-                annotations[layer.name] = dict(record)
+            annotations = self.graph.nodes[node].setdefault("annotations", {})
+            annotations[layer.name] = dict(record)
 
     def _prepare_annotation_frame(
         self,
@@ -740,14 +985,18 @@ class FitnessLandscape:
             return
         if emb_array.shape[0] != len(self._node_order):
             raise ValueError("Embeddings rows != number of graph nodes; cannot annotate safely.")
-        attrs = {node: {self._emb_arr_key: emb_array[i]}
-                for i, node in enumerate(self._node_order)}
+        attrs = {
+            node: {self._emb_arr_key: emb_array[index]}
+            for node, index in self._index_by_node.items()
+        }
         nx.set_node_attributes(self.graph, attrs)
 
     # Validation method.
     def _validate_data_against_graph(self,
                                      sequences: List[BaseNumpySequence],
-                                     fitness_layers: Dict[str, BaseFitnessLayer]):
+                                     fitness_layers: Dict[str, BaseFitnessLayer],
+                                     annotation_layers: Dict[str, AnnotationLayer] | None = None,
+                                     embeddings: Mapping[str, np.ndarray] | None = None):
         """
         Method to validate the provided sequences and fitness layers
         against the current graph structure. This ensures that the
@@ -761,6 +1010,10 @@ class FitnessLandscape:
         fitness_layers : Dict[str, BaseFitnessLayer]
             Dictionary of fitness layers to validate against the
             graph.
+        annotation_layers : dict[str, AnnotationLayer], optional
+            Annotation layers that must use the same row order.
+        embeddings : mapping[str, ndarray], optional
+            Embedding domains that must use the same row order.
 
         Raises
         ------
@@ -770,55 +1023,23 @@ class FitnessLandscape:
             of the graph nodes.
         
         """
-        if len(sequences) != self.graph.number_of_nodes():
-            raise ValueError(
-                f"Data inconsistency: The number of provided sequences ({len(sequences)}) "
-                f"does not match the number of nodes in the graph ({self.graph.number_of_nodes()})."
+        for name, layer in fitness_layers.items():
+            layer._validate_length(
+                len(sequences), name=f"during landscape construction ({name})"
             )
 
-        graph_sequences = {
-            node: tuple(data['sequence'].to_array())
-            for node, data in self.graph.nodes(data=True)
-        }
-        provided_sequences = {i: tuple(s.to_array()) for i, s in enumerate(sequences)}
-
-        if len(graph_sequences) != len(provided_sequences) or \
-           set(graph_sequences.values()) != set(provided_sequences.values()):
-            raise ValueError(
-                "Data inconsistency: The set of provided sequences does not match "
-                "the set of sequences stored in the graph nodes."
+        for name, layer in (annotation_layers or {}).items():
+            layer.validate_length(
+                len(sequences), context=f"during landscape construction ({name})"
             )
 
-        seq_to_node_map = {data['sequence']: node 
-                           for node, data in self.graph.nodes(data=True)}
-
-        for i, seq in enumerate(sequences):
-            node_idx = seq_to_node_map.get(tuple(seq.to_array()))
-            if node_idx is None:
-
-                continue
-
-            graph_node_data = self.graph.nodes[node_idx]
-
-            for layer_name, layer in fitness_layers.items():
-                attribute_name = f"fitness_{layer_name}"
-                
-                if attribute_name not in graph_node_data:
-                    raise ValueError(
-                        f"Data inconsistency: Fitness layer '{layer_name}' exists in the "
-                        f"provided dictionary but no corresponding '{attribute_name}' "
-                        f"attribute was found on node {node_idx} in the graph."
-                    )
-                
-                layer_value = layer.get_value(i)
-                graph_value = graph_node_data[attribute_name]
-                
-                if layer_value != graph_value:
-                    raise ValueError(
-                        f"Data inconsistency for layer '{layer_name}' at sequence index {i} "
-                        f"(node {node_idx}): The provided layer value ({layer_value}) does not "
-                        f"match the graph attribute value ({graph_value})."
-                    )
+        for domain, embedding in (embeddings or {}).items():
+            array = np.asarray(embedding)
+            if array.ndim == 0 or array.shape[0] != len(sequences):
+                rows = 0 if array.ndim == 0 else array.shape[0]
+                raise ValueError(
+                    f"Embedding domain {domain!r} has {rows} rows; expected {len(sequences)}."
+                )
 
     @property
     def active_layer(self) -> BaseFitnessLayer:
@@ -855,17 +1076,42 @@ class FitnessLandscape:
     
     def add(self,
             **kwargs):
-        """
-        Convenience function to expedite fitness layer construction via
-        the `attach` method.
+        """Construct and attach a fitness layer.
+
+        Parameters
+        ----------
+        **kwargs
+            Raw-layer arguments accepted by :meth:`attach`. Passing a ready
+            ``layer`` is rejected; use :meth:`attach` directly instead.
+
+        Returns
+        -------
+        None
+            The layer is attached in place.
         """
         if 'layer' in kwargs and kwargs['layer'] is not None:
             raise ValueError("`.add` builds from values; use `.attach(layer=...)` to attach a ready layer.")
         return self.attach(**kwargs)
 
     def safe_layer_name(self, name: str, *, ensure_unique: bool = True) -> str:
-        """
-        Return a layer name that will not collide with existing fitness layers.
+        """Return a non-colliding fitness-layer name.
+
+        Parameters
+        ----------
+        name : str
+            Preferred layer name.
+        ensure_unique : bool, default=True
+            Append a numeric suffix when the name already exists.
+
+        Returns
+        -------
+        str
+            Original or suffixed layer name.
+
+        Raises
+        ------
+        ValueError
+            If ``name`` is empty.
         """
         if not name:
             raise ValueError("Layer name must be non-empty.")
@@ -928,12 +1174,18 @@ class FitnessLandscape:
         on_duplicates : Literal['error', 'first', 'all', 'aggregate'], default='error'
             How to handle duplicate sequences when mapping values.
             - 'error': Raise an error if duplicates are found.
-            - 'first': Use the first value for duplicates.
+            - 'first': Assign the value only to the first matching row.
             - 'all': Use the value for all duplicates.
-            - 'aggregate': Merge values for duplicates (only for numeric).
+            - 'aggregate': Assign one numeric replicate sample to every
+              duplicate without multiplying the observations.
         
         allow_missing : bool, default=False
             If `True`, allows sequences to not have a value assigned.
+
+        Returns
+        -------
+        None
+            The landscape is modified in place.
         """
 
         if layer is not None:
@@ -948,14 +1200,9 @@ class FitnessLandscape:
             if layer_name in self.fitness_layers:
                 raise ValueError(f"A layer with the name '{layer_name}' already exists.")
             self.fitness_layers[layer_name] = layer
-            # annotate graph
-            if self.graph:
-                seq_to_node_map = {tuple(data['sequence'].to_array()): node_idx
-                                for node_idx, data in self.graph.nodes(data=True)}
-                for i, seq in enumerate(self.sequences):
-                    node_idx = seq_to_node_map.get(tuple(seq.to_array()))
-                    if node_idx is not None:
-                        self.graph.nodes[node_idx][f"fitness_{layer_name}"] = layer.get_value(i)
+            if self.graph is not None:
+                for index, node in self._nodes_by_index.items():
+                    self.graph.nodes[node][f"fitness_{layer_name}"] = layer.get_value(index)
             if self._active_view_name is None:
                 self._active_view_name = layer_name
             return
@@ -996,7 +1243,17 @@ class FitnessLandscape:
 
             items = list(values)
 
-        key_to_val = {self._normalize_seq_key(k): v for k, v in items}
+        if on_duplicates not in {"error", "first", "all", "aggregate"}:
+            raise ValueError(f"Unknown `on_duplicates` option: {on_duplicates}")
+        if dtype == "categorical" and on_duplicates == "aggregate":
+            raise ValueError("on_duplicates='aggregate' is not supported for categorical data.")
+
+        key_to_val: dict[tuple, Any] = {}
+        for raw_key, value in items:
+            key = self._normalize_seq_key(raw_key)
+            if key in key_to_val:
+                raise ValueError(f"Multiple input values were provided for sequence {key}.")
+            key_to_val[key] = value
 
         # Create a per-index container
         if dtype == 'numeric':
@@ -1017,26 +1274,17 @@ class FitnessLandscape:
             
             if on_duplicates == 'error' and len(idx_list) > 1:
                 raise ValueError("Duplicate sequences found; set `on_duplicates` to `first`, `all`, or `aggregate`.")
-            
-            # Collect only first
-            if on_duplicates == 'first':
+
+            if on_duplicates == 'error':
                 idx_values[idx_list[0]] = list(reps)
-            
-            # Collect all
+            elif on_duplicates == 'first':
+                idx_values[idx_list[0]] = list(reps)
             elif on_duplicates == 'all':
                 for i in idx_list:
                     idx_values[i] = list(reps)
-            
-            # merge replicate lists across all matches
             elif on_duplicates == 'aggregate':
-            
-                merged = []
                 for i in idx_list:
-                    merged.extend(reps)
-                for i in idx_list:
-                    idx_values[i] = list(merged)
-            else:
-                raise ValueError(f"Unknown `on_duplicates` option: {on_duplicates}")
+                    idx_values[i] = list(reps)
 
         # Private helper.
         def _apply_categorical(idx_list: list[int],
@@ -1044,30 +1292,22 @@ class FitnessLandscape:
             
             if on_duplicates == 'error' and len(idx_list) > 1:
                 raise ValueError("Duplicate sequences found; set on_duplicates to 'first' or 'all'.")
-            
-            if on_duplicates == 'first':
+
+            if on_duplicates == 'error':
                 idx_values[idx_list[0]] = v
-            
+            elif on_duplicates == 'first':
+                idx_values[idx_list[0]] = v
             elif on_duplicates == 'all':
                 for i in idx_list:
                     idx_values[i] = v
-            
-            elif on_duplicates == 'aggregate':
-                raise ValueError("on_duplicates='aggregate' is not supported for categorical.")
-            
-            else:
-                raise ValueError(f"Unknown on_duplicates: {on_duplicates}")
 
         # Fill index containers
-        seen = set()
         for key, v in key_to_val.items():
             idxs = idx_map.get(key, [])
             if not idxs:
                 if allow_missing:
                     continue
                 raise KeyError(f"Sequence {key} not found in landscape.")
-            
-            seen.add(key)
             
             if dtype == 'numeric':
                 _apply_numeric(idxs, v)
@@ -1118,22 +1358,27 @@ class FitnessLandscape:
 
         Parameters
         ----------
-        modifier :
+        modifier : BaseFitnessModifier or callable
             A callable or BaseFitnessModifier that returns a new
             BaseFitnessLayer when applied to an input layer.
-        source_layer :
+        source_layer : str or BaseFitnessLayer, optional
             Name or instance of the source fitness layer. Defaults to
             the active view if not provided.
-        output_name :
+        output_name : str, optional
             Optional name for the new layer. When omitted, the modifier
             decides the name. If ``ensure_unique_name`` is True, a
             non-colliding name is generated.
-        attach :
+        attach : bool, default=True
             When True (default), the resulting layer is attached to the
             landscape and returned.
-        ensure_unique_name :
+        ensure_unique_name : bool, default=True
             If True, generated names are made unique with
             ``safe_layer_name`` when a collision is detected.
+
+        Returns
+        -------
+        BaseFitnessLayer
+            Transformed layer, attached when ``attach`` is true.
         """
         if source_layer is None:
             if self._active_view_name is None:
@@ -1163,6 +1408,8 @@ class FitnessLandscape:
         """
         Detaches a fitness layer from the landscape.
 
+        Parameters
+        ----------
         layer_name : str
             The layer key to remove.
         """
@@ -1173,12 +1420,9 @@ class FitnessLandscape:
         del self.fitness_layers[layer_name]
 
         # If a graph exists, remove the corresponding node attributes
-        if self.graph:
+        if self.graph is not None:
             attribute_name = f"fitness_{layer_name}"
-
-        for i, seq in enumerate(self.sequences):
-            key = tuple(seq.to_array())
-            for node in self._seq_to_nodes.get(key, []):
+            for node in self._node_order:
                 self.graph.nodes[node].pop(attribute_name, None)
 
         # If the detached layer was the active one, update the active view
@@ -1207,24 +1451,29 @@ class FitnessLandscape:
 
         Parameters
         ----------
-        layer :
+        layer : AnnotationLayer, optional
             Ready-made annotation layer. If provided, other keyword arguments
             must be omitted.
-        name :
+        name : str, optional
             Name for the new annotation layer when constructing from raw data.
-        data :
+        data : pandas.DataFrame, mapping, or sequence, optional
             Columnar annotation data aligned to the sequence order.
-        metadata :
+        metadata : mapping, optional
             Optional metadata to store on the layer when constructing inline.
-        map_by :
+        map_by : {'index', 'sequence', 'name'}, default='index'
             Strategy for aligning the provided data to existing sequences.
             - `"index"`: data is ordered by sequence index or keyed by index.
             - `"sequence"`: keys refer to sequence objects, tuples, lists, or
               strings that can be normalized to the landscape sequences.
             - `"name"`: keys refer to sequence identifiers (``sequence.id``).
-        allow_missing :
+        allow_missing : bool, default=False
             Allow sequences to be missing annotations when constructing from a
             mapping. Missing records are filled with ``None``.
+
+        Returns
+        -------
+        AnnotationLayer
+            Attached annotation layer.
         """
         if layer is not None:
             if any(x is not None for x in (name, data, metadata)):
@@ -1248,11 +1497,40 @@ class FitnessLandscape:
         return layer
 
     def get_annotation_layer(self, name: str) -> AnnotationLayer:
+        """Return an annotation layer by name.
+
+        Parameters
+        ----------
+        name : str
+            Layer name.
+
+        Returns
+        -------
+        AnnotationLayer
+            Requested layer.
+
+        Raises
+        ------
+        KeyError
+            If the layer is absent.
+        """
         if name not in self.annotation_layers:
             raise KeyError(f"Annotation layer '{name}' not found.")
         return self.annotation_layers[name]
 
     def detach_annotation(self, name: str) -> None:
+        """Remove an annotation layer and its graph-node attributes.
+
+        Parameters
+        ----------
+        name : str
+            Layer name.
+
+        Raises
+        ------
+        KeyError
+            If the layer is absent.
+        """
         if name not in self.annotation_layers:
             raise KeyError(f"Annotation layer '{name}' not found.")
 
@@ -1384,6 +1662,22 @@ class FitnessLandscape:
         *,
         include_edges: bool = True,
     ) -> AnnotationQueryResult:
+        """Query one annotation layer and map matches to graph entities.
+
+        Parameters
+        ----------
+        layer_name : str
+            Annotation-layer name.
+        criteria : mapping, optional
+            Column requirements accepted by :meth:`AnnotationLayer.query`.
+        include_edges : bool, default=True
+            Include edges induced by matching nodes.
+
+        Returns
+        -------
+        AnnotationQueryResult
+            Matching records, sequences, nodes, and optional edges.
+        """
         layer = self.get_annotation_layer(layer_name)
 
         seq_indices = layer.matching_indices(criteria)
@@ -1395,11 +1689,10 @@ class FitnessLandscape:
         seen_nodes: set[Hashable] = set()
         node_ids: list[Hashable] = []
         for idx in seq_indices:
-            key = tuple(self.sequences[idx].to_array())
-            for node in self._seq_to_nodes.get(key, []):
-                if node not in seen_nodes:
-                    seen_nodes.add(node)
-                    node_ids.append(node)
+            node = self._nodes_by_index[idx]
+            if node not in seen_nodes:
+                seen_nodes.add(node)
+                node_ids.append(node)
 
         edges: list[tuple[Hashable, Hashable]] = []
         if include_edges and self.graph is not None and node_ids:
@@ -1418,6 +1711,7 @@ class FitnessLandscape:
 
     @property
     def active_layer_name(self) -> str | None:
+        """Return the active fitness-layer name, if one is set."""
         return getattr(self, "_active_view_name", None)
 
     def get_layer(self,
@@ -1472,19 +1766,15 @@ class FitnessLandscape:
         if self.graph is None:
             return [self]
 
-        if isinstance(self.graph, nx.DiGraph):
-            components_iter = nx.weakly_connected_components(self.graph)
-        else:
-            components_iter = nx.connected_components(self.graph)
+        components_iter = nx.connected_components(self.graph)
 
         components = sorted((set(comp) for comp in components_iter), key=len, reverse=True)
-        node_index_map = {node: idx for idx, node in enumerate(self._node_order)}
         self._ensure_embedding_state()
         out: list[FitnessLandscape] = []
 
         for comp_nodes in components:
             ordered_nodes = [node for node in self._node_order if node in comp_nodes]
-            comp_indices = [node_index_map[node] for node in ordered_nodes]
+            comp_indices = [self._index_by_node[node] for node in ordered_nodes]
             comp_sequences = [self.sequences[i] for i in comp_indices]
             comp_graph = self.graph.subgraph(ordered_nodes).copy()
             comp_fitness = self._subset_fitness_layers(comp_indices)
@@ -1537,7 +1827,7 @@ class FitnessLandscape:
 
         Parameters
         ----------
-        partition :
+        partition : AnnotationLayer, str, mapping, sequence, or None
             Partition specification. When ``None``, an annotation layer must
             be supplied (by name or instance) via ``partition``. Accepted
             forms include:
@@ -1717,9 +2007,7 @@ class FitnessLandscape:
                     hash(lbl)
                 except Exception:
                     lbl = str(lbl)
-                key = tuple(self.sequences[idx].to_array())
-                for node in self._seq_to_nodes.get(key, []):
-                    label_map[node] = lbl
+                label_map[self._nodes_by_index[idx]] = lbl
             return label_map
 
         def _normalize_partition(part_obj: Any) -> list[set]:
@@ -1790,9 +2078,8 @@ class FitnessLandscape:
         partition_sets = _normalize_partition(part_source)
 
         block_indices: list[list[int]] = []
-        node_to_idx = {node: idx for idx, node in enumerate(self._node_order)}
         for block in partition_sets:
-            indices = [node_to_idx[n] for n in block if n in node_to_idx]
+            indices = [self._index_by_node[n] for n in block if n in self._index_by_node]
             block_indices.append(indices)
 
         edge_keys: set[str] = set(edge_attributes) if edge_attributes else set()
@@ -1804,16 +2091,11 @@ class FitnessLandscape:
             if not aggregate_edge_attributes or not edge_keys:
                 return {}
             values: dict[str, list[Any]] = {k: [] for k in edge_keys}
-            if self.graph.is_directed():
-                edges_iter = (
-                    (u, v, d) for u, v, d in self.graph.edges(data=True) if u in block_a and v in block_b
-                )
-            else:
-                edges_iter = (
-                    (u, v, d)
-                    for u, v, d in self.graph.edges(data=True)
-                    if (u in block_a and v in block_b) or (u in block_b and v in block_a)
-                )
+            edges_iter = (
+                (u, v, d)
+                for u, v, d in self.graph.edges(data=True)
+                if (u in block_a and v in block_b) or (u in block_b and v in block_a)
+            )
             found = False
             for _, _, data in edges_iter:
                 found = True
@@ -2030,6 +2312,11 @@ class FitnessLandscape:
             Whether to attach scalar values for each fitness layer.
         include_annotations : bool, default=True
             Whether to attach annotation columns.
+
+        Returns
+        -------
+        pathlib.Path
+            Path of the written XGMML document.
         """
         if self.graph is None:
             raise ValueError("Landscape has no graph; cannot export XGMML.")
@@ -2037,12 +2324,11 @@ class FitnessLandscape:
         filepath = Path(filepath)
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-        directed = isinstance(self.graph, nx.DiGraph)
         root = Element(
             "graph",
             attrib={
                 "label": getattr(self, "name", "FitnessLandscape"),
-                "directed": "1" if directed else "0",
+                "directed": "0",
                 "xmlns": "http://www.cs.rpi.edu/XGMML",
             },
         )
@@ -2148,9 +2434,19 @@ class FitnessLandscape:
             - token_ids (optional): LongTensor [N, Lmax] of token ids when tokenizer provided.
             - attention_mask (optional): LongTensor [N, Lmax] mask (1=real token, 0=pad).
         """
+        torch = require_optional(
+            "torch",
+            extra="ml",
+            purpose="PyTorch Geometric landscape export",
+        )
+        pyg_utils = require_optional(
+            "torch_geometric.utils",
+            extra="ml",
+            purpose="PyTorch Geometric landscape export",
+        )
         if not self.graph:
             raise ValueError("Graph not constructed.")
-        pyg_data = from_networkx(self.graph)
+        pyg_data = pyg_utils.from_networkx(self.graph)
         emb_array = self.get_embedding()
         if emb_array is not None:
             pyg_data.x = torch.tensor(emb_array, dtype=torch.float32)
@@ -2163,19 +2459,15 @@ class FitnessLandscape:
 
         # Optional: add tokenized sequences with padding
         if tokenizer is not None:
-            tok = None
-            try:
-                if isinstance(tokenizer, str):
-                    try:
-                        from transformers import AutoTokenizer  # lazy import
-                    except Exception:
-                        tok = None
-                    else:
-                        tok = AutoTokenizer.from_pretrained(tokenizer)
-                else:
-                    tok = tokenizer
-            except Exception:
-                tok = None
+            if isinstance(tokenizer, str):
+                transformers = require_optional(
+                    "transformers",
+                    extra="ml",
+                    purpose="tokenized landscape export",
+                )
+                tok = transformers.AutoTokenizer.from_pretrained(tokenizer)
+            else:
+                tok = tokenizer
 
             if tok is not None:
                 seq_texts: list[str] = []
@@ -2259,6 +2551,11 @@ class FitnessLandscape:
             - 'attention_mask': only when tokenized.
             - 'embedding': optional extra view when `include_embeddings=True`.
         """
+        torch = require_optional(
+            "torch",
+            extra="ml",
+            purpose="sequence tensor export",
+        )
         target_indices: list[int] = []
         if sequence_idx is not None:
             target_indices = [sequence_idx] if isinstance(sequence_idx, int) else list(sequence_idx)
@@ -2307,19 +2604,15 @@ class FitnessLandscape:
 
         # Tokenization path (padded)
         if mode == "tokens":
-            tok = None
-            try:
-                if isinstance(tokenizer, str):
-                    try:
-                        from transformers import AutoTokenizer  # defer import
-                    except Exception:
-                        tok = None
-                    else:
-                        tok = AutoTokenizer.from_pretrained(tokenizer)
-                else:
-                    tok = tokenizer
-            except Exception:
-                tok = None
+            if isinstance(tokenizer, str):
+                transformers = require_optional(
+                    "transformers",
+                    extra="ml",
+                    purpose="tokenized sequence export",
+                )
+                tok = transformers.AutoTokenizer.from_pretrained(tokenizer)
+            else:
+                tok = tokenizer
 
             if tok is None:
                 # Fallback to OHE/emb when tokenization failed
@@ -2446,6 +2739,11 @@ class FitnessLandscape:
             embedding_mode=mode,
         )
         self.embeddings[domain] = embeddings
+        torch = require_optional(
+            "torch",
+            extra="ml",
+            purpose="protein language-model embeddings",
+        )
         self._embedding_metadata[domain] = {
             "model_name": model_name,
             "embedding_mode": mode,
@@ -2464,6 +2762,11 @@ class FitnessLandscape:
     def get_fitness(self, sequence: BaseNumpySequence) -> float:
         """
         [Legacy] Method to retrieve the fitness of a sequence.
+
+        Parameters
+        ----------
+        sequence : BaseNumpySequence
+            Sequence whose value is read from the active fitness layer.
 
         Returns
         -------
@@ -2492,9 +2795,26 @@ class FitnessLandscape:
     @classmethod
     def from_graph(cls,
                    graph: nx.Graph, **kwargs) -> 'FitnessLandscape':
-        """
-        Factory method to create a FitnessLandscape from an existing,
-        annotated networkx graph.
+        """Create a landscape from an annotated NetworkX graph.
+
+        Parameters
+        ----------
+        graph : networkx.Graph
+            Undirected graph whose nodes carry ``sequence`` and optional
+            ``fitness_<name>`` attributes.
+        **kwargs
+            Additional :class:`FitnessLandscape` constructor arguments.
+
+        Returns
+        -------
+        FitnessLandscape
+            Landscape with fitness layers reconstructed from node attributes.
+
+        Raises
+        ------
+        ValueError
+            If a graph node lacks a sequence or reconstructed layer lengths do
+            not match the node count.
         """
 
         node_list = list(graph.nodes())
@@ -2599,7 +2919,7 @@ class FitnessLandscape:
         device : str or None, default=`None`
             Device to use for PLM embedding computation (e.g., "cpu" or "cuda").
         
-        graph_kwargs : dict
+        **graph_kwargs
             Additional keyword arguments to pass to the graph constructor.
         
         Returns
@@ -2701,7 +3021,7 @@ class FitnessLandscape:
         _compute_phylo_embeddings : bool, default=`False`
             Whether to compute embeddings for phylogenetic sequences.
         
-        phylo_kwargs : dict
+        **phylo_kwargs
             Additional keyword arguments to pass to the phylogenetic graph constructor.
         
         Returns
@@ -2710,7 +3030,12 @@ class FitnessLandscape:
             The constructed fitness landscape object.
         """
 
-        aln = load_aligned_seqs(alignment) if isinstance(alignment, Path) else alignment
+        cogent3 = require_optional(
+            "cogent3",
+            extra="phylogeny",
+            purpose="phylogenetic landscape construction",
+        )
+        aln = cogent3.load_aligned_seqs(alignment) if isinstance(alignment, Path) else alignment
         G = create_phylo_graph(aln, **phylo_kwargs)
         seqs = [data["sequence"] for _, data in G.nodes(data=True)]
 
@@ -2766,11 +3091,17 @@ class FitnessLandscape:
         fasta : str | Path | Alignment
             FASTA alignment (path or Alignment object). If ancestral sequences
             are missing, they will be inferred using the supplied tree.
+        fitness_layers : dict[str, BaseFitnessLayer], optional
+            Fitness layers aligned with the resulting graph-node order.
+        annotation_layers : dict[str, AnnotationLayer], optional
+            Annotation layers aligned with the resulting graph-node order.
         strip_gap_columns : bool, default=True
             If True, remove alignment columns that contain a gap in any sequence
             before constructing the hard sequences (ensures PROT_20 alphabet).
             When False, the stored sequences retain gaps using the 21-character
             alphabet that includes ``"gap"``.
+        emb_arr_key : str, default='emb_arr'
+            Graph-node key reserved for attached embeddings.
         moltype : str, default="protein"
             Moltype hint passed to cogent3 sequence constructors.
         _compute_hamming_edges : bool, default=True
@@ -2805,32 +3136,51 @@ class FitnessLandscape:
             sequences are taken directly from the FASTA records.
         """
 
+        cogent3 = require_optional(
+            "cogent3",
+            extra="phylogeny",
+            purpose="phylogenetic landscape construction",
+        )
+        cogent_tree = require_optional(
+            "cogent3.core.tree",
+            extra="phylogeny",
+            purpose="phylogenetic landscape construction",
+        )
+        cogent_alignment = require_optional(
+            "cogent3.core.alignment",
+            extra="phylogeny",
+            purpose="phylogenetic landscape construction",
+        )
+        phylo_node_type = cogent_tree.PhyloNode
+
         def _coerce_tree(obj: Union[str, Path, 'PhyloNode']):
-            if PhyloNode is not None and isinstance(obj, PhyloNode):
+            if isinstance(obj, phylo_node_type):
                 return obj
             if hasattr(obj, 'children') and hasattr(obj, 'name'):
                 return obj
             if isinstance(obj, Path):
-                return load_tree(str(obj))
+                return cogent3.load_tree(str(obj))
             if isinstance(obj, str):
                 candidate = Path(obj)
                 if candidate.exists():
-                    return load_tree(str(candidate))
-                return load_tree(obj)
+                    return cogent3.load_tree(str(candidate))
+                return cogent3.load_tree(obj)
             raise TypeError("tree must be a Newick string, Path, or PhyloNode")
 
+        alignment_type = cogent_alignment.Alignment
+
         def _coerce_alignment(obj: Union[str, Path, Alignment]) -> Alignment:
-            if isinstance(obj, Alignment):
+            if isinstance(obj, alignment_type):
                 return obj
             if hasattr(obj, 'names') and hasattr(obj, 'get_gapped_seq'):
                 return obj  # duck-typed Alignment-like object
             if isinstance(obj, Path):
-                return load_aligned_seqs(str(obj), moltype=moltype)
+                return cogent3.load_aligned_seqs(str(obj), moltype=moltype)
             if isinstance(obj, str):
                 candidate = Path(obj)
                 if candidate.exists():
-                    return load_aligned_seqs(str(candidate), moltype=moltype)
-                return load_aligned_seqs(obj, moltype=moltype)
+                    return cogent3.load_aligned_seqs(str(candidate), moltype=moltype)
+                return cogent3.load_aligned_seqs(obj, moltype=moltype)
             raise TypeError("fasta must be an Alignment, FASTA string, or Path")
 
         tree_obj = _coerce_tree(tree)
@@ -2921,7 +3271,9 @@ class FitnessLandscape:
                     "Ancestral reconstruction requires at least one tip sequence; "
                     "none were provided after filtering internal nodes."
                 )
-            aln_for_asr = make_aligned_seqs(asr_alignment_map, moltype=moltype)
+            aln_for_asr = cogent3.make_aligned_seqs(asr_alignment_map, moltype=moltype)
+            from ..phylo.phylogenetic_asr import ASRConstructor
+
             constructor = ASRConstructor(
                 aln_for_asr,
                 phylogenetic_tree=tree_obj,
@@ -2933,7 +3285,7 @@ class FitnessLandscape:
                 _log_progress=_log_progress,
             )
 
-            graph = constructor.construct_dag(graph_type='undirected')
+            graph = constructor.construct_topology()
 
             # Stamp branch lengths from the supplied tree onto the inferred graph.
             for child_name, child_node in node_lookup.items():
@@ -2952,11 +3304,22 @@ class FitnessLandscape:
                             pass
 
             if _compute_hamming_edges and graph.number_of_edges() > 0:
-                compute_edge_mutations_star(
-                    graph,
-                    _log_progress=_log_progress,
-                    _nested_parallel=_nested_parallel,
-                )
+                _annotate_existing_edges_hamming(graph)
+
+            declare_edge_semantics(
+                graph,
+                constructor="phylogeny",
+                distance_key="branch_length",
+                distance_units="expected_substitutions_per_site",
+                normalized_distance_key=(
+                    "normalized_distance" if _compute_hamming_edges else None
+                ),
+                affinity_key=None,
+                conductance_key=None,
+                notes=(
+                    "Phylogenetic branch length is a distance, not conductance."
+                ),
+            )
 
             node_order = list(graph.nodes())
             sequences = [graph.nodes[name]['sequence'] for name in node_order]
@@ -3014,11 +3377,20 @@ class FitnessLandscape:
             G.nodes[name]['gapped_arr'] = record['gapped_arr']
 
         if _compute_hamming_edges and G.number_of_edges() > 0:
-            compute_edge_mutations_star(
-                G,
-                _log_progress=_log_progress,
-                _nested_parallel=_nested_parallel,
-            )
+            _annotate_existing_edges_hamming(G)
+
+        declare_edge_semantics(
+            G,
+            constructor="phylogeny",
+            distance_key="branch_length",
+            distance_units="expected_substitutions_per_site",
+            normalized_distance_key=(
+                "normalized_distance" if _compute_hamming_edges else None
+            ),
+            affinity_key=None,
+            conductance_key=None,
+            notes="Phylogenetic branch length is a distance, not conductance.",
+        )
 
         node_order = list(G.nodes())
         sequences = [G.nodes[name]['sequence'] for name in node_order]
@@ -3032,8 +3404,19 @@ class FitnessLandscape:
 
     @classmethod
     def from_graph_annotated(cls, graph: nx.Graph, **kwargs) -> "FitnessLandscape":
-        """
-        Thin alias around  existing `from_graph` for parity with other APIs.
+        """Create a landscape from an annotated graph.
+
+        Parameters
+        ----------
+        graph : networkx.Graph
+            Graph accepted by :meth:`from_graph`.
+        **kwargs
+            Additional :class:`FitnessLandscape` constructor arguments.
+
+        Returns
+        -------
+        FitnessLandscape
+            Constructed landscape.
         """
         return cls.from_graph(graph, **kwargs)
 
@@ -3046,8 +3429,25 @@ class FitnessLandscape:
         include_legacy_pickle: bool = False,
         overwrite: bool = False,
     ) -> Path:
-        """
-        Save the landscape in the canonical portable directory bundle format.
+        """Save the landscape as a canonical portable directory bundle.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path
+            Destination directory.
+        metadata : mapping, optional
+            User metadata stored in the manifest.
+        include_embeddings : bool, default=True
+            Include embedding arrays in the bundle.
+        include_legacy_pickle : bool, default=False
+            Include an explicitly unsafe compatibility pickle.
+        overwrite : bool, default=False
+            Replace an existing destination.
+
+        Returns
+        -------
+        pathlib.Path
+            Written directory.
         """
         from ..io import save_bundle_dir as _save_bundle_dir
 
@@ -3062,8 +3462,17 @@ class FitnessLandscape:
 
     @classmethod
     def load_bundle_dir(cls, path: str | Path) -> "FitnessLandscape":
-        """
-        Load a landscape from a canonical portable directory bundle.
+        """Load a landscape from a portable directory bundle.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path
+            Bundle directory.
+
+        Returns
+        -------
+        FitnessLandscape
+            Reconstructed landscape.
         """
         from ..io import load_bundle_dir as _load_bundle_dir
 
@@ -3082,8 +3491,23 @@ class FitnessLandscape:
         backend: str = "portable",
         overwrite: bool = False,
     ) -> Path:
-        """
-        Export the landscape as an `.lsbundle` archive.
+        """Export the landscape as an ``.lsbundle`` archive.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path
+            Destination archive path.
+        metadata : mapping, optional
+            User metadata stored in the manifest.
+        backend : str, default='portable'
+            Serialization backend. The release supports ``'portable'``.
+        overwrite : bool, default=False
+            Replace an existing archive.
+
+        Returns
+        -------
+        pathlib.Path
+            Written archive.
         """
         from ..io import export_lsbundle as _export_lsbundle
 
@@ -3096,13 +3520,39 @@ class FitnessLandscape:
         )
 
     def save(self, filepath: Path):
-        """Saves the FitnessLandscape object to a file."""
+        """Serialize the landscape with Python pickle.
+
+        Parameters
+        ----------
+        filepath : pathlib.Path
+            Destination pickle file.
+
+        Notes
+        -----
+        Pickle is unsafe for untrusted data. Prefer :meth:`save_bundle_dir` for
+        portable release artifacts.
+        """
         with open(filepath, 'wb') as f:
             pickle.dump(self, f)
 
     @staticmethod
     def load(filepath: Path):
-        """Loads a FitnessLandscape object from a file."""
+        """Load a legacy Python pickle.
+
+        Parameters
+        ----------
+        filepath : pathlib.Path
+            Pickle file created by :meth:`save`.
+
+        Returns
+        -------
+        FitnessLandscape
+            Deserialized landscape.
+
+        Notes
+        -----
+        Never load a pickle from an untrusted source.
+        """
         with open(filepath, 'rb') as f:
             return pickle.load(f)
 

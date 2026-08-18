@@ -1,8 +1,6 @@
-from cogent3 import get_moltype
-
-# Standard alphabetical order alphabet.
-PROT = get_moltype("protein")
-PROT_20 = [aa for aa in PROT.alphabet if aa != 'U']
+# Standard alphabetical order alphabet. Keep this constant independent of
+# Cogent3 so importing core sequence and bundle APIs stays lightweight.
+PROT_20 = list("ACDEFGHIKLMNPQRSTVWY")
 ALPHABET_21 = PROT_20 + ["gap"]
 
 # PAML ordered matrices (piqtree)

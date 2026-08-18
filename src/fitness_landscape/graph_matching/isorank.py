@@ -1,6 +1,6 @@
-from __future__ import annotations
+"""Align graphs with topology- and feature-aware IsoRank methods."""
 
-from typing import Union
+from __future__ import annotations
 
 import networkx as nx
 import numpy as np
@@ -8,13 +8,29 @@ import numpy as np
 from ..utils import cosine_similarity_matrix as _cosine_sim
 
 
-def normalize_adj_matrix(G: Union[nx.Graph, nx.DiGraph]) -> np.ndarray:
-    """
-    Construct a row-stochastic adjacency/transition matrix for ``G``.
+def normalize_adj_matrix(G: nx.Graph) -> np.ndarray:
+    """Construct a row-stochastic transition matrix for an undirected graph.
+
+    Parameters
+    ----------
+    G : networkx.Graph
+        Undirected graph in iteration node order.
+
+    Returns
+    -------
+    ndarray
+        Row-normalized adjacency. Isolated-node rows are uniform over all
+        nodes.
+
+    Raises
+    ------
+    TypeError
+        If ``G`` is not an undirected NetworkX graph.
+
     For sink rows (no outgoing mass), replace with uniform 1/n.
     """
-    if not isinstance(G, (nx.Graph, nx.DiGraph)):
-        raise TypeError("G must be a NetworkX Graph or DiGraph")
+    if not isinstance(G, nx.Graph) or G.is_directed():
+        raise TypeError("G must be an undirected NetworkX Graph")
     nodes = list(G.nodes())
     if not nodes:
         return np.zeros((0, 0), dtype=float)
@@ -24,20 +40,33 @@ def normalize_adj_matrix(G: Union[nx.Graph, nx.DiGraph]) -> np.ndarray:
     mask = row_sum > 0
     A_norm = np.zeros_like(A)
     if np.any(mask):
-        A_norm[mask[:, 0]] = A[mask[:, 0]] / row_sum[mask]
+        A_norm[mask[:, 0]] = A[mask[:, 0]] / row_sum[mask[:, 0]]
     if np.any(~mask):
         A_norm[~mask[:, 0]] = 1.0 / n
     return A_norm
 
 
 def cosine_similarity_matrix(F1: np.ndarray, F2: np.ndarray) -> np.ndarray:
-    """Cosine similarity between feature matrices (rows = nodes)."""
+    """Compute cosine similarity between node-feature matrices.
+
+    Parameters
+    ----------
+    F1 : ndarray
+        First feature matrix with nodes in rows.
+    F2 : ndarray
+        Second feature matrix with the same feature width.
+
+    Returns
+    -------
+    ndarray
+        Pairwise cosine similarities with shape ``(len(F1), len(F2))``.
+    """
     return _cosine_sim(F1, F2)
 
 
 def isorank_with_features(  # noqa: D401
-    G1: Union[nx.Graph, nx.DiGraph],
-    G2: Union[nx.Graph, nx.DiGraph],
+    G1: nx.Graph,
+    G2: nx.Graph,
     F1: np.ndarray,
     F2: np.ndarray,
     *,
@@ -45,8 +74,38 @@ def isorank_with_features(  # noqa: D401
     max_iter: int = 100,
     tol: float = 1e-6,
 ) -> np.ndarray:
-    """
-    IsoRank with feature prior: S = alpha A1^T S A2 + (1-alpha) S0,
+    """Compute topology-and-feature IsoRank similarities.
+
+    Parameters
+    ----------
+    G1 : networkx.Graph
+        First undirected graph.
+    G2 : networkx.Graph
+        Second undirected graph.
+    F1 : ndarray
+        Node features for ``G1`` in graph iteration order.
+    F2 : ndarray
+        Node features for ``G2`` in graph iteration order.
+    alpha : float, default=0.85
+        Topological propagation weight.
+    max_iter : int, default=100
+        Maximum fixed-point iterations.
+    tol : float, default=1e-6
+        Frobenius-norm convergence tolerance.
+
+    Returns
+    -------
+    ndarray
+        Node-pair similarity matrix with shape ``(len(G1), len(G2))``.
+
+    Raises
+    ------
+    ValueError
+        If feature row counts do not match graph node counts.
+
+    Notes
+    -----
+    The fixed point is ``S = alpha A1.T S A2 + (1-alpha) S0``,
     where S0 is the cosine similarity of node features.
     """
     n1 = len(G1)

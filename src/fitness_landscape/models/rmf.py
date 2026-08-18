@@ -1,3 +1,5 @@
+"""Construct Rough Mount Fuji fitness landscapes."""
+
 import numpy as np
 from typing import Optional, List
 from ..core.landscape import FitnessLandscape
@@ -22,11 +24,13 @@ def create_rmf_landscape(N: int,
         Slope of the RMF landscape.
     sigma : float
         Standard deviation of the stochastic noise.
+    seed : int, optional
+        Random seed for reproducibility.
     optimum : list of int, optional
         The sequence representing the optimum. If None, defaults to
         a sequence of zeros.
-    seed : int, optional
-        Random seed for reproducibility.
+    **kwargs
+        Additional keyword arguments passed to :meth:`FitnessLandscape.build`.
 
     Returns
     -------

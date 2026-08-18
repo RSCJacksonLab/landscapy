@@ -1,18 +1,23 @@
+"""Transform graph signals into a spectral Fourier basis."""
+
+from __future__ import annotations
+
 import numpy as np
 import scipy.sparse as sp
-import torch
 import networkx as nx
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
 from ..core.landscape import FitnessLandscape
+from ..core.edge_schema import AUTO_EDGE_KEY
 from .eigenmode import eigenmode_decomposition
 
 def graph_fourier_transform(graph: Union[nx.Graph, FitnessLandscape],
                             signal: np.ndarray = None,
                             matrix: Literal['laplacian', 'norm_laplacian'] = 'laplacian',
                             k: int = None,
+                            weight_key: str | None = AUTO_EDGE_KEY,
                             _eigenvectors: Optional[np.ndarray] = None,
                             _eigenvalues: Optional[np.ndarray] = None
-                            ) -> Union[torch.Tensor, np.ndarray]:
+                            ) -> np.ndarray:
     """
     Compute graph Fourier transform of a signal on the graph.
     
@@ -29,6 +34,13 @@ def graph_fourier_transform(graph: Union[nx.Graph, FitnessLandscape],
     k : int, default=`None`
         Number of eigenvectors to use. If None, compute all eigenvectors
         (dense; may be expensive for large graphs).
+    weight_key : str or None, default="auto"
+        Conductance attribute used for the graph basis. ``None`` requests an
+        unweighted transform.
+    _eigenvectors : ndarray, optional
+        Precomputed eigenvectors whose columns form the transform basis.
+    _eigenvalues : ndarray, optional
+        Eigenvalues corresponding to ``_eigenvectors``.
         
     Returns
     -------
@@ -37,7 +49,7 @@ def graph_fourier_transform(graph: Union[nx.Graph, FitnessLandscape],
     """
     if isinstance(graph, FitnessLandscape):
         if signal is None:
-            signal = graph.get_signal()  # single pass over active layer
+            signal = graph.get_node_signal()
         graph = graph.graph
 
     if (_eigenvectors is None) != (_eigenvalues is None):
@@ -51,7 +63,12 @@ def graph_fourier_transform(graph: Union[nx.Graph, FitnessLandscape],
         if w.ndim != 1 or w.shape[0] != U.shape[1]:
             raise ValueError("_eigenvalues must be 1D with length matching eigenvector columns.")
     else:
-        w, U = eigenmode_decomposition(graph, k=k, matrix=matrix)
+        w, U = eigenmode_decomposition(
+            graph,
+            k=k,
+            matrix=matrix,
+            weight_key=weight_key,
+        )
 
     coeffs = None
     if signal is not None:

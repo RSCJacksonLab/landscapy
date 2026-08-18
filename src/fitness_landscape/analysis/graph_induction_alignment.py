@@ -1,3 +1,5 @@
+"""Compare observed, reconstructed, and phylogenetic graph structures."""
+
 import math
 import numpy as np
 import networkx as nx
@@ -11,9 +13,18 @@ from scipy.cluster.vq import kmeans2
 from scipy.stats import spearmanr
 from numpy.linalg import svd
 from typing import List, Union, Tuple, Dict, Optional, Sequence, Any
-from sklearn.metrics import average_precision_score, roc_auc_score
+from .._optional import require_optional
+
+sklearn_metrics = require_optional(
+    "sklearn.metrics",
+    extra="analysis",
+    purpose="graph-induction alignment analysis",
+)
+average_precision_score = sklearn_metrics.average_precision_score
+roc_auc_score = sklearn_metrics.roc_auc_score
 from ..transforms.eigenmode import eigenmode_decomposition
 from ..core.landscape import FitnessLandscape
+from ..core.edge_schema import AUTO_EDGE_KEY
 import statistics as stats
 from scipy.optimize import linear_sum_assignment
 from ..graph_matching import isorank_with_features
@@ -184,7 +195,8 @@ def sp_rmse(Ga: nx.Graph,
 
 def spectral_rmse(Ga: nx.Graph,
                   Gb: nx.Graph,
-                  k: int = 20) -> float:
+                  k: int = 20,
+                  weight_key: str | None = AUTO_EDGE_KEY) -> float:
     """
     Function to compute the spectral RMSE between two input graphs.
 
@@ -198,14 +210,17 @@ def spectral_rmse(Ga: nx.Graph,
     
     k : int, default=20
         The number of Laplacian eigenvectors to compute.
+    weight_key : str or None, default="auto"
+        Conductance attribute used for both spectra. ``None`` requests
+        unweighted operators.
 
     Returns
     -------
     float
         The root-mean-squared difference between eigenvalues.
     """
-    eigvals_a, _ = eigenmode_decomposition(Ga, k=k)
-    eigvals_b, _ = eigenmode_decomposition(Gb, k=k)
+    eigvals_a, _ = eigenmode_decomposition(Ga, k=k, weight_key=weight_key)
+    eigvals_b, _ = eigenmode_decomposition(Gb, k=k, weight_key=weight_key)
     kmin = min(eigvals_a.shape[0], eigvals_b.shape[0])
     return float(np.sqrt(np.mean((eigvals_a[:kmin] - eigvals_b[:kmin])**2)))
 
@@ -221,6 +236,12 @@ def edge_length_stats(G: nx.Graph,
     
     weight_key : str, default=`weight`
         The key that edge weights are stored under.
+
+    Returns
+    -------
+    dict
+        Edge count and mean, median, and population standard deviation of the
+        selected edge-length attribute.
     """
     L = [d.get(weight_key, 1.0) for _,_,d in G.edges(data=True)]
     return dict(n=len(L), mean=np.mean(L), median=np.median(L), std=np.std(L))
@@ -247,14 +268,14 @@ def leaf_spanning_tree(G: nx.Graph,
         output has multiple components, the largest component is
         returned.
     """
-    if not isinstance(G, nx.Graph):
-        G = G.to_undirected()
+    if not isinstance(G, nx.Graph) or G.is_directed():
+        raise TypeError("leaf_spanning_tree requires an undirected graph")
     # Filter leaves that exist in G
     L = [u for u in leaves if u in G]
     if len(L) == 0:
         return nx.Graph()
     T = steiner_tree(G, L, weight=weight)
-    U = T.to_undirected()
+    U = T.copy()
     if U.number_of_nodes() == 0:
         return nx.Graph()
     if not nx.is_connected(U):
@@ -263,8 +284,17 @@ def leaf_spanning_tree(G: nx.Graph,
     return U
 
 def get_leaves(U: nx.Graph) -> List:
-    """
-    Return leaf nodes (degree == 1) of an undirected graph ``U``.
+    """Return the degree-one nodes of an undirected graph.
+
+    Parameters
+    ----------
+    U : networkx.Graph
+        Input graph.
+
+    Returns
+    -------
+    list
+        Nodes whose degree is one.
     """
     return [n for n in U.nodes() if U.degree(n) == 1]
 
@@ -289,7 +319,9 @@ def suppress_degree2(T: nx.Graph,
     nx.Graph
         An undirected graph with degree-2 internal nodes suppressed.
     """
-    U = T.to_undirected().copy()
+    if not isinstance(T, nx.Graph) or T.is_directed():
+        raise TypeError("suppress_degree_two requires an undirected graph")
+    U = T.copy()
     changed = True
     while changed:
         changed = False
@@ -420,14 +452,8 @@ def tree_rf_dissimilarity(G_truth: Union[FitnessLandscape, nx.Graph],
         - 'n_splits_truth' (int): Number of non-trivial splits in truth tree.
         - 'n_splits_recon' (int): Number of non-trivial splits in recon tree.
     """
-    # Resolve nx.Graphs
-    A = G_truth.graph if isinstance(G_truth, FitnessLandscape) else G_truth
-    B = G_recon.graph if isinstance(G_recon, FitnessLandscape) else G_recon
-    if A is None or B is None:
-        raise ValueError("Both inputs must be networkx graphs or FitnessLandscape with .graph")
-
-    Au = A.to_undirected()
-    Bu = B.to_undirected()
+    Au = _ensure_graph(G_truth)
+    Bu = _ensure_graph(G_recon)
 
     if leaves is None:
         truth_leaves = set(get_leaves(Au))
@@ -497,7 +523,7 @@ def evaluate_reconstruction(G_lat_truth: Union[FitnessLandscape, nx.Graph],
     G_induced : FitnessLandscape or nx.Graph
         The observed induced subgraph.
     
-    G_lat_recon: FitnessLandscape or nx.Graph
+    G_lat_recon : FitnessLandscape or nx.Graph
         The reconstructed latent Graph.
     
     Returns
@@ -512,14 +538,9 @@ def evaluate_reconstruction(G_lat_truth: Union[FitnessLandscape, nx.Graph],
         - edge weight statistics. 
         - Total edge weights of ground-truth and reconstructed graphs.
     """
-    if isinstance(G_lat_truth, FitnessLandscape):
-        G_lat_truth = G_lat_truth.graph
-
-    if isinstance(G_lat_recon, FitnessLandscape):
-        G_lat_recon = G_lat_recon.graph
-    
-    if isinstance(G_induced, FitnessLandscape):
-        G_induced = G_induced.graph
+    G_lat_truth = _ensure_graph(G_lat_truth)
+    G_lat_recon = _ensure_graph(G_lat_recon)
+    G_induced = _ensure_graph(G_induced)
     
     observed_nodes = list(G_induced.nodes())
 
@@ -547,10 +568,8 @@ def evaluate_reconstruction(G_lat_truth: Union[FitnessLandscape, nx.Graph],
 def _ensure_graph(obj: Union[FitnessLandscape, nx.Graph]) -> nx.Graph:
     if isinstance(obj, FitnessLandscape):
         obj = obj.graph
-    if isinstance(obj, nx.DiGraph):
-        return obj.to_undirected()
-    if not isinstance(obj, nx.Graph):
-        raise TypeError("Expected FitnessLandscape or networkx Graph/Digraph")
+    if not isinstance(obj, nx.Graph) or obj.is_directed():
+        raise TypeError("Expected FitnessLandscape or an undirected networkx Graph")
     return obj
 
 def _sequence_key(seq: Union[BaseNumpySequence, np.ndarray, Sequence]) -> Tuple:
@@ -1573,7 +1592,12 @@ def _collect_features(G: nx.Graph,
     if n == 0:
         return np.zeros((0, 0), dtype=float)
     k = min(max(2, spectral_k + 1), n)
-    _, U = eigenmode_decomposition(G, k=k, matrix='norm_laplacian')
+    _, U = eigenmode_decomposition(
+        G,
+        k=k,
+        matrix='norm_laplacian',
+        weight_key=None,
+    )
     if U.shape[1] > 1:
         return U[:, 1:min(k, U.shape[1])]
     deg = np.array([G.degree(u) for u in nodes], dtype=float)[:, None]
@@ -1646,16 +1670,57 @@ def evaluate_isorank_alignment(Ga: Union[FitnessLandscape, nx.Graph],
                                plm_device: Optional[str] = None,
                                plm_batch_size: int = 64,
                                use_ohe_only: bool = False) -> Dict:
-    """
+    """Align two graphs with feature-aware IsoRank and evaluate the mapping.
+
     Align two graphs via IsoRank (with node features) and evaluate the
     induced mapping with edge precision/recall/F1 and spectral
     correlations over the first non-trivial Laplacian eigenvectors.
 
-    Feature selection per graph:
-      - If use_ohe_only=True: use averaged one-hot/ungapped encodings.
-      - Else, prefer node attributes in prefer_attrs; if missing and
-        use_plm_fallback=True, compute PLM embeddings from sequences;
-        otherwise use spectral features.
+    Parameters
+    ----------
+    Ga : FitnessLandscape or networkx.Graph
+        First undirected graph.
+    Gb : FitnessLandscape or networkx.Graph
+        Second undirected graph.
+    alpha : float, default=0.85
+        IsoRank mixing weight between topology and feature similarity.
+    max_iter : int, default=100
+        Maximum IsoRank iterations.
+    tol : float, default=1e-6
+        Frobenius-norm convergence tolerance.
+    prefer_attrs : tuple of str, default=('emb_arr',)
+        Node attributes considered for feature matrices in priority order.
+    spectral_k : int, default=16
+        Number of spectral feature modes used when preferred attributes are
+        unavailable.
+    spectral_corr_k : int, default=20
+        Maximum non-trivial Laplacian modes compared after matching.
+    use_plm_fallback : bool, default=True
+        Compute protein language-model features when preferred attributes are
+        absent and sequences are available.
+    plm_model_name : str, default='facebook/esm2_t6_8M_UR50D'
+        Hugging Face model used by the PLM fallback.
+    plm_device : str, optional
+        Torch device for PLM inference.
+    plm_batch_size : int, default=64
+        PLM inference batch size.
+    use_ohe_only : bool, default=False
+        Use averaged one-hot sequence features and bypass all other feature
+        sources.
+
+    Returns
+    -------
+    dict
+        Hungarian node mapping derived from the IsoRank similarity matrix,
+        mapped-edge precision/recall/F1, absolute correlation by matched
+        Laplacian mode, mean spectral correlation, and graph/match sizes.
+
+    Notes
+    -----
+    Unless ``use_ohe_only`` is true, node attributes in ``prefer_attrs`` are
+    used first. Missing attributes trigger PLM features when enabled, then
+    spectral features. Edge metrics compare the mapped edges of ``Ga`` with
+    the subgraph of ``Gb`` induced by matched nodes.
     """
     A = _ensure_graph(Ga)
     B = _ensure_graph(Gb)
@@ -1716,8 +1781,8 @@ def evaluate_isorank_alignment(Ga: Union[FitnessLandscape, nx.Graph],
     mapping = {nodes_A[i]: nodes_B[j] for i, j in zip(r_idx, c_idx)}
 
     # Edge precision/recall/F1 on matched nodes (undirected)
-    Au = A.to_undirected()
-    Bu = B.to_undirected()
+    Au = A
+    Bu = B
     matched_A = set(nodes_A[i] for i in r_idx)
     matched_B = set(nodes_B[j] for j in c_idx)
     E_pred = set()
@@ -1733,8 +1798,18 @@ def evaluate_isorank_alignment(Ga: Union[FitnessLandscape, nx.Graph],
 
     # Spectral correlation on first k non-trivial modes
     k_corr = min(spectral_corr_k, max(1, min(nA, nB) - 1))
-    wA, UA = eigenmode_decomposition(A, k=k_corr + 1, matrix='norm_laplacian')
-    wB, UB = eigenmode_decomposition(B, k=k_corr + 1, matrix='norm_laplacian')
+    wA, UA = eigenmode_decomposition(
+        A,
+        k=k_corr + 1,
+        matrix='norm_laplacian',
+        weight_key=None,
+    )
+    wB, UB = eigenmode_decomposition(
+        B,
+        k=k_corr + 1,
+        matrix='norm_laplacian',
+        weight_key=None,
+    )
     UA = UA[:, 1:1 + k_corr] if UA.shape[1] > 1 else UA
     UB = UB[:, 1:1 + k_corr] if UB.shape[1] > 1 else UB
     idxA = list(r_idx)
