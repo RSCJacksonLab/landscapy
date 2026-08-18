@@ -25,7 +25,7 @@ jobs:
       - name: Install package and documentation dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install ".[dev,all,ml]"
+          python -m pip install ".[dev]"
 
       - name: Validate public API and non-private source docstrings
         run: python scripts/check_public_api_docs.py
@@ -74,7 +74,7 @@ jobs:
       - name: Install package and test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install ".[dev,all,ml]"
+          python -m pip install ".[dev]"
 
       - name: Run test suite
         run: |
@@ -132,7 +132,7 @@ jobs:
           python -m pip install --upgrade pip build
           python -m build --wheel --outdir minimal-dist
 
-      - name: Install only required dependencies in a clean environment
+      - name: Install default dependencies in a clean environment
         run: |
           python -m venv .minimal-venv
           .minimal-venv/bin/python -m pip install minimal-dist/*.whl
@@ -159,10 +159,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install every supported non-ML feature
+      - name: Install the default feature set
         run: |
           python -m pip install --upgrade pip
-          python -m pip install ".[all]"
+          python -m pip install "."
 
       - name: Exercise the installed CLI and a kNN landscape
         run: python scripts/comprehensive_install_smoke.py

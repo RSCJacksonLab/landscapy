@@ -10,6 +10,7 @@ from pathlib import Path
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 PYPROJECT = tomllib.loads((REPOSITORY / "pyproject.toml").read_text(encoding="utf-8"))
+DEPENDENCIES = PYPROJECT["project"]["dependencies"]
 EXTRAS = PYPROJECT["project"]["optional-dependencies"]
 IMPORT_DISTRIBUTIONS = {
     "faiss": "faiss-cpu",
@@ -45,6 +46,13 @@ def test_all_excludes_dependencies_unique_to_ml():
 
     assert "torch-geometric>=2.6" in ml_only
     assert ml_only.isdisjoint(EXTRAS["all"])
+
+
+def test_default_install_covers_all_and_ml():
+    expected = set(EXTRAS["all"]) | set(EXTRAS["ml"])
+
+    assert expected.issubset(DEPENDENCIES)
+    assert set(EXTRAS["dev"]).isdisjoint(DEPENDENCIES)
 
 
 def test_optional_imports_have_direct_dependencies_in_their_named_extra():

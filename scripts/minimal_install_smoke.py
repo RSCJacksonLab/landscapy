@@ -1,4 +1,4 @@
-"""Exercise the publication core from a wheel with no optional extras."""
+"""Exercise core paths without importing feature dependencies eagerly."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from fitness_landscape.core.sequence import BinarySequence
 import fitness_landscape.embedding as embedding
 
 
-OPTIONAL_ROOTS = {
+FEATURE_ROOTS = {
     "click",
     "cogent3",
     "faiss",
@@ -47,11 +47,11 @@ def main() -> None:
     assert phylo.__name__.endswith(".phylo")
     assert embedding.__name__.endswith(".embedding")
 
-    imported_optional = sorted(OPTIONAL_ROOTS.intersection(sys.modules))
-    if imported_optional:
+    imported_features = sorted(FEATURE_ROOTS.intersection(sys.modules))
+    if imported_features:
         raise AssertionError(
-            "minimal core imported optional dependencies: "
-            + ", ".join(imported_optional)
+            "core import loaded feature dependencies eagerly: "
+            + ", ".join(imported_features)
         )
 
     with tempfile.TemporaryDirectory() as tmp:
