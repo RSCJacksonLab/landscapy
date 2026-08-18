@@ -1,7 +1,11 @@
 # Analyze neutral networks
 
 A neutral network is a connected component formed by represented edges whose
-endpoint fitness difference is no larger than a declared threshold. Neutral network analysis can provide insight on evolvability and mutational robustness. See, for example, REF_1, REF_2, ... REF_n. 
+endpoint fitness difference is no larger than a declared threshold. Neutral
+networks connect robustness and access to new variation; see
+[Huynen, Stadler, and Fontana (1996)](https://doi.org/10.1073/PNAS.93.1.397),
+[Wagner (2008)](https://doi.org/10.1098/rspb.2007.1137), and
+[Romero and Arnold (2009)](https://doi.org/10.1038/nrm2805).
 
 ## Input
 
@@ -46,4 +50,3 @@ print(sensitivity)
 The component partition changes sharply between thresholds, which is the point
 of reporting sensitivity. Relate neutral components to local optima or basins
 only after preserving their distinct definitions and denominators.
-

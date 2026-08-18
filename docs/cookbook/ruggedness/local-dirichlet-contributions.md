@@ -34,7 +34,7 @@ landscape.annotation_layers["design"] = AnnotationLayer(
 )
 
 local = local_dirichlet_energy_contribution(landscape, weight_key=None)
-global_result = calculate_ruggedness_dirichlet_energy(landscape)
+global_result = calculate_ruggedness_dirichlet_energy(landscape, weight_key=None)
 np.testing.assert_allclose(
     sum(local.values()), global_result["global_dirichlet_energy"]
 )

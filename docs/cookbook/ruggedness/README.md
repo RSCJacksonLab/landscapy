@@ -21,4 +21,9 @@ worked estimator example would normalize a scientifically disputed method.
 - [Random-walk spectral operators](spectral-operators.md)
 - [Edge attributes, distance, affinity, and conductance](../graph-construction/edge-semantics.md)
 
-## Useful literature:
+## Useful literature
+
+- Stadler (1996), [*Landscapes and Their Correlation Functions*](https://doi.org/10.1007/BF01165154).
+- Szendro et al. (2013), [*Quantitative analyses of empirical fitness landscapes*](https://doi.org/10.1088/1742-5468/2013/01/P01005).
+- Shuman et al. (2013), [*The Emerging Field of Signal Processing on Graphs: Extending High-Dimensional Data Analysis to Networks and Other Irregular Domains*](https://doi.org/10.1109/MSP.2012.2235192).
+- Matthews et al. (2024), [*Leveraging ancestral sequence reconstruction for protein representation learning*](https://doi.org/10.1038/s42256-024-00935-2).

@@ -23,7 +23,7 @@ layer_name = landscape.active_layer_name
 
 def analysis(sample):
     try:
-        energy = calculate_ruggedness_dirichlet_energy(sample)
+        energy = calculate_ruggedness_dirichlet_energy(sample, weight_key=None)
         value = float(energy["global_dirichlet_energy"])
         status = "ok" if np.isfinite(value) else "undefined"
     except (ValueError, FloatingPointError):

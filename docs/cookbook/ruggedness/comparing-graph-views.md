@@ -48,7 +48,7 @@ for name, graph in graphs.items():
     )
     landscape.view("z_assay")
     properties = graph_properties(graph)
-    energy = calculate_ruggedness_dirichlet_energy(landscape)
+    energy = calculate_ruggedness_dirichlet_energy(landscape, weight_key=None)
     rows.append(
         {
             "view": name,

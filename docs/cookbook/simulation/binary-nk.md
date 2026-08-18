@@ -40,7 +40,9 @@ for K in (0, 1, 3):
         "local_optima": calculate_ruggedness_local_optima(landscape)[
             "local_optima_count"
         ],
-        "dirichlet_energy": calculate_ruggedness_dirichlet_energy(landscape)[
+        "dirichlet_energy": calculate_ruggedness_dirichlet_energy(
+            landscape, weight_key=None
+        )[
             "global_dirichlet_energy"
         ],
         "highest_nonzero_walsh_order": highest_nonzero_order,

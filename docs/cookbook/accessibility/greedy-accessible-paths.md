@@ -1,7 +1,11 @@
 # Enumerate greedy accessible paths
 
 Greedy accessible paths move only along represented edges with strictly
-increasing active fitness. Greedy accessible path analysis is a foundation of quantitative fitness landscape analysis and underpins much of the understanding on historical contingency, epistasis and fitness landscape ruggedness. See, for example, REF_1, REF_2, REF_3, ... REF_n.
+increasing active fitness. Accessible mutational paths are central to analyses
+of historical contingency and epistasis; see
+[Weinreich et al. (2006)](https://doi.org/10.1126/science.1123539),
+[Poelwijk et al. (2007)](https://doi.org/10.1038/nature05451), and
+[Franke et al. (2011)](https://doi.org/10.1371/journal.pcbi.1002134).
 
 ## Input
 

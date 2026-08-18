@@ -77,7 +77,7 @@ hierarchy = category_diffusion_hierarchy(
     layer="communities",
     annotation_field="community",
     embedding_dim=2,
-    weight_key="weight",
+    weight_key=None,
     filter_small_embedding=False,
 )
 
@@ -90,7 +90,8 @@ assert comparison.to_numpy().max() == 3
 
 report = {
     "algorithm": algorithm,
-    "weight_key": "weight",
+    "community_weight_key": "weight",
+    "hierarchy_weight_key": None,
     "resolution": resolution,
     "seed": seed,
     "modularity": modularity,
@@ -110,4 +111,3 @@ to fitness.
 Community assignments and modularity describe the supplied graph under one
 algorithm and parameter set. Integer community labels are arbitrary and
 non-identifiable across runs: compare member sets, not label numbers.
-

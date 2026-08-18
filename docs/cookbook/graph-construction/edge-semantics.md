@@ -24,10 +24,9 @@ distance and does not imply a conductance.
 
 Weighted analyses accept either an explicit edge key or `"auto"`. Automatic
 resolution uses `landscapy_edge_schema`; an attribute-free graph is treated as
-unweighted, but Landscapy will default to `weight_key=None`, so they remain unweighted unless weighting is requested
-explicitly.
-
-#TODO: set all analysis weight_key to none.
+unweighted. Because API defaults differ, cookbook analyses pass
+`weight_key=None` explicitly and therefore use graph adjacency alone. Weighted
+analysis is opt-in and must name its conductance semantics.
 
 For an undirected graph, global Dirichlet energy is the unnormalized quadratic
 form `f.T @ L @ f = sum_{u,v} w_uv (f_u - f_v)^2`, where the sum is over

@@ -1,14 +1,17 @@
 # Prepare sequence objects
 
 Sequence values, order, alphabet, and identifiers are separate concepts. Choose
-the narrowest class that represents the data. The default protein alphabet inherited from Cogent3 is the recommended alphabet for proteins, and enables pairwise alignment and other and/or other entries to phylogenetic analysis. 
+the narrowest class that represents the data. `BaseNumpySequence.from_string`
+uses Landscapy's canonical 20-amino-acid alphabet by default. Cogent3 is an
+optional interoperability layer for alignment and phylogenetic workflows; it
+does not define this default.
 
 ## Input
 
 Inputs are strings or one-dimensional iterables. Binary values must be `0` or
 `1`; multiallelic values must occur in the declared alphabet; protein symbols
-should use an explicit alphabet. Gaps are represented consistently as `-` or
-`gap` according to the chosen alphabet.
+can use the canonical default or an explicit custom alphabet. Gaps are
+represented consistently as `-` or `gap` according to the chosen alphabet.
 
 ## Worked example
 
@@ -51,18 +54,31 @@ assert hash(duplicate) == hash(binary)
 print(binary.id, audit_text(binary))
 print(multiallele.id, multiallele.alphabet)
 print(protein.id, audit_text(protein))
+
+# Omitting alphabet from from_string selects the canonical protein alphabet.
+canonical_alphabet = list("ACDEFGHIKLMNPQRSTVWY")
+default_protein = BaseNumpySequence.from_string(
+    "ACDE", sequence_id="protein-default"
+)
+assert default_protein.alphabet == canonical_alphabet
+
+# Equal-length, site-aligned strings retain the same default alphabet and site order.
+aligned_proteins = [
+    BaseNumpySequence.from_string(text, sequence_id=sequence_id)
+    for sequence_id, text in [("aligned-1", "ACDE"), ("aligned-2", "ACDF")]
+]
+assert {len(sequence) for sequence in aligned_proteins} == {4}
+assert all(sequence.alphabet == canonical_alphabet for sequence in aligned_proteins)
+assert [audit_text(sequence) for sequence in aligned_proteins] == ["ACDE", "ACDF"]
 ```
 
-#TODO: ADD a simple example with the default protein alphabet
-#TODO: ADD a simple example with the default protein alphabet with aligned input sequences.
-
-Expected output round-trips all three inputs without changing site order. The
+The examples round-trip their inputs without changing site order. The
 underlying sequence view is read-only; `to_array()` returns a safe copy.
 
 `moltype` is optional interoperability metadata backed by Cogent3 and therefore
 requires `landscapy[phylogeny]`. It is not required for core graph construction.
-An explicit alphabet is still required to make symbol validation and one-hot
-column order auditable.
+Use an explicit alphabet whenever the canonical protein default is not the
+intended domain; alphabet order determines one-hot column order.
 
 ## Alignment and duplicates
 

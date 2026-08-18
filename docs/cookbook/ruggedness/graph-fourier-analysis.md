@@ -32,17 +32,17 @@ signal = landscape.view(landscape.active_layer_name).to_scalar()
 bases = {}
 for operator in ["adjacency", "laplacian", "norm_laplacian", "transition"]:
     eigenvalues, eigenvectors = eigenmode_decomposition(
-        landscape, matrix=operator, weight_key="weight"
+        landscape, matrix=operator, weight_key=None
     )
     assert eigenvectors.shape == (8, 8)
     assert np.isfinite(eigenvalues).all() and np.isfinite(eigenvectors).all()
     bases[operator] = eigenvalues
 
 eigenvectors, eigenvalues, coefficients = graph_fourier_transform(
-    landscape, signal=signal, matrix="laplacian", weight_key="weight"
+    landscape, signal=signal, matrix="laplacian", weight_key=None
 )
 laplacian = nx.laplacian_matrix(
-    landscape.graph, nodelist=list(landscape.graph.nodes), weight="weight"
+    landscape.graph, nodelist=list(landscape.graph.nodes), weight=None
 ).toarray()
 residuals = np.linalg.norm(
     laplacian @ eigenvectors - eigenvectors * eigenvalues[None, :], axis=0
@@ -54,7 +54,7 @@ assert residuals.max() < 1e-10
 power = coefficients**2
 cumulative = np.cumsum(power) / power.sum()
 summary = graph_spectral_analysis(
-    landscape, matrix="laplacian", weight_key="weight"
+    landscape, matrix="laplacian", weight_key=None
 )
 assert np.isclose(summary["spectral_gap"], 2.0)
 

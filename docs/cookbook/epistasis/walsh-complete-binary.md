@@ -1,7 +1,11 @@
 # Compute Walsh epistasis on a complete binary cube
 
 Walsh analysis requires every one of the `2^L` unique 0/1 genotypes. Row order
-may vary, but completeness and genotype identity must be auditable. See, for example, REF_1, REF_2, .. , REF_n.
+may vary, but completeness and genotype identity must be auditable. For the
+Walsh representation and its relationship to alternative epistasis formalisms,
+see [Weinreich et al. (2013)](https://doi.org/10.1016/j.gde.2013.10.007),
+[Poelwijk, Krishna, and Ranganathan (2016)](https://doi.org/10.1371/journal.pcbi.1004771),
+and [Faure et al. (2024)](https://doi.org/10.1371/journal.pcbi.1012132).
 
 ## Input
 

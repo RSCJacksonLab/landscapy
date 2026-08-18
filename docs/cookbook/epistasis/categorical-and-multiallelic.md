@@ -2,7 +2,11 @@
 
 The ensemble and reference-free APIs compute the same hierarchical Möbius
 decomposition of observed empirical marginal means. They support complete,
-incomplete, balanced, and unbalanced observed designs without imputation. See REF_1, REF_2, ... REF_n. 
+incomplete, balanced, and unbalanced observed designs without imputation. For
+broader treatments linking epistasis parameterizations and extending
+Walsh-Hadamard ideas beyond complete binary designs, see
+[Poelwijk, Krishna, and Ranganathan (2016)](https://doi.org/10.1371/journal.pcbi.1004771)
+and [Faure et al. (2024)](https://doi.org/10.1371/journal.pcbi.1012132).
 
 ## Input
 
@@ -79,4 +83,3 @@ print(report)
 Every emitted observed cell mean reconstructs exactly. In incomplete designs,
 absent cells are not emitted. In unbalanced designs, equal observation weights
 change empirical marginals and the decomposition is not orthogonal.
-

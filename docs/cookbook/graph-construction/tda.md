@@ -1,7 +1,11 @@
 # Construct a TDA alpha-complex graph
 
 The TDA constructor reduces an embedding with PCA, builds an alpha complex,
-and exposes its one-skeleton as an undirected graph. See REF_1 for an introduction on topological data analysis and the principles that underpin this method. 
+and exposes its one-skeleton as an undirected graph. See
+[Carlsson (2009)](https://doi.org/10.1090/S0273-0979-09-01249-X) for an
+introduction to topological data analysis and
+[Edelsbrunner, Kirkpatrick, and Seidel (1983)](https://doi.org/10.1109/TIT.1983.1056714)
+for the alpha-shape construction underlying alpha complexes.
 
 ## Input
 
