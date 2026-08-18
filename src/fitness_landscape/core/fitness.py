@@ -1,3 +1,5 @@
+"""Represent numeric and categorical fitness layers and modifiers."""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -54,6 +56,13 @@ class BaseFitnessLayer(ABC):
     """
     Base class for fitness layers in a fitness landscape. 
 
+    Parameters
+    ----------
+    name : str
+        Layer name.
+    metadata : dict, optional
+        Additional layer metadata.
+
     Attributes
     ----------
     name : str
@@ -85,16 +94,24 @@ class BaseFitnessLayer(ABC):
     @abstractmethod
     def to_scalar(self,
                   **kwargs) -> np.ndarray:
-        """
-        Method to convert the fitness layer to a scalar representation.
+        """Convert the fitness layer to a scalar representation.
+
+        Parameters
+        ----------
+        **kwargs
+            Layer-specific scalar conversion options.
         """
         pass
 
     @abstractmethod
     def get_value(self,
                   sequence_index: int) -> Any:
-        """
-        Retrieves the native fitness value(s) for a single sequence.
+        """Retrieve the native fitness value for one sequence.
+
+        Parameters
+        ----------
+        sequence_index : int
+            Zero-based sequence index.
         """
         pass
     
@@ -1161,7 +1178,14 @@ class ProbabilisticCategoricalFitness(BaseFitnessLayer):
 # TODO: wrapper classes for fitness layers modifiers.
 
 class BaseFitnessWrapper(BaseFitnessLayer):
-    """
+    """Delegate fitness access to another layer.
+
+    Parameters
+    ----------
+    layer : BaseFitnessLayer
+        Wrapped fitness layer.
+    **kwargs
+        Optional ``name`` and ``metadata`` overrides.
     """
     def __init__(self,
                  layer: BaseFitnessLayer,
@@ -1173,22 +1197,44 @@ class BaseFitnessWrapper(BaseFitnessLayer):
 
     @property
     def dtype(self):
+        """Return the wrapped layer data type."""
         return self._wrapped_layer.dtype
 
     # Delegate core methods to the wrapped layer
     def get_tensor(self):
+        """Return the wrapped layer tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Native tensor representation.
+        """
         return self._wrapped_layer.get_tensor()
 
     def to_scalar(self, **kwargs):
+        """Return a scalar representation of the wrapped layer.
+
+        Parameters
+        ----------
+        **kwargs
+            Scalar conversion options passed to the wrapped layer.
+
+        Returns
+        -------
+        numpy.ndarray
+            Scalar fitness values.
+        """
         return self._wrapped_layer.to_scalar(**kwargs)
     
 # Modifier interfaces
 
 class BaseFitnessModifier(ABC):
-    """
-    Base class for objects that transform one fitness layer into
-    another. Implementors only need to override `apply`; validation and
-    naming defaults are handled here.
+    """Transform one fitness layer into another.
+
+    Parameters
+    ----------
+    name : str, optional
+        Explicit output-layer name.
     """
 
     # tuple of acceptable input dtypes reported by BaseFitnessLayer.dtype
@@ -1200,6 +1246,18 @@ class BaseFitnessModifier(ABC):
         self._custom_name = name
 
     def default_name(self, source_name: str) -> str:
+        """Return the default output-layer name.
+
+        Parameters
+        ----------
+        source_name : str
+            Source-layer name.
+
+        Returns
+        -------
+        str
+            Derived output-layer name.
+        """
         return f"{source_name}_{self.modifier_name}"
 
     def __call__(self, layer: BaseFitnessLayer, *, name: str | None = None) -> BaseFitnessLayer:
@@ -1213,9 +1271,19 @@ class BaseFitnessModifier(ABC):
 
     @abstractmethod
     def apply(self, layer: BaseFitnessLayer, *, name: str) -> BaseFitnessLayer:
-        """
-        Transform `layer` into a new BaseFitnessLayer. Implementations
-        must set the returned layer's name to `name`.
+        """Transform a fitness layer.
+
+        Parameters
+        ----------
+        layer : BaseFitnessLayer
+            Source fitness layer.
+        name : str
+            Output-layer name.
+
+        Returns
+        -------
+        BaseFitnessLayer
+            Transformed fitness layer.
         """
         raise NotImplementedError
 
@@ -1229,9 +1297,21 @@ def apply_fitness_modifier(layer: BaseFitnessLayer,
                            modifier: FitnessModifierLike,
                            *,
                            name: str | None = None) -> BaseFitnessLayer:
-    """
-    Run a modifier (object or simple callable) on a fitness layer and
-    return the transformed layer.
+    """Apply a modifier to a fitness layer.
+
+    Parameters
+    ----------
+    layer : BaseFitnessLayer
+        Source fitness layer.
+    modifier : BaseFitnessModifier or callable
+        Modifier object or callable to apply.
+    name : str, optional
+        Output-layer name override.
+
+    Returns
+    -------
+    BaseFitnessLayer
+        Transformed fitness layer.
     """
     if isinstance(modifier, BaseFitnessModifier):
         return modifier(layer, name=name)
@@ -1248,10 +1328,14 @@ def apply_fitness_modifier(layer: BaseFitnessLayer,
 
 
 class EntropyFitnessModifier(BaseFitnessModifier):
-    """
-    Convert a probabilistic categorical fitness layer into a numeric
-    fitness layer where each value is the entropy of the input
-    distribution.
+    """Convert category probabilities to entropy.
+
+    Parameters
+    ----------
+    base : float, optional
+        Logarithm base; use natural logarithms when omitted.
+    name : str, optional
+        Explicit output-layer name.
     """
 
     modifier_name = "entropy"
@@ -1271,6 +1355,20 @@ class EntropyFitnessModifier(BaseFitnessModifier):
         self.base = base
 
     def apply(self, layer: BaseFitnessLayer, *, name: str) -> BaseFitnessLayer:
+        """Return entropy values for a probabilistic layer.
+
+        Parameters
+        ----------
+        layer : BaseFitnessLayer
+            Probabilistic categorical source layer.
+        name : str
+            Output-layer name.
+
+        Returns
+        -------
+        BaseFitnessLayer
+            Numeric entropy layer.
+        """
         if not isinstance(layer, ProbabilisticCategoricalFitness):
             raise TypeError(
                 "EntropyFitnessModifier expects a ProbabilisticCategoricalFitness layer."
@@ -1290,10 +1388,14 @@ class EntropyFitnessModifier(BaseFitnessModifier):
 
 
 class ProbabilitySliceFitnessModifier(BaseFitnessModifier):
-    """
-    Extract the probability of a specific category/index from a
-    probabilistic categorical fitness layer and emit it as a numeric
-    fitness layer.
+    """Extract one category probability as numeric fitness.
+
+    Parameters
+    ----------
+    category : int or str
+        Category index or label to extract.
+    name : str, optional
+        Explicit output-layer name.
     """
 
     modifier_name = "probability"
@@ -1326,11 +1428,37 @@ class ProbabilitySliceFitnessModifier(BaseFitnessModifier):
         return layer.category_map[label], label
 
     def default_name(self, source_name: str) -> str:
+        """Return a name containing the selected category.
+
+        Parameters
+        ----------
+        source_name : str
+            Source-layer name.
+
+        Returns
+        -------
+        str
+            Derived output-layer name.
+        """
         if isinstance(self.category, str):
             return f"{source_name}_prob_{self.category}"
         return f"{source_name}_prob_{int(self.category)}"
 
     def apply(self, layer: BaseFitnessLayer, *, name: str) -> BaseFitnessLayer:
+        """Return the selected category probability.
+
+        Parameters
+        ----------
+        layer : BaseFitnessLayer
+            Probabilistic categorical source layer.
+        name : str
+            Output-layer name.
+
+        Returns
+        -------
+        BaseFitnessLayer
+            Numeric probability layer.
+        """
         if not isinstance(layer, ProbabilisticCategoricalFitness):
             raise TypeError(
                 "ProbabilitySliceFitnessModifier expects a ProbabilisticCategoricalFitness layer."
@@ -1361,8 +1489,18 @@ def _numeric_to_scalar(layer: BaseFitnessLayer,
 
 
 class GaussianNoiseFitnessModifier(BaseFitnessModifier):
-    """
-    Add Gaussian noise to a numeric fitness layer.
+    """Add Gaussian noise to numeric fitness values.
+
+    Parameters
+    ----------
+    scale : float, default=1.0
+        Noise standard deviation.
+    loc : float, default=0.0
+        Noise mean.
+    seed : int, optional
+        Random seed.
+    name : str, optional
+        Explicit output-layer name.
     """
 
     modifier_name = "gaussian_noise"
@@ -1394,6 +1532,20 @@ class GaussianNoiseFitnessModifier(BaseFitnessModifier):
         self.seed = seed
 
     def apply(self, layer: BaseFitnessLayer, *, name: str) -> BaseFitnessLayer:
+        """Add Gaussian noise to a numeric layer.
+
+        Parameters
+        ----------
+        layer : BaseFitnessLayer
+            Numeric source layer.
+        name : str
+            Output-layer name.
+
+        Returns
+        -------
+        BaseFitnessLayer
+            Noise-perturbed numeric layer.
+        """
         rng = np.random.default_rng(self.seed)
         meta = dict(layer.metadata) if getattr(layer, "metadata", None) else {}
         meta.update(
@@ -1426,8 +1578,20 @@ class GaussianNoiseFitnessModifier(BaseFitnessModifier):
 
 
 class GaussianDistributionFitnessModifier(BaseFitnessModifier):
-    """
-    Convert scalar values into Gaussian replicate distributions.
+    """Convert numeric values into Gaussian replicate distributions.
+
+    Parameters
+    ----------
+    scale : float
+        Distribution standard deviation.
+    reps : int, default=10
+        Replicates per sequence.
+    seed : int, optional
+        Random seed.
+    aggregate_func : callable, optional
+        Function used to reduce input replicates.
+    name : str, optional
+        Explicit output-layer name.
     """
 
     modifier_name = "gaussian_distribution"
@@ -1467,6 +1631,20 @@ class GaussianDistributionFitnessModifier(BaseFitnessModifier):
         self.aggregate_func = aggregate_func
 
     def apply(self, layer: BaseFitnessLayer, *, name: str) -> BaseFitnessLayer:
+        """Sample Gaussian replicates around numeric fitness values.
+
+        Parameters
+        ----------
+        layer : BaseFitnessLayer
+            Numeric source layer.
+        name : str
+            Output-layer name.
+
+        Returns
+        -------
+        BaseFitnessLayer
+            Numeric replicate layer.
+        """
         values = np.asarray(_numeric_to_scalar(layer, self.aggregate_func), dtype=float).ravel()
         rng = np.random.default_rng(self.seed)
         samples = rng.normal(loc=values[:, None], scale=self.scale, size=(len(values), self.reps))
@@ -1485,8 +1663,16 @@ class GaussianDistributionFitnessModifier(BaseFitnessModifier):
 
 
 class ResampleFitnessModifier(BaseFitnessModifier):
-    """
-    Resample values from a distribution defined by numeric replicates.
+    """Resample distributions estimated from numeric replicates.
+
+    Parameters
+    ----------
+    reps : int, default=1
+        Resampled replicates per sequence.
+    seed : int, optional
+        Random seed.
+    name : str, optional
+        Explicit output-layer name.
     """
 
     modifier_name = "resample"
@@ -1514,6 +1700,20 @@ class ResampleFitnessModifier(BaseFitnessModifier):
         self.seed = seed
 
     def apply(self, layer: BaseFitnessLayer, *, name: str) -> BaseFitnessLayer:
+        """Resample a numeric replicate layer.
+
+        Parameters
+        ----------
+        layer : BaseFitnessLayer
+            Numeric source layer.
+        name : str
+            Output-layer name.
+
+        Returns
+        -------
+        BaseFitnessLayer
+            Resampled numeric layer.
+        """
         if not isinstance(layer, NumericFitness):
             raise TypeError("ResampleFitnessModifier expects a NumericFitness layer.")
 
@@ -1546,8 +1746,18 @@ class ResampleFitnessModifier(BaseFitnessModifier):
 
 
 class ArithmeticFitnessModifier(BaseFitnessModifier):
-    """
-    Perform arithmetic operations between numeric fitness layers.
+    """Combine numeric fitness layers arithmetically.
+
+    Parameters
+    ----------
+    other_layers : BaseFitnessLayer or sequence of BaseFitnessLayer
+        Additional layers to combine with the source.
+    op : str or callable, default="add"
+        Arithmetic operation.
+    aggregate_func : callable, optional
+        Function used to reduce input replicates.
+    name : str, optional
+        Explicit output-layer name.
     """
 
     modifier_name = "arithmetic"
@@ -1604,6 +1814,20 @@ class ArithmeticFitnessModifier(BaseFitnessModifier):
         raise ValueError(f"Unsupported operation: {self.op!r}")
 
     def apply(self, layer: BaseFitnessLayer, *, name: str) -> BaseFitnessLayer:
+        """Combine the source with configured numeric layers.
+
+        Parameters
+        ----------
+        layer : BaseFitnessLayer
+            Numeric source layer.
+        name : str
+            Output-layer name.
+
+        Returns
+        -------
+        BaseFitnessLayer
+            Combined numeric layer.
+        """
         for other in self.other_layers:
             if other.dtype not in self.input_dtypes:
                 raise TypeError(

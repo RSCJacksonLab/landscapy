@@ -1,3 +1,5 @@
+"""Read and write deterministic portable fitness-landscape bundles."""
+
 from __future__ import annotations
 
 import hashlib

@@ -1,3 +1,5 @@
+"""Expose simulated fitness-landscape model factories."""
+
 from .nk import (
     create_gnk_landscape,
     create_nk_binary_landscape,

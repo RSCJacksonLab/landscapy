@@ -1,3 +1,5 @@
+"""Estimate fitness-landscape diffusion scales and uncertainty."""
+
 import networkx as nx
 import numpy as np
 from scipy.optimize import minimize_scalar

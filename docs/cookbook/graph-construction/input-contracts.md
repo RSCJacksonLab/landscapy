@@ -1,5 +1,7 @@
 # Graph-constructor input contract
 
+<!-- cookbook: reference -->
+
 Landscapy validates graph inputs before calling scikit-learn, FAISS, GUDHI, or
 Ray. Invalid public inputs therefore raise a `TypeError` or `ValueError` that
 names the Landscapy parameter rather than exposing backend-specific failures.
@@ -47,5 +49,13 @@ negative values, non-integral values, NaN, and negative infinity are invalid.
 Connectivity thresholds must be finite dimensionless amplitudes in `[0, 1]`.
 Evolutionary-diffusion temperature `tau` must be finite and strictly positive.
 The graph edge weight is evaluated from the symmetric kernel defined in the
-[reversible diffusion contract](diffusion_semantics.md); thresholds are applied
+[reversible diffusion contract](diffusion-semantics.md); thresholds are applied
 after that symmetrization.
+
+Embedding diffusion evaluates RBF affinities only on the symmetric union of
+kNN candidates. Buffered hits enter that affinity only when their exact
+distance ties the kth candidate. Finite powers are exact sparse products, with
+strict positive-integer `max_diffusion_nnz` and `max_diffusion_work` guards that
+raise before an infeasible intermediate allocation or multiplication. The
+stationary limit is likewise rejected before a componentwise quadratic block
+would exceed its budget.

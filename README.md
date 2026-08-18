@@ -27,35 +27,31 @@ with external plotting and visualisation tools.
 
 Landscapy supports Python 3.11 and 3.12.
 
+The default installation includes every user-facing feature in the `all` and
+`ml` dependency groups:
+
 ```bash
 python -m pip install landscapy
 ```
 
-Install the optional Parquet backend for native Parquet payloads in portable
-bundles:
+This installs the CLI, portable Parquet export, kNN and TDA constructors,
+analyses, CPU parallelism, alignment, phylogeny, CPU FAISS where a compatible
+wheel exists, protein language-model embeddings, and PyTorch Geometric export.
+Named extras remain accepted for compatibility with existing environment
+specifications, but the default dependency set already includes their
+user-facing capabilities. Development tools remain separate.
 
-```bash
-python -m pip install "landscapy[parquet]"
-```
-
-Optional backends are installed explicitly so the core package remains small:
-
-- `knn` for scikit-learn nearest-neighbour and diffusion graphs;
-- `tda` for topological graph construction;
-- `faiss` for accelerated nearest-neighbour search;
-- `alignment` for soft sequence alignment;
-- `phylogeny` for tree inference and ancestral reconstruction;
-- `parallel` for Ray-backed parallel execution;
-- `embeddings` for protein language-model embeddings;
-- `ml` for embeddings plus PyTorch Geometric export; and
-- `cli` for the command-line entry points.
-
-Install every optional backend with `python -m pip install "landscapy[all]"`.
+FAISS availability depends on upstream binary wheels. Landscapy installs
+`faiss-cpu` on supported Linux x86-64/ARM64, current macOS Intel/Apple Silicon,
+and Windows x86-64/ARM64 platforms. On other platforms, the comprehensive
+install keeps scikit-learn's portable BallTree backend available. Select it with
+`--backend balltree`. GPU FAISS is not supplied by `faiss-cpu`; when a compatible
+GPU build is unavailable, omit `--use-gpu` to use CPU FAISS or select BallTree.
 
 For development from a checkout:
 
 ```bash
-python -m pip install -e ".[dev,all]"
+python -m pip install -e ".[dev]"
 python -m pytest
 ```
 
@@ -78,6 +74,14 @@ weighted = calculate_ruggedness_dirichlet_energy(
     weight_key="weight",
 )
 ```
+
+For nearest-neighbour graphs, `embedding_domain="plm"` uses Euclidean
+distances in the supplied or computed PLM embeddings. The same domain-aware
+geometry is used by sparse kNN prefilters in diffusion constructors; see the
+[kNN embedding-domain contract](docs/cookbook/graph-construction/knn-embedding-domains.md).
+Embedding diffusion evaluates its RBF affinity only on that sparse candidate
+graph and uses resource-guarded exact sparse powers, avoiding dense `n x n`
+kernel construction.
 
 ## Portable landscape export
 
@@ -116,19 +120,23 @@ CSV export is also available through `to_csv_landscape` and
 ## Main modules
 
 The exact supported names and import namespaces are listed in the
-[0.9 public API contract](docs/public_api.md). CI validates that contract
+[0.9 public API contract](docs/cookbook/foundations/public-api.md). CI validates that contract
 against the exported objects and their NumPy-style docstrings.
 
 Graph constructors and weighted analyses follow the documented
-[edge distance and conductance contract](docs/edge_semantics.md). In
+[edge distance and conductance contract](docs/cookbook/graph-construction/edge-semantics.md). In
 particular, NetworkX `weight` is reserved for conductance and is never a raw
 distance. Constructor input and small-sample behavior are specified in the
-[graph-constructor contract](docs/graph_constructors.md), and diffusion graphs
-follow the [reversible diffusion contract](docs/diffusion_semantics.md).
+[graph-constructor contract](docs/cookbook/graph-construction/input-contracts.md), and diffusion graphs
+follow the [reversible diffusion contract](docs/cookbook/graph-construction/diffusion-semantics.md).
 Transition eigenmodes follow the documented
-[random-walk spectral contract](docs/spectral_operators.md). Effective
+[random-walk spectral contract](docs/cookbook/ruggedness/spectral-operators.md). Effective
 resistance and disconnected-category aggregation follow the
-[component-wise resistance contract](docs/resistance_distance.md).
+[component-wise resistance contract](docs/cookbook/topology/effective-resistance-contract.md).
+Publication-facing distribution, pairwise, and permutation inference follows
+the documented [statistical inference contract](docs/cookbook/statistics/inference-contract.md).
+Walsh, regression, ensemble, and reference-free epistasis methods follow the
+documented [epistasis domain and coefficient contract](docs/cookbook/epistasis/estimand-contracts.md).
 
 - `fitness_landscape.core`: sequences, fitness and annotation layers,
   undirected graph construction, and `FitnessLandscape`.
@@ -149,6 +157,41 @@ landscapy --help
 landscapy-evol --help
 landscapy-phylo --help
 ```
+
+Given an aligned protein FASTA file, a minimal portable kNN CLI workflow is:
+
+```bash
+landscapy knn-landscape \
+  --sequences sequences.fasta \
+  --output landscape.pkl \
+  --k 5 \
+  --backend balltree \
+  --embedding-domain ohe
+```
+
+The BallTree example works across supported operating systems and does not
+require a platform-specific FAISS build.
+
+## Cookbook
+
+The [worked-example cookbook](docs/cookbook/README.md) starts with installation
+and system requirements, then covers empirical tables, the layered
+`FitnessLandscape` data model, graph construction, topology, and analysis.
+Every recipe states its assumptions, expected outputs, and limits of
+interpretation, and its executable example is checked in CI.
+
+- [Installation and system requirements](docs/cookbook/installation/README.md)
+- [Foundations](docs/cookbook/foundations/README.md)
+- [Components, topology, and annotated groups](docs/cookbook/topology/README.md)
+- [Graph construction and representation choice](docs/cookbook/graph-construction/README.md)
+- [Saving, sharing, CLI use, and external visualization](docs/cookbook/io/README.md)
+- [Ruggedness, autocorrelation, and spectral analysis](docs/cookbook/ruggedness/README.md)
+- [Adaptive walks, accessibility, basins, optima, and neutral networks](docs/cookbook/accessibility/README.md)
+- [Epistasis on complete, sampled, and categorical landscapes](docs/cookbook/epistasis/README.md)
+- [Statistical inference and robustness analysis](docs/cookbook/statistics/README.md)
+- [Simulation models and known-answer validation](docs/cookbook/simulation/README.md)
+- [Validated exports for downstream machine learning](docs/cookbook/ml/README.md)
+- [Scaling, backend selection, and reproducible execution](docs/cookbook/scaling/README.md)
 
 ## Citation
 

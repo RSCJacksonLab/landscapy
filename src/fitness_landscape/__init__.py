@@ -1,3 +1,5 @@
+"""Construct and analyse graph-based fitness landscapes."""
+
 from importlib import import_module
 
 from . import core

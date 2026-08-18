@@ -1,3 +1,5 @@
+"""Provide sequence, alignment, distance, and graph utility functions."""
+
 from __future__ import annotations
 
 import math
@@ -35,6 +37,7 @@ def sanitize_alignment(aln: Alignment,
     """
     Sanitize an aligned protein FASTA by enforcing only canonical 20 amino acids
     and the gap character. Any illegal or unknown symbol is replaced with a gap.
+    Duplicate sequence identifiers receive a numeric suffix.
 
     Parameters
     ----------
@@ -44,8 +47,6 @@ def sanitize_alignment(aln: Alignment,
         List of allowed amino acids. Defaults to the canonical 20.
     gap_char : str, default='-'
         The gap character to enforce. '.' is treated as a gap.
-
-    Ensures sequence IDs are unique by appending a numeric suffix when duplicates are found.
 
     Returns
     -------
@@ -124,7 +125,6 @@ def get_landscape_dist_mat(landscape: 'FitnessLandscape',
     ----------
     landscape : FitnessLandscape
         The fitness landscape to analyze.
-.
     weighted : bool, default=`False`
         Whether to use weighted edges in the graph representation.
 
@@ -269,7 +269,7 @@ def _compute_embeddings_from_sequences(
     if device is None:
         torch = require_optional(
             "torch",
-            extra="ml",
+            extra="embeddings",
             purpose="protein language-model embeddings",
         )
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -278,40 +278,63 @@ def _compute_embeddings_from_sequences(
     if embedding_mode not in {"hard", "soft"}:
         raise ValueError("embedding_mode must be 'hard' or 'soft'.")
 
+    from .embedding import ESMEmbedder
+
     if embedding_mode == "hard":
-        from .embedding.hard_embedding import ESMEmbedder as HardESMEmbedder
-
-        def _to_text(seq: BaseNumpySequence) -> str:
-            symbols = []
-            for sym in seq.to_array():
-                token = str(sym)
-                symbols.append("-" if token == "gap" else token)
-            return "".join(symbols)
-
-        embedder = HardESMEmbedder(
+        embedder = ESMEmbedder(
             model_name=model_name,
             device=device,
             batch_size=batch_size,
         )
-        sequences_to_embed = [_to_text(seq) for seq in sequences]
-        return embedder.embed_relaxed_seqs(sequences_to_embed, batch_size=batch_size)
+        sequences_to_embed = []
+        for sequence in sequences:
+            tokens = [
+                "-" if str(symbol).lower() == "gap" else str(symbol)
+                for symbol in sequence.to_array()
+            ]
+            sequences_to_embed.append("".join(tokens))
+        return embedder.embed_sequences(sequences_to_embed, batch_size=batch_size)
 
-    from .embedding.soft_embedding import ESMEmbedder as SoftESMEmbedder
-
-    ohe_arrays = []
+    relaxed_arrays = []
+    relaxed_alphabets = []
     for seq in sequences:
         if isinstance(seq, SoftSequence):
-            # For SoftSequence, the posterior is the relaxed encoding
-            ohe_arrays.append(seq.posterior)
+            relaxed_arrays.append(np.asarray(seq.posterior, dtype=np.float32))
         else:
-            ohe_arrays.append(seq.to_one_hot())
+            relaxed_arrays.append(np.asarray(seq.to_one_hot(), dtype=np.float32))
+        normalized_alphabet = [
+            "-" if str(symbol).lower() == "gap" else str(symbol).upper()
+            for symbol in seq.alphabet
+        ]
+        if len(set(normalized_alphabet)) != len(normalized_alphabet):
+            raise ValueError("sequence alphabet is ambiguous after gap normalization")
+        relaxed_alphabets.append(normalized_alphabet)
 
-    embedder = SoftESMEmbedder(
+    shared_alphabet = []
+    for alphabet in relaxed_alphabets:
+        for symbol in alphabet:
+            if symbol not in shared_alphabet:
+                shared_alphabet.append(symbol)
+
+    remapped_arrays = []
+    for array, alphabet in zip(relaxed_arrays, relaxed_alphabets):
+        if array.ndim != 2 or array.shape[1] != len(alphabet):
+            raise ValueError("sequence encoding width must match its alphabet")
+        remapped = np.zeros(
+            (array.shape[0], len(shared_alphabet)),
+            dtype=np.float32,
+        )
+        for source_index, symbol in enumerate(alphabet):
+            remapped[:, shared_alphabet.index(symbol)] = array[:, source_index]
+        remapped_arrays.append(remapped)
+
+    embedder = ESMEmbedder(
         model_name=model_name,
         device=device,
+        alphabet=shared_alphabet or None,
         batch_size=batch_size,
     )
-    return embedder.embed_relaxed_seqs(ohe_arrays, batch_size=batch_size)
+    return embedder.embed_relaxed_seqs(remapped_arrays, batch_size=batch_size)
 
 def make_latent_geometric_graph_connected(n_latent: int = 120,
                                           d_target: int = 4,
@@ -397,12 +420,14 @@ def sample_observed_induced_connected(G_lat: nx.Graph,
         The proportion of edges to keep in the induced graph. 
     seed : int, default=`None`
         The random state seed.
+    return_graph : bool, default=False
+        Return a graph when the input is a landscape instead of rebuilding a
+        sub-landscape.
 
     Returns
     -------
-    G_obs : nx.Graph
-        The connected induced graph with edge weights preserved from
-        the latent graph. 
+    networkx.Graph or FitnessLandscape
+        Connected induced graph, or a rebuilt sub-landscape when requested.
     """    
     # Dependency injection is the only option.. 
     from .core import FitnessLandscape
@@ -587,22 +612,24 @@ def calculate_gapped_soft_score(aligned_seq1: np.ndarray,
 
     Parameters
     ----------
-    p_seq1 : np.ndarray
+    aligned_seq1 : np.ndarray
         The first soft sequence, an (L, alphabet_size) array of
         probabilities. Rows must sum to 1.
 
-    p_seq2 : np.ndarray
+    aligned_seq2 : np.ndarray
         The second soft sequence, an (L, alphabet_size) array of
         probabilities. Rows must sum to 1.
 
     q : np.ndarray
         The replacement matrix, an (alphabet_size, alphabet_size)
         array of scores. Note that q must match the sequence alphabet.
+    gap_penalty : float, default=-2.0
+        Score applied to positions containing one gap.
 
     Returns
     -------
     total_score : float
-    The total alignment score.
+        The total alignment score.
     """
 
     if aligned_seq1.shape != aligned_seq2.shape:
@@ -642,6 +669,11 @@ def get_ohe_seq(sequence: Union[str, np.ndarray, torch.Tensor],
     
     alphabet : List, default=`PROT_20`
         The alphabet. Default is the alphabetical.
+
+    Returns
+    -------
+    str
+        Decoded sequence string.
     """
     if isinstance(sequence, str):
         return sequence
@@ -665,9 +697,17 @@ def get_ohe_seq(sequence: Union[str, np.ndarray, torch.Tensor],
 
 
 def sequence_to_text(seq: BaseNumpySequence) -> str:
-    """
-    Convert a BaseNumpySequence (or compatible sequence proxy) to a
-    plain amino-acid string using '-' for gaps.
+    """Convert a sequence proxy to text.
+
+    Parameters
+    ----------
+    seq : BaseNumpySequence
+        Sequence to convert.
+
+    Returns
+    -------
+    str
+        Sequence text using ``-`` for gaps.
     """
     tokens = []
     for token in seq.to_array():
@@ -679,10 +719,19 @@ def sequence_to_text(seq: BaseNumpySequence) -> str:
 
 
 def string_to_sequence(seq_str: str, *, sequence_id: str | None = None) -> BaseNumpySequence:
-    """
-    Create a BaseNumpySequence from an amino-acid string (using '-'
-    for gaps). Preserves whether the sequence contains gaps when
-    constructing the alphabet.
+    """Create a sequence from amino-acid text.
+
+    Parameters
+    ----------
+    seq_str : str
+        Sequence text using ``-`` for gaps.
+    sequence_id : str, optional
+        Stable sequence identifier.
+
+    Returns
+    -------
+    BaseNumpySequence
+        Constructed sequence with a gap-aware alphabet.
     """
     chars: list[str] = []
     has_gap = False
@@ -697,7 +746,20 @@ def string_to_sequence(seq_str: str, *, sequence_id: str | None = None) -> BaseN
 
 
 def hamming_distance_str(a: str, b: str) -> int:
-    """Compute the Hamming distance between two equal-length strings."""
+    """Compute the Hamming distance between equal-length strings.
+
+    Parameters
+    ----------
+    a : str
+        First string.
+    b : str
+        Second string.
+
+    Returns
+    -------
+    int
+        Number of differing positions.
+    """
     if len(a) != len(b):
         raise ValueError("Sequences must have the same length to compute Hamming distance.")
     return sum(ch1 != ch2 for ch1, ch2 in zip(a, b))
@@ -711,24 +773,59 @@ def resolve_plm_embedder(
     device: str | None,
     batch_size: int,
 ):
-    """
-    Select the appropriate PLM embedder (hard tokens vs relaxed) based
-    on the requested embedding_mode and whether any sequences are soft.
+    """Select a hard- or soft-token protein language-model embedder.
+
+    Parameters
+    ----------
+    sequences : sequence of BaseNumpySequence
+        Sequences used to resolve automatic embedding mode and alphabet.
+    embedding_mode : {'auto', 'hard', 'soft'}
+        Requested token representation.
+    model_name : str
+        Protein language-model identifier.
+    device : str or None
+        Computation device.
+    batch_size : int
+        Embedding batch size.
+
+    Returns
+    -------
+    embedder : ESMEmbedder
+        Configured embedder.
+    mode : str
+        Resolved embedding mode.
     """
     mode = embedding_mode.lower()
     if mode == "auto":
         mode = "soft" if any(isinstance(seq, SoftSequence) for seq in sequences) else "hard"
 
-    if mode == "soft":
-        from .embedding.soft_embedding import ESMEmbedder as SoftESMEmbedder
-
-        embedder = SoftESMEmbedder(model_name=model_name, device=device, batch_size=batch_size)
-    elif mode == "hard":
-        from .embedding.hard_embedding import ESMEmbedder as HardESMEmbedder
-
-        embedder = HardESMEmbedder(model_name=model_name, device=device, batch_size=batch_size)
-    else:
+    if mode not in {"soft", "hard"}:
         raise ValueError("embedding_mode must be 'auto', 'hard', or 'soft'.")
+    from .embedding import ESMEmbedder
+
+    alphabet = None
+    if mode == "soft" and sequences:
+        normalized_alphabets = [
+            [
+                "-" if str(symbol).lower() == "gap" else str(symbol).upper()
+                for symbol in sequence.alphabet
+            ]
+            for sequence in sequences
+        ]
+        alphabet = normalized_alphabets[0]
+        if any(
+            sequence_alphabet != alphabet
+            for sequence_alphabet in normalized_alphabets[1:]
+        ):
+            raise ValueError(
+                "soft sequences must share one ordered alphabet when resolving an embedder"
+            )
+    embedder = ESMEmbedder(
+        model_name=model_name,
+        device=device,
+        alphabet=alphabet,
+        batch_size=batch_size,
+    )
     return embedder, mode
 
 def alignment_to_base_numpy_sequences(alignment: Alignment,
@@ -801,6 +898,9 @@ def fasta_to_prot20_sequences(filepath: str | Path,
     ----------
     filepath : str | Path
         Path to the FASTA file.
+
+    strict : bool, default=True
+        Reject non-canonical residues instead of deleting them.
 
     return_gapped : bool, default=`False`
         When True, also return the sanitised gapped alignment as
@@ -1066,6 +1166,11 @@ def iter_moving_window_alignment(alignment: Alignment,
         Number of tips (sequences) per sub-alignment.
     overlap : int
         Number of tips to overlap between consecutive windows.
+
+    Yields
+    ------
+    Alignment
+        Moving-window sub-alignment with all sites preserved.
     """
     if window_size <= overlap:
         raise ValueError("Window size must be greater than the overlap.")
@@ -1127,6 +1232,17 @@ def iter_random_subalignment(alignment: Alignment,
     rng : numpy.random.Generator, optional
         Random number generator to use. If ``None``, a default generator
         (``np.random.default_rng()``) is used.
+    seed_fraction : float, default=0.1
+        Fraction of tips fixed across samples when seeding is enabled.
+    seed_count : int, optional
+        Explicit number of tips fixed across samples.
+    force_seed : bool, default=True
+        Reuse a sampled set of seed tips in every sub-alignment.
+
+    Yields
+    ------
+    Alignment
+        Randomly sampled sub-alignment.
     """
     names = list(alignment.names)
     n_tips = len(names)
@@ -1178,6 +1294,34 @@ def iter_random_subalignment(alignment: Alignment,
 
 @dataclass
 class HammingCheckResult:
+    """Store diagnostics for a complete binary Hamming landscape.
+
+    Parameters
+    ----------
+    is_full_hamming : bool
+        Whether all sequence and graph checks pass.
+    L : int
+        Sequence length.
+    n : int
+        Sequence count.
+    is_binary : bool
+        Whether all sequence values are binary.
+    all_same_length : bool
+        Whether all sequences have length ``L``.
+    has_all_genotypes : bool
+        Whether every binary genotype is present.
+    no_duplicates : bool
+        Whether sequence genotypes are unique.
+    graph_is_hypercube : bool or None
+        Whether the graph matches the binary hypercube when checked.
+    reason : str or None
+        Diagnostic failure reason.
+    lex_perm : numpy.ndarray or None
+        Permutation to lexicographic binary order.
+    codes : numpy.ndarray or None
+        Integer code for each sequence.
+    """
+
     is_full_hamming: bool
     L: int
     n: int
@@ -1345,7 +1489,7 @@ def check_full_hamming(landscape: 'FitnessLandscape',
     Returns
     -------
     HammingCheckResult
-        a HammingCheckResult with diagnostics and the permutation to
+        A result with diagnostics and the permutation to
         lex order.
     """
     n = len(landscape.sequences)

@@ -1,3 +1,5 @@
+"""Construct Rough Mount Fuji fitness landscapes."""
+
 import numpy as np
 from typing import Optional, List
 from ..core.landscape import FitnessLandscape

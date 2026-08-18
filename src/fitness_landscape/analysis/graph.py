@@ -1,3 +1,5 @@
+"""Compute graph topology, community, resistance, and category summaries."""
+
 from networkx.algorithms.community import louvain_communities
 from networkx.algorithms.community.quality import modularity
 import numpy as np
@@ -115,20 +117,20 @@ def annotate_louvain_communities(
 
     Parameters
     ----------
-    landscape :
+    landscape : FitnessLandscape
         Target landscape with an instantiated graph.
-    annotation_name :
+    annotation_name : str
         Name for the annotation layer that will store community metadata.
     weight : str or None, default="auto"
         Conductance attribute. ``"auto"`` resolves constructor metadata;
         ``None`` treats the graph as unweighted.
-    resolution :
+    resolution : float, default=1.0
         Resolution parameter passed to :func:`networkx.algorithms.community.louvain_communities`.
-    threshold :
+    threshold : float, default=1e-7
         Convergence threshold for the Louvain optimiser.
-    seed :
+    seed : int, numpy.random.Generator, numpy.random.RandomState, or None
         Optional seed controlling the stochastic parts of the algorithm.
-    overwrite :
+    overwrite : bool, default=False
         Replace an existing annotation layer with ``annotation_name`` if present.
 
     Returns

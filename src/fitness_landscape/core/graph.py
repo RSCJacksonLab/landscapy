@@ -1,3 +1,5 @@
+"""Construct sequence-aware undirected fitness-landscape graphs."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -27,18 +29,24 @@ _NEIGHBOUR_BACKENDS = {"auto", "faiss", "balltree"}
 _FAISS_INDEX_TYPES = {"flat", "hnsw", "ivf"}
 _FAISS_METRICS = {"ip", "l2"}
 _TIE_POLICIES = {"all", "min_index", "random"}
+_EMBEDDING_KNN_DOMAINS = {"plm", "composition"}
+_DEFAULT_MAX_DIFFUSION_NNZ = 50_000_000
+_DEFAULT_MAX_DIFFUSION_WORK = 1_000_000_000
 
 
 def _validate_sequence_collection(
     sequences: Sequence[BaseNumpySequence],
     *,
     name: str = "sequences",
+    require_aligned: bool = True,
 ) -> tuple[int, int]:
     """Validate graph-constructor sequence structure.
 
     Empty collections are supported and return ``(0, 0)``. Non-empty
-    collections must contain aligned, non-empty ``BaseNumpySequence``
-    instances.
+    collections must contain non-empty ``BaseNumpySequence`` instances and,
+    by default, have a common aligned length. Embedding-space graph searches
+    may set ``require_aligned=False`` because their geometry is independent of
+    raw sequence coordinates.
     """
 
     if sequences is None:
@@ -61,11 +69,11 @@ def _validate_sequence_collection(
     lengths = [len(sequence) for sequence in sequences]
     if any(length <= 0 for length in lengths):
         raise ValueError(f"`{name}` entries must be non-empty.")
-    if len(set(lengths)) != 1:
+    if require_aligned and len(set(lengths)) != 1:
         raise ValueError(
             f"`{name}` entries must have a uniform aligned length; found {lengths}."
         )
-    return n_sequences, lengths[0]
+    return n_sequences, lengths[0] if require_aligned else 0
 
 
 def _validate_embedding_matrix(
@@ -217,6 +225,49 @@ def _validate_connectivity_threshold(value: Any) -> float:
     return threshold
 
 
+def _validate_diffusion_budget(value: Any, *, name: str) -> int:
+    """Return a positive exact-diffusion resource budget."""
+
+    return _validate_integer(value, name=name, minimum=1)
+
+
+def _csr_storage_bytes(n_rows: int, nnz: int) -> int:
+    """Conservatively estimate bytes for one float64 CSR matrix."""
+
+    # SciPy normally uses int32 column indices but may promote to int64 for
+    # very large matrices. Count int64 indices and indptr entries so the
+    # estimate remains conservative across platforms.
+    return int(nnz) * (np.dtype(np.float64).itemsize + np.dtype(np.int64).itemsize) + (
+        int(n_rows) + 1
+    ) * np.dtype(np.int64).itemsize
+
+
+def _raise_diffusion_budget_error(
+    *,
+    stage: str,
+    quantity: str,
+    estimate: int,
+    limit: int,
+) -> None:
+    """Raise an actionable error before exact sparse diffusion exceeds budget."""
+
+    if quantity == "nonzeros":
+        memory = _csr_storage_bytes(0, estimate)
+        detail = f"{estimate:,} nonzeros (at least {memory / 2**30:.2f} GiB per CSR matrix)"
+        option = "max_diffusion_nnz"
+    else:
+        detail = f"{estimate:,} scalar products"
+        option = "max_diffusion_work"
+    raise MemoryError(
+        f"Exact sparse diffusion at {stage} requires {detail}, exceeding "
+        f"`{option}={limit:,}`. Reduce `k`, `t`, or `tiebuffer`, partition the "
+        f"landscape, or deliberately raise `{option}` only after provisioning "
+        "the corresponding memory and compute resources. "
+        "`connectivity_threshold` is applied after exact diffusion and cannot "
+        "reduce intermediate resource use."
+    )
+
+
 def _force_disable_hamming_edge_computation(_requested: bool) -> bool:
     """Normalize the legacy Hamming-edge annotation flag.
 
@@ -255,38 +306,54 @@ def _attach_knn_edge_semantics(
     *,
     sequence_length: int,
     constructor: str,
+    distance_geometry: Literal["hamming", "euclidean"] = "hamming",
 ) -> None:
-    """Attach canonical Hamming kNN distances, affinities, and conductances."""
+    """Attach canonical kNN distances, affinities, and conductances."""
     length = int(sequence_length)
-    if length <= 0 and G.number_of_edges() > 0:
+    if distance_geometry == "hamming" and length <= 0 and G.number_of_edges() > 0:
         raise ValueError("kNN edge semantics require sequences of positive length.")
+    if distance_geometry not in {"hamming", "euclidean"}:
+        raise ValueError(
+            "`distance_geometry` must be either 'hamming' or 'euclidean'."
+        )
 
     attributes = {}
     for u, v, data in G.edges(data=True):
         distance = float(data["distance"])
-        normalized = distance / length if length > 0 else 0.0
-        affinity = _distance_affinity(normalized)
-        attributes[(u, v)] = {
+        affinity_distance = (
+            distance / length
+            if distance_geometry == "hamming" and length > 0
+            else distance
+        )
+        affinity = _distance_affinity(affinity_distance)
+        edge_attributes = {
             "distance": distance,
-            "normalized_distance": normalized,
             "affinity": affinity,
             "weight": affinity,
             "knn_weight": distance,
             "sim": affinity,
         }
+        if distance_geometry == "hamming":
+            edge_attributes["normalized_distance"] = affinity_distance
+        attributes[(u, v)] = edge_attributes
     if attributes:
         nx.set_edge_attributes(G, attributes)
 
+    is_hamming = distance_geometry == "hamming"
     declare_edge_semantics(
         G,
         constructor=constructor,
         distance_key="distance",
-        distance_units="hamming_count",
-        normalized_distance_key="normalized_distance",
+        distance_units="hamming_count" if is_hamming else "embedding_euclidean",
+        normalized_distance_key="normalized_distance" if is_hamming else None,
         affinity_key="affinity",
         conductance_key="weight",
         legacy_aliases={"knn_weight": "distance", "sim": "affinity"},
-        notes="Conductance is exp(-normalized Hamming distance).",
+        notes=(
+            "Conductance is exp(-normalized Hamming distance)."
+            if is_hamming
+            else "Conductance is exp(-Euclidean embedding distance)."
+        ),
     )
 
 
@@ -337,6 +404,56 @@ def _attach_diffusion_metadata(
         "lazy_probability": 0.5,
         "threshold": threshold,
         "threshold_units": "dimensionless_diffusion_amplitude",
+    }
+
+
+def _attach_sparse_diffusion_construction_metadata(
+    graph: nx.Graph,
+    *,
+    requested_k: int,
+    effective_k: int,
+    tiebuffer: int,
+    backend: str,
+    index_type: str,
+    max_nnz: int,
+    max_work: int,
+    affinity_nnz: int,
+    transition_nnz: int,
+    kernel_nnz: int,
+    directed_candidates: int,
+    diffusion_work: int,
+) -> None:
+    """Record the sparse scientific-kernel and resource-control contract."""
+
+    largest_matrix_nnz = max(affinity_nnz, transition_nnz, kernel_nnz)
+    graph.graph["diffusion_construction"] = {
+        "affinity_source": "symmetric_union_knn_rbf",
+        "storage": "csr",
+        "diffusion_accuracy": "exact",
+        "requested_k": int(requested_k),
+        "effective_k": int(effective_k),
+        "tiebuffer": int(tiebuffer),
+        "tie_rule": "all_returned_candidates_at_exact_kth_distance",
+        "candidate_backend_approximate": bool(
+            backend == "faiss" and index_type in {"hnsw", "ivf"}
+        ),
+        "candidate_backend": str(backend),
+        "candidate_index_type": str(index_type) if backend == "faiss" else None,
+        "directed_candidates": int(directed_candidates),
+        "affinity_nnz": int(affinity_nnz),
+        "transition_nnz": int(transition_nnz),
+        "kernel_nnz": int(kernel_nnz),
+        "estimated_scalar_products": int(diffusion_work),
+        "max_diffusion_nnz": int(max_nnz),
+        "max_diffusion_work": int(max_work),
+        "largest_matrix_estimated_bytes": _csr_storage_bytes(
+            graph.number_of_nodes(), largest_matrix_nnz
+        ),
+        # Scaling the largest CSR estimate by four accounts conservatively for
+        # the affinity, transition, current power, and product/kernel matrices
+        # that can coexist during one exact multiplication.
+        "estimated_peak_working_bytes": 4
+        * _csr_storage_bytes(graph.number_of_nodes(), largest_matrix_nnz),
     }
 
 
@@ -454,6 +571,105 @@ def _reversible_lazy_transition(
     return transition, stationary, component_labels
 
 
+def _sparse_product_requirements(
+    left: csr_matrix,
+    right: csr_matrix,
+    *,
+    max_nnz: int,
+    max_work: int,
+    stage: str,
+    work_already: int = 0,
+) -> tuple[int, int]:
+    """Count exact product structure and arithmetic before multiplication.
+
+    The marker array is O(number of columns), while traversal stops as soon as
+    either public feasibility budget is exceeded. This prevents SciPy from
+    allocating an unexpectedly dense sparse-product result merely to discover
+    that the exact request is infeasible.
+    """
+
+    left = left.tocsr()
+    right = right.tocsr()
+    if left.shape[1] != right.shape[0]:
+        raise ValueError("Sparse diffusion product matrices are misaligned.")
+
+    n_rows, n_cols = left.shape[0], right.shape[1]
+    marker = np.full(n_cols, -1, dtype=np.int64)
+    output_nnz = 0
+    scalar_products = 0
+    right_row_nnz = np.diff(right.indptr)
+
+    for row in range(n_rows):
+        intermediates = left.indices[left.indptr[row] : left.indptr[row + 1]]
+        row_work = int(right_row_nnz[intermediates].sum(dtype=np.int64))
+        scalar_products += row_work
+        if work_already + scalar_products > max_work:
+            _raise_diffusion_budget_error(
+                stage=stage,
+                quantity="work",
+                estimate=work_already + scalar_products,
+                limit=max_work,
+            )
+
+        row_nnz = 0
+        for middle in intermediates:
+            columns = right.indices[
+                right.indptr[middle] : right.indptr[middle + 1]
+            ]
+            unseen = marker[columns] != row
+            if np.any(unseen):
+                new_columns = columns[unseen]
+                marker[new_columns] = row
+                row_nnz += int(new_columns.size)
+                if row_nnz == n_cols:
+                    break
+
+        output_nnz += row_nnz
+        if output_nnz > max_nnz:
+            _raise_diffusion_budget_error(
+                stage=stage,
+                quantity="nonzeros",
+                estimate=output_nnz,
+                limit=max_nnz,
+            )
+
+    return output_nnz, scalar_products
+
+
+def _checked_sparse_matrix_power(
+    transition: csr_matrix,
+    power: int,
+    *,
+    max_nnz: int,
+    max_work: int,
+) -> tuple[csr_matrix, int]:
+    """Compute an exact sparse power after per-step structure/work checks."""
+
+    n_states = transition.shape[0]
+    powered = sparse.eye(n_states, format="csr", dtype=np.float64)
+    total_work = 0
+    for step in range(1, power + 1):
+        _, step_work = _sparse_product_requirements(
+            powered,
+            transition,
+            max_nnz=max_nnz,
+            max_work=max_work,
+            stage=f"power step {step}/{power}",
+            work_already=total_work,
+        )
+        total_work += step_work
+        powered = (powered @ transition).tocsr()
+        powered.eliminate_zeros()
+        if powered.nnz > max_nnz:  # defensive against unexpected SciPy structure
+            _raise_diffusion_budget_error(
+                stage=f"power step {step}/{power}",
+                quantity="nonzeros",
+                estimate=powered.nnz,
+                limit=max_nnz,
+            )
+    return powered, total_work
+
+
 def _reversible_diffusion_kernel(
     transition: np.ndarray | sparse.spmatrix,
     stationary: np.ndarray,
@@ -461,6 +677,9 @@ def _reversible_diffusion_kernel(
     *,
     stationary_limit: bool,
     power: int | None,
+    max_nnz: int | None = None,
+    max_work: int | None = None,
+    _diagnostics: dict[str, int] | None = None,
 ) -> np.ndarray | csr_matrix:
     """Return a symmetric stationary-measure diffusion kernel.
 
@@ -482,6 +701,47 @@ def _reversible_diffusion_kernel(
         raise ValueError("Stationary probabilities must be positive and sum to one.")
 
     if stationary_limit:
+        if sparse.issparse(transition) and max_nnz is not None:
+            component_sizes = np.bincount(labels)
+            required_nnz = sum(int(size) ** 2 for size in component_sizes)
+            if required_nnz > max_nnz:
+                _raise_diffusion_budget_error(
+                    stage="componentwise stationary limit",
+                    quantity="nonzeros",
+                    estimate=required_nnz,
+                    limit=max_nnz,
+                )
+            if max_work is not None and required_nnz > max_work:
+                _raise_diffusion_budget_error(
+                    stage="componentwise stationary limit",
+                    quantity="work",
+                    estimate=required_nnz,
+                    limit=max_work,
+                )
+            if _diagnostics is not None:
+                _diagnostics["estimated_scalar_products"] = required_nnz
+
+            rows = np.empty(required_nnz, dtype=np.int64)
+            cols = np.empty(required_nnz, dtype=np.int64)
+            values = np.empty(required_nnz, dtype=np.float64)
+            cursor = 0
+            component_order = np.argsort(labels, kind="stable")
+            offsets = np.concatenate(([0], np.cumsum(component_sizes)))
+            for start, stop in zip(offsets[:-1], offsets[1:]):
+                indices = component_order[start:stop]
+                mass = float(probabilities[indices].sum())
+                root = np.sqrt(probabilities[indices])
+                for local_row, row in enumerate(indices):
+                    next_cursor = cursor + indices.size
+                    rows[cursor:next_cursor] = row
+                    cols[cursor:next_cursor] = indices
+                    values[cursor:next_cursor] = root[local_row] * root / mass
+                    cursor = next_cursor
+            return coo_matrix(
+                (values, (rows, cols)),
+                shape=(n_states, n_states),
+            ).tocsr()
+
         kernel = np.zeros((n_states, n_states), dtype=np.float64)
         for component in np.unique(labels):
             indices = np.flatnonzero(labels == component)
@@ -495,9 +755,21 @@ def _reversible_diffusion_kernel(
     root = np.sqrt(probabilities)
     inverse_root = 1.0 / root
     if sparse.issparse(transition):
-        powered = sparse.eye(n_states, format="csr")
-        for _ in range(power):
-            powered = powered @ transition
+        if max_nnz is not None:
+            if max_work is None:
+                raise ValueError("`max_work` is required when `max_nnz` is set.")
+            powered, total_work = _checked_sparse_matrix_power(
+                transition.tocsr(),
+                power,
+                max_nnz=max_nnz,
+                max_work=max_work,
+            )
+            if _diagnostics is not None:
+                _diagnostics["estimated_scalar_products"] = total_work
+        else:
+            powered = sparse.eye(n_states, format="csr")
+            for _ in range(power):
+                powered = powered @ transition
         kernel = sparse.diags(root) @ powered @ sparse.diags(inverse_root)
         kernel = (0.5 * (kernel + kernel.T)).tocsr()
         if kernel.data.size:
@@ -528,6 +800,105 @@ def _threshold_undirected_kernel(
     mask = np.triu(values > threshold, k=1)
     rows, cols = np.where(mask)
     return rows, cols, values[rows, cols]
+
+
+def _select_diffusion_knn_candidates(
+    search_features: np.ndarray,
+    neighbour_indices: np.ndarray,
+    *,
+    k: int,
+    distance_geometry: Literal["hamming", "euclidean"],
+) -> list[np.ndarray]:
+    """Rerank backend candidates and retain all observed ties at rank ``k``.
+
+    Approximate backends define the candidate pool, but distances and ties are
+    evaluated exactly in the declared search geometry. ``tiebuffer`` affects
+    the scientific graph only when the extra returned candidates tie the kth
+    candidate; it cannot recover neighbours omitted by an approximate index.
+    """
+
+    features = np.asarray(search_features)
+    selected: list[np.ndarray] = []
+    for row, raw_candidates in enumerate(np.asarray(neighbour_indices)):
+        candidates = np.asarray(raw_candidates, dtype=np.int64)
+        candidates = candidates[(candidates >= 0) & (candidates != row)]
+        if candidates.size:
+            candidates = np.unique(candidates)
+        if candidates.size == 0:
+            selected.append(np.empty(0, dtype=np.int64))
+            continue
+
+        if distance_geometry == "hamming":
+            distances = np.mean(features[candidates] != features[row], axis=1)
+        else:
+            deltas = features[candidates] - features[row]
+            distances = np.linalg.norm(deltas, axis=1)
+        order = np.argsort(distances, kind="stable")
+        candidates = candidates[order]
+        distances = distances[order]
+        cutoff = distances[min(k, candidates.size) - 1]
+        tolerance = np.finfo(np.float64).eps * max(1.0, abs(float(cutoff))) * 8.0
+        selected.append(candidates[distances <= cutoff + tolerance])
+    return selected
+
+
+def _sparse_rbf_affinity_from_candidates(
+    embeddings: np.ndarray,
+    candidates_by_row: Sequence[np.ndarray],
+    *,
+    gamma: float,
+    max_nnz: int,
+) -> tuple[csr_matrix, int]:
+    """Construct the symmetric union-kNN RBF affinity without densification."""
+
+    n_points = embeddings.shape[0]
+    directed_nnz = int(sum(len(candidates) for candidates in candidates_by_row))
+    symmetric_bound = min(n_points * n_points, 2 * directed_nnz)
+    transition_bound = min(n_points * n_points, symmetric_bound + n_points)
+    if transition_bound > max_nnz:
+        _raise_diffusion_budget_error(
+            stage="kNN affinity and lazy transition",
+            quantity="nonzeros",
+            estimate=transition_bound,
+            limit=max_nnz,
+        )
+
+    row_parts = []
+    col_parts = []
+    value_parts = []
+    for row, candidates in enumerate(candidates_by_row):
+        candidates = np.asarray(candidates, dtype=np.int64)
+        if candidates.size == 0:
+            continue
+        deltas = embeddings[candidates] - embeddings[row]
+        squared_distances = np.einsum("ij,ij->i", deltas, deltas)
+        values = np.exp(-float(gamma) * squared_distances)
+        keep = np.isfinite(values) & (values > 0.0)
+        if np.any(keep):
+            row_parts.append(np.full(np.count_nonzero(keep), row, dtype=np.int64))
+            col_parts.append(candidates[keep])
+            value_parts.append(values[keep])
+
+    if not row_parts:
+        return csr_matrix((n_points, n_points), dtype=np.float64), directed_nnz
+    directed = coo_matrix(
+        (
+            np.concatenate(value_parts),
+            (np.concatenate(row_parts), np.concatenate(col_parts)),
+        ),
+        shape=(n_points, n_points),
+    ).tocsr()
+    affinity = directed.maximum(directed.T).tocsr()
+    affinity.setdiag(0.0)
+    affinity.eliminate_zeros()
+    if affinity.nnz + n_points > max_nnz:
+        _raise_diffusion_budget_error(
+            stage="kNN affinity and lazy transition",
+            quantity="nonzeros",
+            estimate=affinity.nnz + n_points,
+            limit=max_nnz,
+        )
+    return affinity, directed_nnz
 
 
 def _symmetric_affinity_from_scores(scores: csr_matrix, *, tau: float) -> csr_matrix:
@@ -638,6 +1009,8 @@ def create_hamming_graph_binary(sequences: list[BinarySequence], *, _compute_ham
     sequences : List[BinarySequence]
         The input BinarySequence objects used to construct the
         Hamming graph. 
+    _compute_hamming_edges : bool, default=False
+        Legacy option retained for compatibility; edge annotation is disabled.
 
     Returns
     -------
@@ -851,6 +1224,8 @@ def create_hamming_graph_multiallele(sequences: list[BaseNumpySequence], *, _com
     ----------
     sequences : List[BaseNumpySequence]
         The list of input sequences to construct the graph from. 
+    _compute_hamming_edges : bool, default=False
+        Legacy option retained for compatibility; edge annotation is disabled.
     
     Returns
     -------
@@ -994,6 +1369,88 @@ def _resolve_balltree_metric(X: np.ndarray, metric: str | None = None) -> str:
         return metric
     return "hamming" if _is_binary_like_matrix(X) else "euclidean"
 
+
+def _prepare_knn_search_space(
+    sequences: List[BaseNumpySequence],
+    embeddings: np.ndarray | None,
+    *,
+    embedding_domain: str | None,
+    backend: Literal["faiss", "balltree"],
+    faiss_metric: Literal["ip", "l2"],
+) -> tuple[np.ndarray, Literal["hamming", "euclidean"], str, str]:
+    """Resolve the feature matrix and metric for a kNN search.
+
+    Sequence/OHE searches use Hamming geometry. PLM, composition, and direct
+    embedding searches use ordinary Euclidean geometry; FAISS represents that
+    geometry with its squared-L2 index, irrespective of the sequence-oriented
+    ``faiss_metric`` option.
+    """
+
+    use_embedding_geometry = embedding_domain in _EMBEDDING_KNN_DOMAINS or (
+        embeddings is not None and embedding_domain != "ohe"
+    )
+    n_sequences, _ = _validate_sequence_collection(
+        sequences,
+        require_aligned=not use_embedding_geometry,
+    )
+    if embedding_domain is not None and embedding_domain not in {
+        "ohe",
+        *_EMBEDDING_KNN_DOMAINS,
+    }:
+        raise ValueError(
+            "`embedding_domain` must be 'ohe', 'plm', 'composition', or None; "
+            f"got {embedding_domain!r}."
+        )
+
+    matrix = None
+    if embeddings is not None:
+        matrix = _validate_embedding_matrix(
+            embeddings,
+            n_sequences=n_sequences,
+        )
+    elif embedding_domain in _EMBEDDING_KNN_DOMAINS:
+        raise ValueError(
+            f"`embedding_domain={embedding_domain!r}` requires an aligned "
+            "embedding matrix for kNN construction."
+        )
+
+    use_embedding_geometry = matrix is not None and embedding_domain != "ohe"
+    if use_embedding_geometry:
+        metric = "l2" if backend == "faiss" else "euclidean"
+        return matrix, "euclidean", metric, embedding_domain or "embedding"
+
+    if n_sequences == 0:
+        metric = faiss_metric if backend == "faiss" else "hamming"
+        return np.empty((0, 0), dtype=np.float32), "hamming", metric, "ohe"
+
+    if backend == "faiss":
+        features = _one_hot_matrix_amino(sequences)
+        metric = faiss_metric
+    else:
+        features, _ = _encode_multiallele(sequences)
+        metric = "hamming"
+    return features, "hamming", metric, "ohe"
+
+
+def _attach_knn_search_metadata(
+    graph: nx.Graph,
+    *,
+    backend: str,
+    metric: str,
+    distance_geometry: str,
+    embedding_domain: str,
+    role: Literal["graph", "prefilter"],
+) -> None:
+    """Record the feature-space contract used by a kNN graph or prefilter."""
+
+    graph.graph["landscapy_knn_search"] = {
+        "role": role,
+        "backend": str(backend),
+        "metric": str(metric),
+        "distance_geometry": str(distance_geometry),
+        "embedding_domain": str(embedding_domain),
+    }
+
 def _find_knn_balltree(X : np.ndarray,
                        k : int,
                        tiebuffer : int = 0,
@@ -1128,11 +1585,18 @@ def _find_knn_faiss(X: np.ndarray,
     if n == 0:
         empty = np.empty((0, 0), dtype=np.float32)
         return empty, empty.astype(np.int64)
-    faiss = require_optional(
-        "faiss",
-        extra="faiss",
-        purpose="FAISS nearest-neighbour graph construction",
-    )
+    try:
+        faiss = require_optional(
+            "faiss",
+            extra="faiss",
+            purpose="FAISS nearest-neighbour graph construction",
+        )
+    except ModuleNotFoundError as error:
+        raise ModuleNotFoundError(
+            f"{error} FAISS wheels are platform-specific; rerun with "
+            "`backend='balltree'` to use the portable scikit-learn fallback.",
+            name=error.name,
+        ) from error
     # Set the FAISS metric so easy conversion back to hamming distance.
     if metric == "ip":
         faiss_metric = faiss.METRIC_INNER_PRODUCT
@@ -1174,7 +1638,10 @@ def _find_knn_faiss(X: np.ndarray,
     if use_gpu:
         if not hasattr(faiss, "StandardGpuResources"):
             raise RuntimeError(
-                "`use_gpu=True` requires a GPU-enabled FAISS installation."
+                "`use_gpu=True` is unavailable because the installed FAISS build "
+                "has no GPU support. Install a GPU-enabled FAISS build supported "
+                "by this OS, rerun with `use_gpu=False` for CPU FAISS, or select "
+                "`backend='balltree'`."
             )
         res = faiss.StandardGpuResources()
         index = faiss.index_cpu_to_gpu(res, 0, index)
@@ -1189,6 +1656,8 @@ def _find_knn_faiss(X: np.ndarray,
 
 def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
                                k: int,
+                               search_features: np.ndarray,
+                               distance_geometry: Literal["hamming", "euclidean"],
                                include_self: bool = False,
                                tie_policy: Literal['all', 'min_index', 'random'] = 'all',
                                tiebuffer: int = 128,
@@ -1227,8 +1696,7 @@ def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
     if n == 0:
         return nx.Graph()
 
-    # integer-coded (n, L)
-    X, _ = _encode_multiallele(sequences)  
+    X = search_features
     L = X.shape[1]
 
     dists, inds = _find_knn_balltree(
@@ -1236,6 +1704,7 @@ def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
         k=k,
         tiebuffer=tiebuffer,
         include_self=include_self,
+        metric="hamming" if distance_geometry == "hamming" else "euclidean",
     )
 
     rng = np.random.default_rng(seed)
@@ -1243,8 +1712,8 @@ def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
 
     for i in range(n):
         ids = inds[i]
-        # convert fraction to Hamming count
-        ds = (dists[i] * L)  
+        # sklearn reports a Hamming fraction and an ordinary Euclidean length.
+        ds = dists[i] * L if distance_geometry == "hamming" else dists[i]
 
         # drop self
         keep = (ids != i)
@@ -1292,14 +1761,17 @@ def _create_knn_graph_balltree(sequences: List[BaseNumpySequence],
 
     _attach_knn_edge_semantics(
         G,
-        sequence_length=L,
+        sequence_length=len(sequences[0]),
         constructor="knn-balltree",
+        distance_geometry=distance_geometry,
     )
 
     return G
 
 def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
                             k: int,
+                            search_features: np.ndarray,
+                            distance_geometry: Literal["hamming", "euclidean"],
                             *,
                             index_type: Literal['hnsw', 'flat', 'ivf'] = "hnsw",
                             metric: Literal['ip', 'l2'] = 'ip',
@@ -1364,7 +1836,7 @@ def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
         The constructed nearest neighbor graph. 
     """
     
-    X = _one_hot_matrix_amino(sequences)
+    X = search_features
     n, d = X.shape
     L = len(sequences[0])
 
@@ -1372,25 +1844,26 @@ def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
                            use_gpu=use_gpu, hnsw_M=hnsw_M,
                            include_self=include_self, tiebuffer=tiebuffer)
 
-    # Convert FAISS distances to Hamming counts.
-    # ip: D = inner product; matches = D; hamming = L - matches
-    if metric == "ip":
-        hamming_all = (L - D).astype(np.float32)
+    # FAISS reports similarities for IP and squared distances for L2.
+    if distance_geometry == "euclidean":
+        distances_all = np.sqrt(np.maximum(D, 0.0)).astype(np.float32)
+    elif metric == "ip":
+        distances_all = (L - D).astype(np.float32)
     else:
-        hamming_all = (0.5 * D).astype(np.float32)
+        distances_all = (0.5 * D).astype(np.float32)
     del X, D
 
-    # Build graph and keep min hamming per edge.
+    # Build graph and keep the minimum distance per undirected edge.
     G = nx.Graph()
     for i, s in enumerate(sequences):
         G.add_node(i, sequence=s)
 
-    min_hamming = {}
+    min_distance = {}
 
     rng = np.random.default_rng(seed)
     for i in range(n):
         ids = I[i]
-        ds  = hamming_all[i]
+        ds  = distances_all[i]
 
         # filter invalids (-1) and optionally self
         valid = ids >= 0
@@ -1428,25 +1901,28 @@ def _create_knn_graph_faiss(sequences: List[BaseNumpySequence],
             if i == j:
                 continue
             u, v = (i, j) if i < j else (j, i)
-            prev = min_hamming.get((u, v))
+            prev = min_distance.get((u, v))
             if prev is None or dij < prev:
-                min_hamming[(u, v)] = dij
+                min_distance[(u, v)] = dij
                 G.add_edge(u, v)
 
-    del I, hamming_all
+    del I, distances_all
 
-    if min_hamming:
-        nx.set_edge_attributes(G, min_hamming, "distance")
+    if min_distance:
+        nx.set_edge_attributes(G, min_distance, "distance")
     _attach_knn_edge_semantics(
         G,
         sequence_length=L,
         constructor=f"knn-faiss-{index_type}-{metric}",
+        distance_geometry=distance_geometry,
     )
     return G
 
 def create_knn_graph(sequences: List[BaseNumpySequence],
                      k: int,
                      *,
+                     embeddings: np.ndarray | None = None,
+                     embedding_domain: Literal["plm", "ohe", "composition"] | None = None,
                      backend: Literal['auto', 'faiss', 'balltree'] = 'auto',
                      index_type: Literal['hnsw', 'flat', 'ivf'] = 'hnsw',
                      faiss_metric: Literal['ip', 'l2'] = 'ip',
@@ -1469,6 +1945,16 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
     k : int
         Positive number of non-self neighbours to connect. Values greater
         than the available population are capped at ``n - 1``.
+
+    embeddings : np.ndarray, optional
+        Finite feature matrix aligned to ``sequences``. When supplied for a
+        PLM, composition, or unspecified embedding domain, kNN is constructed
+        from ordinary Euclidean distances in this matrix. When omitted, or
+        when ``embedding_domain='ohe'``, sequence Hamming geometry is used.
+
+    embedding_domain : {'plm', 'ohe', 'composition'}, optional
+        Scientific domain of ``embeddings``. PLM and composition domains
+        require ``embeddings`` and force Euclidean/L2 neighbour search.
     
     backend : str, default=`auto`
         The computational backend to use. Options are:
@@ -1490,8 +1976,8 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
         The faiss metric. Options are:
         - `ip` : the inner produt.
         - `l2` : the L2 norm. 
-        Use of `ip` guarantees distances are returned / stored as
-        Hamming distances. 
+        This option applies only to sequence/OHE Hamming searches. Continuous
+        embedding searches always use FAISS L2 to preserve Euclidean geometry.
 
     include_self : bool, default=False
         Whether FAISS candidate queries include each sequence itself. Self
@@ -1529,7 +2015,13 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
     """
     _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
 
-    n, sequence_length = _validate_sequence_collection(sequences)
+    use_embedding_geometry = embedding_domain in _EMBEDDING_KNN_DOMAINS or (
+        embeddings is not None and embedding_domain != "ohe"
+    )
+    n, sequence_length = _validate_sequence_collection(
+        sequences,
+        require_aligned=not use_embedding_geometry,
+    )
     k, backend = _validate_neighbour_configuration(
         n_sequences=n,
         k=k,
@@ -1547,6 +2039,16 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
     ):
         raise TypeError("`seed` must be an integer or None.")
 
+    search_features, distance_geometry, search_metric, search_domain = (
+        _prepare_knn_search_space(
+            sequences,
+            embeddings,
+            embedding_domain=embedding_domain,
+            backend=backend,
+            faiss_metric=faiss_metric,
+        )
+    )
+
     if n <= 1:
         graph = nx.Graph()
         for index, sequence in enumerate(sequences):
@@ -1555,14 +2057,23 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
             graph,
             sequence_length=sequence_length,
             constructor=f"knn-{backend}",
+            distance_geometry=distance_geometry,
+        )
+        _attach_knn_search_metadata(
+            graph,
+            backend=backend,
+            metric=search_metric,
+            distance_geometry=distance_geometry,
+            embedding_domain=search_domain,
+            role="graph",
         )
         return graph
 
     if backend == 'faiss':
         G = _create_knn_graph_faiss(
-            sequences, k,
+            sequences, k, search_features, distance_geometry,
             index_type=index_type,
-            metric=faiss_metric,
+            metric=search_metric,
             include_self=include_self,
             use_gpu=use_gpu,
             hnsw_M=hnsw_M,
@@ -1573,12 +2084,22 @@ def create_knn_graph(sequences: List[BaseNumpySequence],
     elif backend == 'balltree':
         G = _create_knn_graph_balltree(sequences,
                                           k,
+                                          search_features,
+                                          distance_geometry,
                                           include_self=include_self,
                                           tie_policy=tie_policy,
                                           tiebuffer=tiebuffer,
                                           seed=seed)
     else:
         raise ValueError(f"Unsupported backend {backend!r}. Expected `auto`, `faiss`, or `balltree`.")
+    _attach_knn_search_metadata(
+        G,
+        backend=backend,
+        metric=search_metric,
+        distance_geometry=distance_geometry,
+        embedding_domain=search_domain,
+        role="graph",
+    )
     # Optionally compute expected Hamming distances if available
     if _compute_hamming_edges and all(
         hasattr(seq, "ungapped_arr") and getattr(seq, "ungapped_arr", None) is not None
@@ -1781,14 +2302,18 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
                                hnsw_M: int = 32,
                                t: Optional[Union[int, float]] = 5,
                                connectivity_threshold: float = 1e-4,
+                               max_diffusion_nnz: int = _DEFAULT_MAX_DIFFUSION_NNZ,
+                               max_diffusion_work: int = _DEFAULT_MAX_DIFFUSION_WORK,
                                *,
+                               embedding_domain: Literal["plm", "ohe", "composition"] | None = None,
                                _compute_hamming_edges: bool = False,
                                **kwargs) -> nx.Graph:
     """
     Construct a reversible undirected diffusion graph in embedding space.
 
-    RBF affinities define a lazy detailed-balance transition. Edge weights are
-    the symmetric stationary-measure kernel
+    RBF affinities on the symmetric union of kNN candidates define a sparse
+    lazy detailed-balance transition. Edge weights are the exact symmetric
+    stationary-measure kernel
     ``Pi^(1/2) P^t Pi^(-1/2)`` after thresholding.
 
     Parameters
@@ -1800,11 +2325,14 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         Finite two-dimensional sequence embeddings indexed according to
         sequence order.
 
-    k : int, default=`5`
-        Nearest neighbors to scale the rbf gamma parameter.
+    k : int, default=128
+        Non-self neighbours defining each directed candidate set. Their
+        undirected union supports the sparse RBF affinity and also sets its
+        global bandwidth.
 
     tiebuffer : int, default=0
-        Additional nearest-neighbour candidates retained for tie handling.
+        Additional backend hits inspected for candidates tied at the exact kth
+        distance. Non-tied buffered candidates do not enter the affinity.
 
     backend : str, default=`auto`
         The computational backend to use. Options are:
@@ -1826,8 +2354,8 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         The faiss metric. Options are:
         - `ip` : the inner produt.
         - `l2` : the L2 norm. 
-        Use of `ip` guarantees distances are returned / stored as
-        Hamming distances. 
+        Applies to sequence/OHE searches. Continuous embedding prefilters
+        always use L2 to preserve Euclidean geometry.
 
     include_self : bool, default=False
         Whether FAISS candidate queries may include the query point. The final
@@ -1848,6 +2376,20 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         Finite dimensionless diffusion-amplitude threshold in ``[0, 1]`` used
         to define discrete connectivity.
 
+    max_diffusion_nnz : int, default=50000000
+        Maximum nonzeros allowed in any exact sparse affinity, transition, or
+        diffusion-power matrix. The constructor raises ``MemoryError`` before
+        a multiplication whose exact structural result exceeds this budget.
+
+    max_diffusion_work : int, default=1000000000
+        Maximum cumulative scalar products allowed for the exact sparse matrix
+        power. This is a work guard, not a numerical approximation control.
+
+    embedding_domain : {'plm', 'ohe', 'composition'}, optional
+        Domain governing the sparse kNN prefilter. PLM and composition use
+        Euclidean/L2 search in ``embeddings``; OHE uses sequence Hamming
+        geometry. When omitted, supplied embeddings are treated as continuous.
+
     _compute_hamming_edges : bool, default=False
         Reserved compatibility flag. Release builds disable the optional
         post-construction mutation pass.
@@ -1862,7 +2404,13 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         under `sequence`.
     """
     _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
-    n_points, _ = _validate_sequence_collection(sequences)
+    use_embedding_geometry = embedding_domain in _EMBEDDING_KNN_DOMAINS or (
+        embeddings is not None and embedding_domain != "ohe"
+    )
+    n_points, _ = _validate_sequence_collection(
+        sequences,
+        require_aligned=not use_embedding_geometry,
+    )
     requested_k = k
     k, backend = _validate_neighbour_configuration(
         n_sequences=n_points,
@@ -1877,6 +2425,24 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
     )
     use_stationary, t_int = _validate_diffusion_power(t)
     threshold = _validate_connectivity_threshold(connectivity_threshold)
+    max_diffusion_nnz = _validate_diffusion_budget(
+        max_diffusion_nnz,
+        name="max_diffusion_nnz",
+    )
+    max_diffusion_work = _validate_diffusion_budget(
+        max_diffusion_work,
+        name="max_diffusion_work",
+    )
+
+    search_features, search_geometry, search_metric, search_domain = (
+        _prepare_knn_search_space(
+            sequences,
+            embeddings,
+            embedding_domain=embedding_domain,
+            backend=backend,
+            faiss_metric=faiss_metric,
+        )
+    )
 
     if embeddings is None:
         if n_points:
@@ -1899,14 +2465,31 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         power=t_int,
         threshold=threshold,
     )
-    if n_points <= 1:
-        return G
-
-    sklearn_pairwise = require_optional(
-        "sklearn.metrics.pairwise",
-        extra="knn",
-        purpose="diffusion embedding graph construction",
+    _attach_knn_search_metadata(
+        G,
+        backend=backend,
+        metric=search_metric,
+        distance_geometry=search_geometry,
+        embedding_domain=search_domain,
+        role="prefilter",
     )
+    if n_points <= 1:
+        _attach_sparse_diffusion_construction_metadata(
+            G,
+            requested_k=int(requested_k),
+            effective_k=k,
+            tiebuffer=tiebuffer,
+            backend=backend,
+            index_type=index_type,
+            max_nnz=max_diffusion_nnz,
+            max_work=max_diffusion_work,
+            affinity_nnz=0,
+            transition_nnz=n_points,
+            kernel_nnz=n_points,
+            directed_candidates=0,
+            diffusion_work=0,
+        )
+        return G
 
     k_for_scale = k
     if int(requested_k) >= n_points and k_for_scale == n_points - 1:
@@ -1916,36 +2499,48 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         k_for_scale = max(1, int(np.sqrt(n_points)))
     
     # Use balltree algorithm (will fail as shape of embeddings >>>)
+    # The backend's ``include_self=True`` query capacity counts the query point
+    # itself. Ask for one additional hit so public ``k`` continues to denote
+    # non-self candidates in either mode.
+    backend_query_k = k + int(include_self)
     if backend == 'balltree':
         _, neighbour_indices = _find_knn_balltree(
-            embeddings,
-            k,
+            search_features,
+            backend_query_k,
             tiebuffer,
             include_self=include_self,
+            metric=search_metric,
         )
     
     # Use FAISS algorithm (approx or exact).
     elif backend == 'faiss':
-        _, neighbour_indices = _find_knn_faiss(embeddings,
-                                       k,
+        _, neighbour_indices = _find_knn_faiss(search_features,
+                                       backend_query_k,
                                        index_type=index_type,
-                                       metric=faiss_metric,
+                                       metric=search_metric,
                                        use_gpu=use_gpu,
                                        hnsw_M=hnsw_M,
                                        include_self=include_self,
                                        tiebuffer=tiebuffer) 
+
+    candidates_by_row = _select_diffusion_knn_candidates(
+        search_features,
+        neighbour_indices,
+        k=k,
+        distance_geometry=search_geometry,
+    )
 
     # Evaluate scale in a common Euclidean unit after the requested backend
     # has selected and ordered candidates. This avoids interpreting FAISS
     # inner-product scores or squared-L2 scores as ordinary distances.
     sigma = np.zeros(n_points, dtype=np.float64)
     for row in range(n_points):
-        candidates = np.asarray(neighbour_indices[row], dtype=np.int64)
-        candidates = candidates[(candidates >= 0) & (candidates != row)]
+        candidates = candidates_by_row[row]
         if candidates.size:
-            scale_index = min(k_for_scale, candidates.size) - 1
-            neighbour = int(candidates[scale_index])
-            sigma[row] = float(np.linalg.norm(embeddings[row] - embeddings[neighbour]))
+            distances = np.linalg.norm(embeddings[candidates] - embeddings[row], axis=1)
+            distances.sort()
+            scale_index = min(k_for_scale, distances.size) - 1
+            sigma[row] = float(distances[scale_index])
     pos = sigma[np.isfinite(sigma) & (sigma > 0)]
 
     if pos.size == 0:
@@ -1956,17 +2551,26 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
             median_sigma_sq = 1.0
 
     gamma = 1.0 / (2 * median_sigma_sq)
-    kernel_matrix = sklearn_pairwise.rbf_kernel(embeddings, gamma=gamma)
+    affinity_matrix, directed_candidates = _sparse_rbf_affinity_from_candidates(
+        embeddings,
+        candidates_by_row,
+        gamma=gamma,
+        max_nnz=max_diffusion_nnz,
+    )
     
     transition_matrix, stationary, component_labels = _reversible_lazy_transition(
-        kernel_matrix
+        affinity_matrix
     )
+    diffusion_diagnostics: dict[str, int] = {}
     diffusion_kernel = _reversible_diffusion_kernel(
         transition_matrix,
         stationary,
         component_labels,
         stationary_limit=use_stationary,
         power=t_int,
+        max_nnz=max_diffusion_nnz,
+        max_work=max_diffusion_work,
+        _diagnostics=diffusion_diagnostics,
     )
     rows, cols, edge_weights = _threshold_undirected_kernel(
         diffusion_kernel,
@@ -1989,6 +2593,21 @@ def create_diffusion_emb_graph(sequences: List[BaseNumpySequence],
         use_stationary=use_stationary,
         power=t_int,
         threshold=threshold,
+    )
+    _attach_sparse_diffusion_construction_metadata(
+        G,
+        requested_k=int(requested_k),
+        effective_k=k,
+        tiebuffer=tiebuffer,
+        backend=backend,
+        index_type=index_type,
+        max_nnz=max_diffusion_nnz,
+        max_work=max_diffusion_work,
+        affinity_nnz=affinity_matrix.nnz,
+        transition_nnz=transition_matrix.nnz,
+        kernel_nnz=diffusion_kernel.nnz,
+        directed_candidates=directed_candidates,
+        diffusion_work=diffusion_diagnostics["estimated_scalar_products"],
     )
     
     # Optionally compute expected Hamming distances if available
@@ -2258,6 +2877,7 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                                              connectivity_threshold: float = 1e-4,
                                              cpus: int = 1,
                                              *,
+                                             embedding_domain: Literal["plm", "ohe", "composition"] | None = None,
                                              evolutionary_time: float = 1.0,
                                              equilibrium_frequencies: Optional[np.ndarray] = None,
                                              _compute_hamming_edges: bool = False,
@@ -2309,8 +2929,8 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         The faiss metric. Options are:
         - `ip` : the inner produt.
         - `l2` : the L2 norm. 
-        Use of `ip` guarantees distances are returned / stored as
-        Hamming distances. 
+        Applies to sequence/OHE searches. Continuous embedding prefilters
+        always use L2 to preserve Euclidean geometry.
 
     include_self : bool, default=False
         Whether the candidate-neighbour query includes each sequence itself.
@@ -2342,6 +2962,11 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         Target number of worker CPUs for Ray alignment tasks. Each task
         consumes a single CPU.
 
+    embedding_domain : {'plm', 'ohe', 'composition'}, optional
+        Domain governing the sparse kNN prefilter. PLM and composition use
+        Euclidean/L2 search in ``embeddings``; OHE uses sequence Hamming
+        geometry. When omitted, supplied embeddings are treated as continuous.
+
     evolutionary_time : float, default=1.0
         Evolutionary time used to obtain transition probabilities from the
         instantaneous rate generator. This is distinct from the graph
@@ -2364,7 +2989,13 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         The constructed graph.
     """
     _compute_hamming_edges = _force_disable_hamming_edge_computation(_compute_hamming_edges)
-    n_sequences, _ = _validate_sequence_collection(sequences)
+    use_embedding_geometry = embedding_domain in _EMBEDDING_KNN_DOMAINS or (
+        embeddings is not None and embedding_domain != "ohe"
+    )
+    n_sequences, _ = _validate_sequence_collection(
+        sequences,
+        require_aligned=not use_embedding_geometry,
+    )
     k, backend = _validate_neighbour_configuration(
         n_sequences=n_sequences,
         k=k,
@@ -2387,6 +3018,16 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         raise TypeError("`tau` must be a finite real number greater than zero.") from error
     if not np.isfinite(tau) or tau <= 0.0:
         raise ValueError("`tau` must be finite and greater than zero.")
+
+    search_features, search_geometry, search_metric, search_domain = (
+        _prepare_knn_search_space(
+            sequences,
+            embeddings,
+            embedding_domain=embedding_domain,
+            backend=backend,
+            faiss_metric=faiss_metric,
+        )
+    )
 
     if embeddings is None:
         if n_sequences:
@@ -2417,6 +3058,14 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         power=t_int,
         threshold=thr,
     )
+    _attach_knn_search_metadata(
+        graph,
+        backend=backend,
+        metric=search_metric,
+        distance_geometry=search_geometry,
+        embedding_domain=search_domain,
+        role="prefilter",
+    )
     if n_sequences <= 1:
         return graph
 
@@ -2432,29 +3081,28 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     )
     _logger = logging.getLogger('fitness_landscape')
     _t_knn0 = time.perf_counter(); _c_knn0 = time.process_time()
-    balltree_metric = _resolve_balltree_metric(embeddings)
     metric_used = None
     if backend == 'balltree':
         _, neighbor_indices = _find_knn_balltree(
-            embeddings,
+            search_features,
             k,
             tiebuffer,
             include_self=include_self,
-            metric=balltree_metric,
+            metric=search_metric,
         )
-        metric_used = balltree_metric
+        metric_used = search_metric
     
     # Use FAISS algorithm (approx or exact).
     elif backend == 'faiss':
-        _, neighbor_indices = _find_knn_faiss(embeddings,
+        _, neighbor_indices = _find_knn_faiss(search_features,
                                        k,
                                        index_type=index_type,
-                                       metric=faiss_metric,
+                                       metric=search_metric,
                                        use_gpu=use_gpu,
                                        hnsw_M=hnsw_M,
                                        include_self=include_self,
                                        tiebuffer=tiebuffer) 
-        metric_used = faiss_metric
+        metric_used = search_metric
     _logger.info('kNN prefilter done: backend=%s metric=%s k=%d n=%d wall=%.2fs cpu=%.2fs', backend, metric_used, k, n_sequences, time.perf_counter()-_t_knn0, time.process_time()-_c_knn0)
 
     pairs_to_align = set()
@@ -2818,6 +3466,10 @@ def compute_edge_mutations_star(G: nx.Graph,
     
     eps : float, default=1e-12
         Small value to avoid division by zero in normalization.
+    _log_progress : bool, default=False
+        Emit progress messages through the package logger.
+    _nested_parallel : bool, default=False
+        Compute node-star alignments with Ray workers.
     """
     if G.is_directed():
         raise TypeError("Edge mutation annotation requires an undirected graph.")
@@ -2968,6 +3620,8 @@ def attach_expected_hamming_to_edges(G: nx.Graph,
     
     eps : float, default=1e-12
         Small value to avoid division by zero in normalization.
+    block_cols : int, optional
+        Reserved alignment-column block size.
     """
     if G.is_directed():
         raise TypeError("Expected Hamming annotation requires an undirected graph.")
