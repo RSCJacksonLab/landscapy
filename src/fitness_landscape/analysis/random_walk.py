@@ -1,3 +1,5 @@
+"""Analyse discrete and continuous random walks on fitness landscapes."""
+
 import numpy as np
 import networkx as nx
 import scipy.sparse as sp

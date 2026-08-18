@@ -1,3 +1,5 @@
+"""Expose core sequence, fitness, graph, and landscape objects."""
+
 from .sequence import (
     BaseNumpySequence,
     BinarySequence,

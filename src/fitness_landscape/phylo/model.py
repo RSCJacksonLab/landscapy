@@ -1,3 +1,5 @@
+"""Define phylogenetic substitution models and rate matrices."""
+
 import numpy as np
 
 def lower_triangle_to_symmetric(tril_values: np.ndarray,

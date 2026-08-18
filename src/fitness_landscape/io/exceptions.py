@@ -1,3 +1,5 @@
+"""Define errors raised by portable landscape bundle operations."""
+
 class BundleIOError(Exception):
     """Base error for portable landscape bundle I/O."""
 

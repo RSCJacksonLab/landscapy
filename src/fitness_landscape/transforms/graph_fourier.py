@@ -1,3 +1,5 @@
+"""Transform graph signals into a spectral Fourier basis."""
+
 from __future__ import annotations
 
 import numpy as np

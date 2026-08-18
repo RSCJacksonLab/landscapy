@@ -27,7 +27,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install ".[dev,all]"
 
-      - name: Validate the documented 0.9 public API
+      - name: Validate public API and non-private source docstrings
         run: python scripts/check_public_api_docs.py
 
       - name: Execute cookbook examples

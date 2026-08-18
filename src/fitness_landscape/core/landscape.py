@@ -1,3 +1,5 @@
+"""Define the layered fitness-landscape container and related queries."""
+
 from __future__ import annotations
 
 import pickle

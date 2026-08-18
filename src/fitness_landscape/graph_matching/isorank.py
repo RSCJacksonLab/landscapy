@@ -1,3 +1,5 @@
+"""Align graphs with topology- and feature-aware IsoRank methods."""
+
 from __future__ import annotations
 
 import networkx as nx
