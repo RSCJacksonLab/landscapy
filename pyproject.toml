@@ -87,6 +87,7 @@ all = [
 ]
 dev = [
   "build>=1.2",
+  "matplotlib>=3.8",
   "numpydoc>=1.8",
   "pytest>=8",
   "pytest-cov>=6",
