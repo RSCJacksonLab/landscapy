@@ -1,3 +1,5 @@
+"""Compare observed, reconstructed, and phylogenetic graph structures."""
+
 import math
 import numpy as np
 import networkx as nx
@@ -282,8 +284,17 @@ def leaf_spanning_tree(G: nx.Graph,
     return U
 
 def get_leaves(U: nx.Graph) -> List:
-    """
-    Return leaf nodes (degree == 1) of an undirected graph ``U``.
+    """Return the degree-one nodes of an undirected graph.
+
+    Parameters
+    ----------
+    U : networkx.Graph
+        Input graph.
+
+    Returns
+    -------
+    list
+        Nodes whose degree is one.
     """
     return [n for n in U.nodes() if U.degree(n) == 1]
 

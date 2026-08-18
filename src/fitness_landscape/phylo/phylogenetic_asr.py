@@ -1,3 +1,5 @@
+"""Infer phylogenies and reconstruct ancestral sequences."""
+
 from pathlib import Path
 from typing import (
     Union,

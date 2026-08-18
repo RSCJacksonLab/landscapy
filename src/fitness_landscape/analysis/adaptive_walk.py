@@ -1,3 +1,5 @@
+"""Analyse adaptive walks, accessible paths, basins, and neutral networks."""
+
 import numpy as np
 import networkx as nx
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal

@@ -1,3 +1,5 @@
+"""Reconstruct latent graph structure from sparse observations."""
+
 import networkx as nx
 import numpy as np
 from scipy import sparse as sp
@@ -383,8 +385,12 @@ def add_steiner_chains(pairs: List[Tuple[int, int]],
 
     Parameters
     ----------
-    pairs, deltas, weights
-        Existing sparse stress system (observed-observed).
+    pairs : list of tuple
+        Observed-node pairs in the sparse stress system.
+    deltas : numpy.ndarray
+        Target distance for each pair.
+    weights : numpy.ndarray
+        Stress weight for each pair.
     gap_pairs : list of tuple
         High-gap pairs (i,j) where geodesic >> Euclidean.
     n_obs : int
@@ -661,6 +667,8 @@ def heuristic_regular_supergraph_sparse(positions: np.ndarray,
         The list of edge weights observed in the induced graph.
     d_max : int
         The regular degree of the latent graph.
+    k : int, default=20
+        Nearest neighbours considered per node.
     
     Returns
     -------

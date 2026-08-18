@@ -1,3 +1,5 @@
+"""Construct sequence-aware undirected fitness-landscape graphs."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -1007,6 +1009,8 @@ def create_hamming_graph_binary(sequences: list[BinarySequence], *, _compute_ham
     sequences : List[BinarySequence]
         The input BinarySequence objects used to construct the
         Hamming graph. 
+    _compute_hamming_edges : bool, default=False
+        Legacy option retained for compatibility; edge annotation is disabled.
 
     Returns
     -------
@@ -1220,6 +1224,8 @@ def create_hamming_graph_multiallele(sequences: list[BaseNumpySequence], *, _com
     ----------
     sequences : List[BaseNumpySequence]
         The list of input sequences to construct the graph from. 
+    _compute_hamming_edges : bool, default=False
+        Legacy option retained for compatibility; edge annotation is disabled.
     
     Returns
     -------
@@ -3460,6 +3466,10 @@ def compute_edge_mutations_star(G: nx.Graph,
     
     eps : float, default=1e-12
         Small value to avoid division by zero in normalization.
+    _log_progress : bool, default=False
+        Emit progress messages through the package logger.
+    _nested_parallel : bool, default=False
+        Compute node-star alignments with Ray workers.
     """
     if G.is_directed():
         raise TypeError("Edge mutation annotation requires an undirected graph.")
@@ -3610,6 +3620,8 @@ def attach_expected_hamming_to_edges(G: nx.Graph,
     
     eps : float, default=1e-12
         Small value to avoid division by zero in normalization.
+    block_cols : int, optional
+        Reserved alignment-column block size.
     """
     if G.is_directed():
         raise TypeError("Expected Hamming annotation requires an undirected graph.")

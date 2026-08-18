@@ -1,3 +1,5 @@
+"""Represent hard and probabilistic biological sequences."""
+
 from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Iterable, List, Sequence as _SeqLike, Union, Literal, Mapping
 from .._const import PROT_20
@@ -1161,10 +1163,17 @@ class SoftSequence(BaseNumpySequence):
         return P.copy()
 
     def remove_gap_arr(self, *, gap_threshold: float = 0.5) -> np.ndarray:
-        """
-        For SoftSequence, prefer probabilistic gap removal by
-        marginalisation, not thresholding. Ignores gap_threshold and
-        returns the renormalised amino-acid posterior of shape (L, A).
+        """Return the posterior with the gap channel marginalised out.
+
+        Parameters
+        ----------
+        gap_threshold : float, default=0.5
+            Compatibility argument; probabilistic gap removal ignores it.
+
+        Returns
+        -------
+        numpy.ndarray
+            Renormalised amino-acid posterior of shape ``(L, A)``.
         """
         return self.ungapped_arr
 
@@ -1193,8 +1202,12 @@ class SoftSequence(BaseNumpySequence):
         return -np.sum(self.posterior * logp, axis=1)
 
     def resample(self) -> "SoftSequence":
-        """
-        Generate a new hard proxy by sampling each posterior row.
+        """Generate a new hard proxy by sampling each posterior row.
+
+        Returns
+        -------
+        SoftSequence
+            Resampled sequence proxy.
         """
         return self.__class__(
             self._posterior,
@@ -1241,17 +1254,23 @@ class SoftSequence(BaseNumpySequence):
 
         Parameters
         ----------
-        posterior : np.ndarray
+        aa_posterior : np.ndarray
             Shape (L, A). Rows are sites, columns are alphabet symbols.
         
         alphabet : Iterable, default=`PROT_20`
-            The ordered alphabet corresponding to columns of `posterior`.
+            The ordered alphabet corresponding to posterior columns.
+
+        gap_posterior : np.ndarray, optional
+            Per-site gap probabilities.
         
         hard_rule : {'argmax', 'sample'}, default 'argmax'
             How to derive the proxy hard sequence used by existing code.
         
         seed : int, default=`None`
             The seed for random state initialisation.
+
+        sequence_id : str, optional
+            Stable sequence identifier.
         
         Returns
         -------

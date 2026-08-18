@@ -1,3 +1,5 @@
+"""Provide distribution, hypothesis, permutation, and subsampling analyses."""
+
 import copy
 import warnings
 from itertools import combinations
