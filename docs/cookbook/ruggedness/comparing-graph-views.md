@@ -48,7 +48,7 @@ for name, graph in graphs.items():
     )
     landscape.view("z_assay")
     properties = graph_properties(graph)
-    energy = calculate_ruggedness_dirichlet_energy(landscape)
+    energy = calculate_ruggedness_dirichlet_energy(landscape, weight_key=None)
     rows.append(
         {
             "view": name,
@@ -72,8 +72,7 @@ print(coverage.to_dict(orient="records"))
 ```
 
 The matched standardized signal produces different energy because the kNN view
-contains more and different edges. The table makes that denominator visible;
-it does not identify which view is biologically correct.
+contains more and different edges. The table makes that denominator visible.
 
 ## Common failures
 

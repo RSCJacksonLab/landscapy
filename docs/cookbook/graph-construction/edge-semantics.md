@@ -24,10 +24,9 @@ distance and does not imply a conductance.
 
 Weighted analyses accept either an explicit edge key or `"auto"`. Automatic
 resolution uses `landscapy_edge_schema`; an attribute-free graph is treated as
-unweighted, but Landscapy will not guess whether an undeclared legacy `weight`
-represents a distance or conductance. Dirichlet-energy analyses default to
-`weight_key=None`, so they remain unweighted unless weighting is requested
-explicitly.
+unweighted. Because API defaults differ, cookbook analyses pass
+`weight_key=None` explicitly and therefore use graph adjacency alone. Weighted
+analysis is opt-in and must name its conductance semantics.
 
 For an undirected graph, global Dirichlet energy is the unnormalized quadratic
 form `f.T @ L @ f = sum_{u,v} w_uv (f_u - f_v)^2`, where the sum is over
@@ -51,4 +50,4 @@ without a declared semantic. Callers must select the intended key explicitly.
 The legacy `_compute_hamming_edges=True` constructor option now runs an
 edge-local annotation pass. Expected mutation count is stored as
 `hamming_distance`, its normalized value as `normalized_distance`, and the
-derived similarity as `hamming_affinity`; it never overwrites conductance.
+derived similarity as `hamming_affinity`.

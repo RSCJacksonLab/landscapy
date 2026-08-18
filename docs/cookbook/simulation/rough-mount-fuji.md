@@ -2,7 +2,7 @@
 
 A Rough Mount Fuji (RMF) signal is a distance-dependent slope plus independent
 Gaussian noise. `sigma=0` gives a deterministic additive landscape relative to
-the specified optimum; positive noise can add local optima and block increasing
+the specified optimum. Positive noise can add local optima and block increasing
 paths.
 
 ## Input
@@ -39,11 +39,13 @@ for seed in range(6):
                 "optima": calculate_ruggedness_local_optima(landscape)[
                     "local_optima_count"
                 ],
-                "energy": calculate_ruggedness_dirichlet_energy(landscape)[
+                "energy": calculate_ruggedness_dirichlet_energy(
+                    landscape, weight_key=None
+                )[
                     "global_dirichlet_energy"
                 ],
                 "lag1": calculate_ruggedness_autocorrelation_analytical(
-                    landscape, lag_max=1
+                    landscape, lag_max=1, weight_key=None
                 )["autocorrelation"][1],
                 "increasing_paths_to_reference": find_greedy_accessible_paths(
                     landscape, start, end

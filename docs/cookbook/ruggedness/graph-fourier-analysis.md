@@ -1,7 +1,7 @@
 # Decompose fitness into graph Fourier modes
 
 Graph Fourier analysis expands a node-aligned signal in eigenvectors of a
-declared graph operator. Operator and edge-weight choices define the basis.
+the graph Laplacian matrix. Operator and edge-weight choices define the basis.
 
 ## Input
 
@@ -32,17 +32,17 @@ signal = landscape.view(landscape.active_layer_name).to_scalar()
 bases = {}
 for operator in ["adjacency", "laplacian", "norm_laplacian", "transition"]:
     eigenvalues, eigenvectors = eigenmode_decomposition(
-        landscape, matrix=operator, weight_key="weight"
+        landscape, matrix=operator, weight_key=None
     )
     assert eigenvectors.shape == (8, 8)
     assert np.isfinite(eigenvalues).all() and np.isfinite(eigenvectors).all()
     bases[operator] = eigenvalues
 
 eigenvectors, eigenvalues, coefficients = graph_fourier_transform(
-    landscape, signal=signal, matrix="laplacian", weight_key="weight"
+    landscape, signal=signal, matrix="laplacian", weight_key=None
 )
 laplacian = nx.laplacian_matrix(
-    landscape.graph, nodelist=list(landscape.graph.nodes), weight="weight"
+    landscape.graph, nodelist=list(landscape.graph.nodes), weight=None
 ).toarray()
 residuals = np.linalg.norm(
     laplacian @ eigenvectors - eigenvectors * eigenvalues[None, :], axis=0
@@ -54,7 +54,7 @@ assert residuals.max() < 1e-10
 power = coefficients**2
 cumulative = np.cumsum(power) / power.sum()
 summary = graph_spectral_analysis(
-    landscape, matrix="laplacian", weight_key="weight"
+    landscape, matrix="laplacian", weight_key=None
 )
 assert np.isclose(summary["spectral_gap"], 2.0)
 
@@ -70,9 +70,6 @@ with TemporaryDirectory() as tmp:
 print(eigenvalues.tolist(), residuals.max(), cumulative[-1])
 ```
 
-The cube has repeated eigenvalues. Individual vectors inside a degenerate
-eigenspace are not unique, although total power in that eigenspace is invariant.
-Cached eigenpairs must match operator, node order, weights, and graph version.
 
 ## Common failures
 
@@ -80,4 +77,3 @@ Cached eigenpairs must match operator, node order, weights, and graph version.
 - A normalized or transition spectrum is interpreted as combinatorial.
 - A `k`-truncated transform is described as a full reconstruction.
 - Individual degenerate eigenvectors receive stable biological labels.
-- Solver residuals and orthogonality are not checked or reported.

@@ -2,7 +2,7 @@
 
 Evolutionary diffusion uses embedding kNN only as a pair prefilter, aligns those
 pairs, scores them with an instantaneous amino-acid rate generator, and then
-diffuses a reversible affinity. It is not tree inference.
+diffuses a reversible affinity.
 
 ## Input
 
@@ -52,7 +52,12 @@ bundled_lg = create_evol_diffusion_graph(
 )
 
 # A simple uniform reversible generator, validated before use. It is a software
-# example, not a defensible amino-acid model for biological inference.
+# example, not a defensible amino-acid model for biological inference. A biologically
+# realistic reversible generator may, for example, be the LG or WAG replacement matrices,
+# in which replacement rates are estimated from large alignments. Note that more modern
+# NQ models are not compatible with evol diffusion as they are no time reverisble with 
+# asymmetric off-diagonal entries.
+
 external_generator = np.full((20, 20), 1.0 / 19.0)
 np.fill_diagonal(external_generator, -1.0)
 equilibrium = np.full(20, 1.0 / 20.0)
@@ -107,9 +112,8 @@ reported rather than treated as universal expected values.
 - `connectivity_threshold` filters the final symmetric diffusion amplitude.
 - `cpus` configures the Ray alignment runtime; this example uses one CPU.
 
-Store this parameter record with the graph because not every scientific knob is
-encoded in graph metadata. With more CPUs, record Ray version, runtime address,
-and resource allocation.
+Store this parameter record with the graph because not every scientific parameter is
+encoded in graph metadata. 
 
 ## Interpretation and failures
 

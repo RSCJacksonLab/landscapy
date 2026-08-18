@@ -91,11 +91,3 @@ landscape. `BundleValidationError` means the schema or content is invalid;
 Do not suppress either exception: obtain a verified copy or regenerate the
 artifact from its recorded source.
 
-## Common failures
-
-- `overwrite=True` replaces the only copy of a bundle without archiving it.
-- Parquet is treated as mandatory even though JSON-table is a supported fallback.
-- Private `_bundle_metadata` is used as an analysis API rather than inspected
-  only as loaded provenance.
-- A checksum error is ignored and analysis continues on altered content.
-- Node, layer, annotation, and embedding order are not checked after round trip.

@@ -89,8 +89,8 @@ backend="balltree", tie_policy="all")`.
 
 ## Backend and tie choices
 
-BallTree is the portable exact backend. FAISS `flat` is exact; HNSW and IVF are
-approximate and require index parameters, software/hardware provenance, and a
+BallTree is the portable exact backend. FAISS `flat` is exact. HNSW and IVF are
+approximate and require index parameters, software/hardware, and a
 recall check against an exact subset. `tiebuffer` controls how many additional
 returned candidates are inspected for equality at the kth distance; it does
 not make an approximate index exact. `tie_policy="all"` retains every candidate

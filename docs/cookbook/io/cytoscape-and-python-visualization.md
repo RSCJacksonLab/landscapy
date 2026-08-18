@@ -1,7 +1,7 @@
 # Visualize a landscape with external tools
 
-Landscapy exports graph and analysis data; Cytoscape, NetworkX, and Matplotlib
-provide visualization. A plot is a diagnostic or communication device, not a
+Landscapy exports graph and analysis data. Cytoscape, NetworkX, and Matplotlib
+are appropriate visualization tools. A plot is a diagnostic or communication device, not a
 separate statistical result.
 
 ## Input
@@ -40,7 +40,7 @@ landscape = FitnessLandscape.build(
     annotation_layers={"design": annotations},
 )
 landscape.view("assay")
-energy = calculate_ruggedness_dirichlet_energy(landscape)
+energy = calculate_ruggedness_dirichlet_energy(landscape, weight_key=None)
 
 with TemporaryDirectory() as tmp:
     tmp = Path(tmp)
@@ -77,11 +77,3 @@ The XGMML file carries selected node attributes for Cytoscape. The Python plot
 uses ordinary external APIs and returned numeric results; it is not a Landscapy
 plotting interface. For large graphs, plot component/density summaries or use
 an externally computed layout rather than drawing every edge.
-
-## Common failures
-
-- Every annotation is exported, including sensitive or irrelevant metadata.
-- A stochastic layout is shown without a seed.
-- Dense overplotting is interpreted as biological clustering.
-- Node colours use a different row order from the graph.
-- A visualization is presented without graph definition, scale, or denominator.

@@ -51,7 +51,7 @@ for name, row in audit.items():
     print(name, row["nodes"], row["edges"], row["components"], row["path_note"])
 ```
 
-The empty graph reports undefined degree, clustering, and path summaries; the
+The empty graph reports undefined degree, clustering, and path summaries. The
 singleton has zero degree and zero path length. The disconnected example has
 two components of size two. Its finite path length applies only to one largest
 component and must not be reported as a whole-graph average.
@@ -61,7 +61,7 @@ component and must not be reported as a whole-graph average.
 Node and edge counts describe observed support, density normalizes edge count
 by possible pairs, and component sizes determine which node pairs can interact
 through the graph. These facts determine whether later estimates have a valid
-domain. They do not distinguish biological isolation from incomplete sampling.
+domain. They do not distinguish biological isolation from incomplete sampling. For example, sequences may be isolated simply because homologous intermediates are not sampled in the dataset. 
 
 ## Common failures
 

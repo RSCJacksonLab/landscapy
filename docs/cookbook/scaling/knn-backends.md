@@ -1,7 +1,7 @@
 # Benchmark kNN backends
 
 Benchmark neighbour backends on a fixed feature matrix before selecting one.
-BallTree and flat FAISS are exact; HNSW and IVF are approximate candidate
+BallTree and flat FAISS are exact, HNSW and IVF are approximate candidate
 indices. Approximation can alter graph topology, not only runtime.
 
 ## Input
@@ -89,6 +89,6 @@ allocation, so add process-level CPU/GPU memory monitoring for production.
 
 - Approximate recall is measured against the same approximate index.
 - Inner product and L2 results are compared as if they represented one metric.
-- `k`, HNSW `M`, IVF defaults, tie policy, or seed are omitted from provenance.
+- `k`, HNSW `M`, IVF defaults, tie policy, or seed are omitted.
 - Only runtime is reported while edge differences are ignored.
 - A changed candidate universe is described as the same scientific graph.

@@ -70,11 +70,3 @@ print(provenance, {k: graph.number_of_edges() for k, graph in graphs.items()})
 The fixture is an offline PCA cache derived from ESM output, not the raw model
 array. A new model revision, tokenizer, pooling rule, alphabet mapping, or PCA
 fit creates a new feature artifact and requires a new fingerprint.
-
-## Common failures
-
-- Embeddings are reordered independently of the sequence table.
-- An unpinned remote model name is treated as immutable provenance.
-- GPU out-of-memory errors are addressed by dropping rows without recording it.
-- Reduced and raw embedding dimensions are described as equivalent arrays.
-- Separate graph views recompute embeddings with different model state.

@@ -25,7 +25,7 @@ from fitness_landscape.models import create_nk_binary_landscape
 
 landscape = create_nk_binary_landscape(N=3, K=1, seed=17)
 analytical = calculate_ruggedness_autocorrelation_analytical(
-    landscape, lag_max=3, weight_key="weight"
+    landscape, lag_max=3, weight_key=None
 )
 stochastic = calculate_ruggedness_autocorrelation_stochastic(
     landscape,
@@ -33,10 +33,10 @@ stochastic = calculate_ruggedness_autocorrelation_stochastic(
     steps=20,
     lag_max=3,
     seed=29,
-    weight_key="weight",
+    weight_key=None,
 )
 continuous = time_continuous_autocorrelation(
-    landscape, times=[0.0, 0.5, 1.0, 2.0], weight_key="weight"
+    landscape, times=[0.0, 0.5, 1.0, 2.0], weight_key=None
 )
 
 np.testing.assert_allclose(analytical["autocorrelation"][0], 1.0)
@@ -61,7 +61,7 @@ print(comparison)
 ```
 
 The analytical and stochastic values target the same discrete Markov-lag
-quantity; their difference is Monte Carlo error. Continuous time uses a
+quantity. Continuous time uses a
 semigroup and cannot be substituted for integer lag. Bipartite/periodic graphs
 can show oscillating discrete correlations, so a single exponential length may
 be unavailable.

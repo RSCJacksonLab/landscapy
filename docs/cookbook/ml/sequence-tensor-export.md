@@ -2,8 +2,7 @@
 
 `FitnessLandscape.to_sequence_tensors` exports OHE, active embeddings, or
 token IDs together with aligned fitness tensors. Use an explicit feature view
-in recorded pipelines; `auto` prefers an attached embedding, then tokens, then
-OHE.
+in recorded pipelines.
 
 ## Input
 

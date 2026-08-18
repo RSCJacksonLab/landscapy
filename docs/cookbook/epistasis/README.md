@@ -13,3 +13,10 @@ cells, and any regularization.
 ## Reference contract
 
 - [Epistasis domains, coefficients, normalization, and missing-cell behavior](estimand-contracts.md)
+
+## Useful literature
+
+- Weinreich et al. (2013), [*Should evolutionary geneticists worry about higher-order epistasis?*](https://doi.org/10.1016/j.gde.2013.10.007).
+- Poelwijk, Krishna, and Ranganathan (2016), [*The Context-Dependence of Mutations: A Linkage of Formalisms*](https://doi.org/10.1371/journal.pcbi.1004771).
+- Otwinowski and Plotkin (2014), [*Inferring fitness landscapes by regression produces biased estimates of epistasis*](https://doi.org/10.1073/pnas.1400849111).
+- Faure et al. (2024), [*An extension of the Walsh-Hadamard transform to calculate and model epistasis in genetic landscapes of arbitrary shape and complexity*](https://doi.org/10.1371/journal.pcbi.1012132).

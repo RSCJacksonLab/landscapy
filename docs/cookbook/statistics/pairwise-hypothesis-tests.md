@@ -5,8 +5,7 @@ tests with one explicit multiplicity family.
 
 ## Input
 
-Groups must be non-empty finite samples. Define the independent experimental
-unit and estimand before testing; this example treats dataset-level scores as
+Groups must be non-empty finite samples. This example treats dataset-level scores as
 independent, not the nodes used to calculate each score.
 
 ## Worked example
@@ -61,13 +60,10 @@ print(result["group_stats"], records)
 
 Welch's test targets a mean contrast under its assumptions; Mann–Whitney and KS
 do not estimate the same quantity. Holm controls family-wise error. Bonferroni
-and `fdr_bh` are explicit alternatives; the choice must match the planned
-family and error criterion.
+and `fdr_bh` are explicit alternatives. 
 
 ## Common failures
 
 - Millions of dependent nodes or edges are supplied as biological replicates.
 - Test names, effect summary, family size, or missing-value policy are omitted.
-- Mann–Whitney is automatically labeled a median test.
 - Raw p-values are interpreted after selecting among many tests.
-- Non-significance is described as equivalence without an equivalence design.

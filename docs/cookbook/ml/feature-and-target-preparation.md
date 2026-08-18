@@ -67,8 +67,7 @@ print(features.shape, target.shape, train_mean, train_scale)
 ```
 
 Export `normalized`, the retained row indices, and the fitted training
-statistics together. Missing labels should produce an explicit mask; they must
-not be converted to zero. The graph and feature transform support prediction,
+statistics together. Missing labels should produce an explicit mask. The graph and feature transform support prediction,
 not a claim that the representation captures biological mechanism.
 
 ## Common failures

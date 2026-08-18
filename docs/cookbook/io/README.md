@@ -1,7 +1,7 @@
 # Saving, sharing, CLI use, and visualization
 
 These recipes turn an in-memory landscape into an inspectable artifact and
-show how to visualize results with external tools. Landscapy 0.9 deliberately
+show how to visualize results with external tools. Landscapy  deliberately
 has no plotting API; NetworkX, Matplotlib, and Cytoscape remain separate tools.
 
 1. [CSV import and export](csv-import-and-export.md)

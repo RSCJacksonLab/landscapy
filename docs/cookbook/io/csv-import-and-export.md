@@ -2,7 +2,7 @@
 
 CSV is useful for flat interchange, but it is not a complete landscape
 serialization. This recipe uses Pandas because `read_csv_landscape` and
-`to_csv_landscape` are not in the supported [0.9 API](../foundations/public-api.md).
+`to_csv_landscape` are not in the supported [API](../foundations/public-api.md).
 
 ## Input
 
@@ -99,4 +99,3 @@ objects matter.
 - Replicates are averaged without retaining the aggregation rule.
 - Probability columns are reloaded in a different category order.
 - Row order changes without a stable sequence identifier and alignment audit.
-- A CSV round trip is described as a complete landscape round trip.

@@ -2,7 +2,7 @@
 
 `FitnessLandscape.to_graph_tensor` converts node features, connectivity, edge
 attributes, and fitness layers to a PyTorch Geometric `Data` object. The
-exported object is a transport format; edge semantics still come from the
+exported object is a transport format. Edge semantics still come from the
 Landscapy graph schema.
 
 ## Input
@@ -58,7 +58,7 @@ print(data, schema["conductance"])
 ```
 
 PyG represents each undirected edge in both directions. Named arrays such as
-`weight`, `distance`, and `affinity` retain distinct meanings; do not choose an
+`weight`, `distance`, and `affinity` retain distinct meanings. Do not choose an
 `edge_attr` merely because it is present. For arbitrary node labels, the
 sequence-index order check is mandatory before assigning row-aligned `x`.
 

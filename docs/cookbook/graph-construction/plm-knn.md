@@ -104,16 +104,10 @@ reduced = PCA(n_components=4, svd_solver="full").fit_transform(full)
 pd.DataFrame(reduced, index=texts).to_csv(output_dir / "toy_protein_esm2_t6_pca.csv")
 ```
 
-`ESMEmbedder` in `fitness_landscape.embedding` provides the same supported
-model interface when a landscape object is not yet needed. GPU and CPU outputs
-should be versioned and tolerance-checked rather than assumed bit-identical.
-
 ## Common failures
 
 - Embedding rows and sequence rows are reordered independently.
 - `embedding_domain="ohe"` is used with PLM vectors, silently changing the
   intended geometry.
 - Model revision, pooling, reduction, device, or batch size is omitted.
-- A reduced documentation cache is reused as a scientific benchmark feature.
-- PLM proximity is interpreted as evolutionary or functional equivalence
-  without validation.
+

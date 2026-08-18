@@ -1,9 +1,8 @@
 # Statistical inference and robustness analysis
 
-These publication-facing recipes make the independent unit, estimand,
+These recipes make the independent unit, estimand,
 missing-value policy, multiplicity family, Monte Carlo resolution, and random
-state explicit. Nodes and edges are not independent biological replicates by
-default.
+state explicit.
 
 1. [Fitness distributions](fitness-distributions.md)
 2. [Pairwise hypothesis tests](pairwise-hypothesis-tests.md)

@@ -30,5 +30,5 @@ non-trivial component, the first right zero mode is constant.
 Dense and sparse paths both solve `L_sym`, map modes with the same rule, and
 return eigenvalues in ascending algebraic order. A request for `k` modes returns
 the smallest `k` transition-Laplacian eigenvalues. Values and modes are always
-real for supported undirected graphs; a complex result is treated as an
+real for supported undirected graphs. A complex result is treated as an
 internal error rather than silently cast.

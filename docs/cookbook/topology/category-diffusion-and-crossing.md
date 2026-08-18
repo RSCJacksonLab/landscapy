@@ -125,5 +125,3 @@ permutations and a stated statistic, not the single illustrative comparator.
 - `weight_key=None` is mistaken for conductance-weighted movement.
 - Missed walks are omitted without reporting hit counts and `max_steps`.
 - Categories that occupy different components are assigned finite crossings.
-- A diffusion distance or one permutation is presented as a biological
-  conclusion or p-value.

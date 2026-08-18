@@ -6,7 +6,7 @@ explicit before wrapping the graph in `FitnessLandscape`.
 ## Input
 
 This example treats nonzero matrix/table values as raw distances. A zero means
-no edge, not zero distance. Inputs must be symmetric and undirected.
+no edge, not zero distance. Inputs must be symmetric and undirected. 
 
 ## Worked example
 
@@ -83,7 +83,7 @@ landscape sequence order are identical and asserted.
 
 ## Interpretation
 
-The graph preserves an externally specified topology; Landscapy does not
+The graph preserves an externally specified topology. Landscapy does not
 validate the scientific reason for each edge. Follow the [edge-semantics
 contract](edge-semantics.md): raw `distance` increases with separation,
 whereas canonical `weight` increases with connection strength. Record units and

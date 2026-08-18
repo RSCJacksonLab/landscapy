@@ -59,7 +59,7 @@ for component_id, component in enumerate(landscape.get_components()):
         "test_support": "supported" if train_count > 0 else "no_train_node_in_component",
     }
     if eligible:
-        energy = calculate_ruggedness_dirichlet_energy(component)
+        energy = calculate_ruggedness_dirichlet_energy(component, weight_key=None)
         row["global_energy"] = energy["global_dirichlet_energy"]
         eligible_values.extend(component.get_signal().tolist())
     inventory.append(row)

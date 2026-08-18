@@ -75,10 +75,3 @@ unregularized design rank-deficient, so the ridge coefficient changes even
 though the generating formula did not. NK/GNK runs check finite execution over
 the intended domains; their random coefficients are not empirical evidence.
 
-## Common failures
-
-- Visual similarity replaces a numerical expected value and tolerance.
-- Missingness is introduced without recording which genotypes were removed.
-- A penalty-induced coefficient change is called changed biology.
-- Simulation seeds or model metadata are omitted.
-- One simulated realization is treated as an independent replicate panel.

@@ -22,11 +22,9 @@ from fitness_landscape import BaseNumpySequence, CategoricalFitness, FitnessLand
 from fitness_landscape.analysis import resistance_distance_matrix
 
 connected = nx.path_graph(3)
-for u, v in connected.edges:
-    connected[u][v]["conductance"] = 2.0
 connected_result = resistance_distance_matrix(
     connected,
-    weight_key="conductance",
+    weight_key=None,
     compute_resistance_matrix=True,
     jitter=1e-10,
     sparse_threshold=1000,
@@ -36,10 +34,10 @@ connected_result = resistance_distance_matrix(
 )
 np.testing.assert_allclose(
     connected_result["resistance_mat"],
-    [[0.0, 0.5, 1.0], [0.5, 0.0, 0.5], [1.0, 0.5, 0.0]],
+    [[0.0, 1.0, 2.0], [1.0, 0.0, 1.0], [2.0, 1.0, 0.0]],
     atol=1e-10,
 )
-assert connected_result["weight_key"] == "conductance"
+assert connected_result["weight_key"] is None
 assert connected_result["jitter_used"] is False
 
 disconnected = nx.Graph([(0, 1), (2, 3)])
@@ -68,7 +66,7 @@ assert np.isinf(resistance[0, 2])
 assert np.isinf(disconnected_result["classes"]["distance_mat"][0, 1])
 
 settings = {
-    "weight_key": "conductance",
+    "weight_key": None,
     "jitter": 1e-10,
     "sparse_threshold": 1000,
     "hutchinson_samples": 32,
@@ -80,8 +78,8 @@ print(connected_result["resistance_mat"])
 print(disconnected_result["components"], settings)
 ```
 
-On a path, resistance adds reciprocal conductances: each edge has resistance
-`1 / 2`, so the endpoints are distance 1. Cross-component resistance is
+On an unweighted path, every edge has unit conductance and unit resistance, so
+the endpoints are distance 2. Cross-component resistance is
 infinite, including the category-level expected-pairwise result.
 
 ## Interpretation

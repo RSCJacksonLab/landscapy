@@ -2,13 +2,13 @@
 
 The ensemble and reference-free APIs compute the same hierarchical Möbius
 decomposition of observed empirical marginal means. They support complete,
-incomplete, balanced, and unbalanced observed designs without imputation.
+incomplete, balanced, and unbalanced observed designs without imputation. For
+broader treatments linking epistasis parameterizations and extending
+Walsh-Hadamard ideas beyond complete binary designs, see
+[Poelwijk, Krishna, and Ranganathan (2016)](https://doi.org/10.1371/journal.pcbi.1004771)
+and [Faure et al. (2024)](https://doi.org/10.1371/journal.pcbi.1012132).
 
 ## Input
-
-Duplicates represent repeated observations and make genotype-cell counts
-unbalanced. Their experimental independence must be justified outside this
-algebraic example.
 
 ## Worked example
 
@@ -83,11 +83,3 @@ print(report)
 Every emitted observed cell mean reconstructs exactly. In incomplete designs,
 absent cells are not emitted. In unbalanced designs, equal observation weights
 change empirical marginals and the decomposition is not orthogonal.
-
-## Common failures
-
-- An absent genotype coefficient is interpreted as zero rather than unestimated.
-- Duplicate observations are assumed independent without an experimental-unit argument.
-- Unbalanced observed-support effects are called orthogonal population ANOVA.
-- Ensemble and reference-free outputs are described as different estimands.
-- A reference allele or population weighting is inferred when none was specified.

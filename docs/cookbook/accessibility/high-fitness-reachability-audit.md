@@ -1,8 +1,7 @@
 # Audit reachability of high-fitness variants
 
 Combine an explicit fitness threshold, annotations, graph reachability, and
-monotone-path checks to separate reachable, long-path, and unreachable targets.
-
+monotone-path checks to separate reachable, long-path, and unreachable targets. This workflow can be useful in studying what paths exist in the fitness landscape from a sequence to a maxima. 
 ## Input
 
 Declare the wild type or training set, graph constructor, target threshold,
@@ -82,10 +81,3 @@ The audit distinguishes a reachable two-edge target from targets in another
 observed component. Repeat it across predeclared graph views; graph sensitivity
 is part of the result.
 
-## Common failures
-
-- Unreachable targets are dropped instead of reported separately.
-- Long represented paths and disconnected targets share one category.
-- Graph construction uses target fitness and leaks the answer into topology.
-- A strict path API is interpreted as allowing equal-fitness steps.
-- Missing mutational neighbours are called experimentally inaccessible.

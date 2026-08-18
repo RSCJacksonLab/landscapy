@@ -1,7 +1,11 @@
 # Enumerate greedy accessible paths
 
 Greedy accessible paths move only along represented edges with strictly
-increasing active fitness.
+increasing active fitness. Accessible mutational paths are central to analyses
+of historical contingency and epistasis; see
+[Weinreich et al. (2006)](https://doi.org/10.1126/science.1123539),
+[Poelwijk et al. (2007)](https://doi.org/10.1038/nature05451), and
+[Franke et al. (2011)](https://doi.org/10.1371/journal.pcbi.1002134).
 
 ## Input
 
@@ -46,13 +50,4 @@ print(paths["path_count"], paths["mean_path_length"], summary["accessibility"])
 ```
 
 The complete three-site additive cube has `3! = 6` strictly increasing
-shortest paths from `000` to `111`. This is a known-answer software check, not
-an empirical accessibility claim.
-
-## Common failures
-
-- Endpoints are absent, duplicated, reversed in fitness, or disconnected.
-- Equal-fitness steps are counted despite the strict comparison in this API.
-- Path length counts nodes rather than edges.
-- All simple increasing paths are called shortest paths without checking.
-- Missing observed variants are interpreted as biologically forbidden steps.
+shortest paths from `000` to `111`.

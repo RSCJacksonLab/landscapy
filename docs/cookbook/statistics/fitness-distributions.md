@@ -68,7 +68,7 @@ print(report)
 ```
 
 Shapiro-Wilk runs only for non-constant samples of 3–5000 values. Its p-value
-tests one distributional null; it is not a universal decision rule for choosing
+tests one distributional null. It is not a universal decision rule for choosing
 all downstream models, transformations, or parametric tests.
 
 ## Common failures

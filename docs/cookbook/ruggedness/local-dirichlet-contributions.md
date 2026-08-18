@@ -34,7 +34,7 @@ landscape.annotation_layers["design"] = AnnotationLayer(
 )
 
 local = local_dirichlet_energy_contribution(landscape, weight_key=None)
-global_result = calculate_ruggedness_dirichlet_energy(landscape)
+global_result = calculate_ruggedness_dirichlet_energy(landscape, weight_key=None)
 np.testing.assert_allclose(
     sum(local.values()), global_result["global_dirichlet_energy"]
 )
@@ -64,8 +64,6 @@ alternative explanations.
 
 ## Common failures
 
-- Local contributions are expected to sum to twice the global energy.
 - A sorted annotation table is joined by row position rather than node ID.
 - High-degree nodes are compared without a degree-aware sensitivity analysis.
 - A descriptive boundary is labeled a causal or epistatic site.
-- Disconnected or excluded nodes disappear from the reported denominator.

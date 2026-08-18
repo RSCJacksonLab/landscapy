@@ -79,19 +79,15 @@ print(diagnostics)
 Finite `t=1` retains only the seven candidate-support edges. At `t=2`, exact
 sparse propagation creates eleven retained pairs; a higher threshold removes
 weak amplitudes. The stationary limit is dense within the connected component.
-These counts are fixture-specific diagnostics, not recommended defaults.
 
 ## Interpretation
 
 The sparse kNN union defines where the RBF affinity is evaluated; it is not a
 dense all-pairs kernel. The walk is 0.5-lazy and reversible. Finite integer `t`
-is a graph diffusion power; `None`, zero, or infinity requests the
+is a graph diffusion power: `None`, zero, or infinity requests the
 component-wise stationary limit. Retained `affinity` and `weight` are the same
 dimensionless symmetric amplitude, with `weight` serving as conductance.
 
-`max_diffusion_nnz` and `max_diffusion_work` are hard guards for exact sparse
-computation. A `MemoryError` is a request to revise scale or parameters, not to
-silently densify or approximate the graph.
 
 ## Common failures
 
@@ -99,4 +95,3 @@ silently densify or approximate the graph.
 - Treating finite `t` and the stationary limit as interchangeable.
 - Comparing thresholds without their dimensionless kernel scale.
 - Ignoring components created by thresholding.
-- Raising resource guards until an unreviewed job exhausts memory.

@@ -1,12 +1,16 @@
 # Compute Dirichlet energy
 
 Dirichlet energy sums squared fitness differences once per undirected edge.
-It depends on fitness units, graph density, and optional conductance.
+It depends on fitness units, graph density, and optional conductance. Applications
+to protein fitness and learned representation landscapes include
+[Matthews et al. (2024)](https://doi.org/10.1038/s42256-024-00935-2),
+[Vongsouthi et al. (2025)](https://doi.org/10.1126/sciadv.ads8318), and
+[Castro et al. (2022)](https://doi.org/10.1038/s42256-022-00532-1).
 
 ## Input
 
 Use a finite scalar active layer on a simple undirected graph. A weighted
-analysis must name a finite non-negative conductance key; raw distance is not
+analysis must name a finite non-negative conductance key. Raw distance is not
 conductance. See the [edge contract](../graph-construction/edge-semantics.md).
 
 ## Worked example
@@ -20,14 +24,11 @@ from fitness_landscape.models import create_nk_binary_landscape
 
 landscape = create_nk_binary_landscape(N=3, K=1, seed=17)
 fitness = landscape.view(landscape.active_layer_name).to_scalar()
-for source, target in landscape.graph.edges:
-    landscape.graph[source][target]["conductance"] = 2.0
 
 unweighted = calculate_ruggedness_dirichlet_energy(
-    landscape, edge_weight_bins=[(0.0, 0.5), (0.5, 1.1)]
-)
-weighted = calculate_ruggedness_dirichlet_energy(
-    landscape, weight_key="conductance"
+    landscape,
+    edge_weight_bins=[(0.0, 0.5), (0.5, 1.1)],
+    weight_key=None,
 )
 
 manual = sum(
@@ -35,12 +36,11 @@ manual = sum(
     for source, target in landscape.graph.edges
 )
 np.testing.assert_allclose(unweighted["global_dirichlet_energy"], manual)
-np.testing.assert_allclose(weighted["global_dirichlet_energy"], 2.0 * manual)
 np.testing.assert_allclose(
     unweighted["total_dirichlet_energy"], manual / len(landscape)
 )
 assert unweighted["weighted_laplacian"] is False
-assert weighted["weight_key"] == "conductance"
+assert unweighted["weight_key"] is None
 assert landscape.graph.number_of_edges() == 12
 
 report = {
@@ -49,7 +49,7 @@ report = {
     "fitness_units": "seeded NK model units",
     "global": unweighted["global_dirichlet_energy"],
     "per_node": unweighted["total_dirichlet_energy"],
-    "weighted_global": weighted["global_dirichlet_energy"],
+    "weight_key": unweighted["weight_key"],
 }
 print(report)
 ```

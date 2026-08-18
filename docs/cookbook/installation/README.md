@@ -142,8 +142,7 @@ jobs are:
 | Minimal install | Ubuntu, Python 3.12 | Installs a built wheel with only required dependencies in a clean virtual environment and exercises sequences, fitness, Hamming construction, and portable export |
 | Comprehensive install | `ubuntu-latest`, `macos-14`, and `windows-latest`; Python 3.11 and 3.12 | Installs `all`, checks its expected distributions, exercises CLI help, and builds and reloads an OHE/BallTree kNN landscape |
 
-The full pytest suite is not run on macOS or Windows; those systems receive the
-comprehensive installation smoke test. CI has no GPU job, does not validate
+The full pytest suite is not run on macOS or Windows. CI has no GPU job, does not validate
 Python 3.13 or later, and does not enable the opt-in live ESM model-download
 test. The workflow currently runs for pushes and pull requests on `main`,
-`dev`, and `release`; changes targeting the `docs` branch do not trigger it.
+`dev`, and `release`.

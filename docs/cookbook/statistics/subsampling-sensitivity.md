@@ -1,7 +1,7 @@
 # Evaluate subsampling sensitivity
 
 Subsampling asks whether a descriptive result is stable to reduced observed
-node and edge support. Correlated subsamples are not independent experiments.
+node and edge support.
 
 ## Input
 
@@ -23,7 +23,7 @@ layer_name = landscape.active_layer_name
 
 def analysis(sample):
     try:
-        energy = calculate_ruggedness_dirichlet_energy(sample)
+        energy = calculate_ruggedness_dirichlet_energy(sample, weight_key=None)
         value = float(energy["global_dirichlet_energy"])
         status = "ok" if np.isfinite(value) else "undefined"
     except (ValueError, FloatingPointError):
@@ -71,7 +71,7 @@ print(report)
 
 The sampler returns connected observed subgraphs, so the component count is an
 explicit conditioning rule. The percentile interval describes robustness over
-these correlated support perturbations; it is not a confidence interval over
+these correlated support. It is not a confidence interval over
 independent biological replicates and supplies no confirmatory p-value.
 
 ## Common failures
@@ -81,3 +81,4 @@ independent biological replicates and supplies no confirmatory p-value.
 - Component conditioning and retained node/edge counts are not reported.
 - Parallel worker count or seeds are omitted.
 - A robustness interval is interpreted as population uncertainty.
+- Technical failures in Ray workers are interpreted as part of the subsampled distribution.

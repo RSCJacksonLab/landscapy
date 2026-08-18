@@ -1,7 +1,7 @@
 # Estimate basins of attraction
 
 A basin assigns starting nodes to a declared local optimum under a particular
-walk rule. Greedy and stochastic basins are different estimands.
+walk rule. Greedy and stochastic basins are different estimands. Analysis of basins attraction are helpful in understanding how function may partition in sequence space and can be used to complement analyses on neutral networks and accessibility. 
 
 ## Input
 
@@ -67,14 +67,7 @@ print(report)
 ```
 
 Greedy membership is determined by the best-neighbour rule and its tie order.
-Stochastic membership is a finite-walk probability threshold; changing `beta`,
+Stochastic membership is a finite-walk probability threshold. Changing `beta`,
 walk length, simulations, or threshold changes the basin definition. Basins for
-different optima may overlap under stochastic rules.
+different optima may overlap under stochastic rules, indicative of transitions in function.
 
-## Common failures
-
-- A non-optimum sequence is supplied as the target.
-- Greedy and stochastic basin sizes share one unlabeled result.
-- Monte Carlo probabilities are thresholded without reporting simulations.
-- Component conditioning, ties, censoring, and the global RNG seed are omitted.
-- Basin membership is described as an observed evolutionary fate.

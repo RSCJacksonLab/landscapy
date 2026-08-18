@@ -37,7 +37,7 @@ graph_checks = {
     "degrees": sorted(dict(landscape.graph.degree()).values()),
 }
 epistasis = calculate_epistasis_walsh(landscape, order=3)
-energy = calculate_ruggedness_dirichlet_energy(landscape)
+energy = calculate_ruggedness_dirichlet_energy(landscape, weight_key=None)
 paths = find_greedy_accessible_paths(
     landscape, landscape.sequences[-1], landscape.sequences[0]
 )
