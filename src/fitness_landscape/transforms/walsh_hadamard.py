@@ -1,3 +1,5 @@
+"""Compute Walsh-Hadamard transforms for complete binary landscapes."""
+
 import numpy as np
 from typing import List, Union, Optional, Tuple, Dict, Any, Callable, Iterable, Literal
 from ..core.landscape import FitnessLandscape

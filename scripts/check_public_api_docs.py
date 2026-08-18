@@ -1,10 +1,12 @@
-"""Validate NumPy docstring contracts for the landscapy 0.9 public API."""
+"""Validate NumPy docstrings for the 0.9 API and non-private source tree."""
 
 from __future__ import annotations
 
+import ast
 import inspect
 import warnings
 from importlib import import_module
+from pathlib import Path
 
 from numpydoc.validate import validate
 
@@ -131,6 +133,17 @@ BLOCKING_CODES = {
     "YD01",  # yielded value undocumented
 }
 
+# Click replaces decorated callbacks with Command objects whose runtime
+# signatures are ``*args, **kwargs``. Their option contracts and help rendering
+# are covered by tests/test_public_api.py, so only these four wrappers are
+# exempt from signature-based numpydoc validation.
+CLICK_WRAPPER_EXEMPTIONS = {
+    "fitness_landscape.__main__.cli",
+    "fitness_landscape.__main__.evol_diffusion_landscape",
+    "fitness_landscape.__main__.knn_landscape",
+    "fitness_landscape.__main__.phylo_landscape",
+}
+
 
 def _public_paths() -> list[str]:
     paths: list[str] = []
@@ -177,13 +190,77 @@ def _public_paths() -> list[str]:
     return paths
 
 
+def _source_paths() -> tuple[list[str], list[str]]:
+    source_root = Path(__file__).resolve().parents[1] / "src" / "fitness_landscape"
+    missing_module_docstrings: list[str] = []
+    paths: list[str] = []
+
+    for source_path in sorted(source_root.rglob("*.py")):
+        relative = source_path.relative_to(source_root.parent).with_suffix("")
+        if any(
+            part.startswith("_") and part not in {"__init__", "__main__"}
+            for part in relative.parts
+        ):
+            continue
+
+        module_parts = (
+            relative.parts[:-1] if relative.name == "__init__" else relative.parts
+        )
+        module_name = ".".join(module_parts)
+        tree = ast.parse(
+            source_path.read_text(encoding="utf-8"), filename=str(source_path)
+        )
+        if ast.get_docstring(tree) is None:
+            missing_module_docstrings.append(str(source_path))
+
+        for node in tree.body:
+            if not isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ):
+                continue
+            if node.name.startswith("_"):
+                continue
+
+            object_path = f"{module_name}.{node.name}"
+            paths.append(object_path)
+            if not isinstance(node, ast.ClassDef):
+                continue
+
+            for child in node.body:
+                if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if child.name.startswith("_"):
+                    continue
+                paths.append(f"{object_path}.{child.name}")
+
+    return paths, missing_module_docstrings
+
+
 def main() -> int:
     failures: list[str] = []
-    paths = _public_paths()
+    public_paths = _public_paths()
+    source_paths, missing_module_docstrings = _source_paths()
+
+    for source_path in missing_module_docstrings:
+        failures.append(f"{source_path}: missing module docstring")
+
+    missing_exemptions = CLICK_WRAPPER_EXEMPTIONS - set(source_paths)
+    if missing_exemptions:
+        failures.append(
+            "Click wrapper exemption drift: missing=" + repr(sorted(missing_exemptions))
+        )
 
     with warnings.catch_warnings(record=True) as parser_warnings:
         warnings.simplefilter("always")
-        for path in paths:
+        for path in public_paths:
+            result = validate(path)
+            for code, message in result["errors"]:
+                if code in BLOCKING_CODES:
+                    failures.append(f"{path}: {code}: {message}")
+
+        for path in source_paths:
+            if path in CLICK_WRAPPER_EXEMPTIONS:
+                continue
             result = validate(path)
             for code, message in result["errors"]:
                 if code in BLOCKING_CODES:
@@ -193,12 +270,17 @@ def main() -> int:
         failures.append(f"numpydoc parser warning: {warning.message}")
 
     if failures:
-        print("Public API documentation validation failed:")
+        print("Documentation validation failed:")
         for failure in failures:
             print(f"- {failure}")
         return 1
 
-    print(f"Validated {len(paths)} public API objects and methods.")
+    print(f"Validated {len(public_paths)} public API objects and methods.")
+    print(
+        f"Validated {len(source_paths) - len(CLICK_WRAPPER_EXEMPTIONS)} "
+        "non-private source objects and methods; "
+        f"exempted {len(CLICK_WRAPPER_EXEMPTIONS)} Click wrappers."
+    )
     return 0
 
 

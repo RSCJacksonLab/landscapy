@@ -1,3 +1,5 @@
+"""Decompose graph operators into spectral eigenmodes."""
+
 from __future__ import annotations
 
 import numpy as np

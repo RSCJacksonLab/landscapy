@@ -1,3 +1,5 @@
+"""Construct elementary fitness landscapes with controlled interactions."""
+
 from typing import Optional, List, Literal
 import numpy as np
 from ..core.landscape import FitnessLandscape

@@ -1,3 +1,5 @@
+"""Store and query per-sequence annotation layers."""
+
 from __future__ import annotations
 
 from typing import Any, Iterable, Mapping, Sequence, Hashable
@@ -219,9 +221,18 @@ def register_auto_annotation(
     *,
     metadata: Mapping[str, Any] | None = None,
 ) -> None:
-    """
-    Attach per-node annotation specifications so that Landscape.build
-    can materialise them later as full AnnotationLayer objects.
+    """Register annotations for later landscape construction.
+
+    Parameters
+    ----------
+    graph : networkx.Graph
+        Graph on which to store the annotation specification.
+    layer_name : str
+        Annotation-layer name.
+    records : mapping
+        Mapping from node identifiers to annotation records or values.
+    metadata : mapping, optional
+        Metadata to attach to the materialised layer.
     """
     store = graph.graph.setdefault("_auto_annotations", {})
     formatted = {}

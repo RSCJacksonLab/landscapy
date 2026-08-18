@@ -1,0 +1,9 @@
+sequence,fitness,replicate_1,replicate_2,activity_class,background,split,taxonomy
+000,0.10,0.08,0.12,low,reference,train,clade-A
+001,0.25,0.24,0.26,low,reference,train,clade-A
+010,0.35,0.32,0.38,mid,reference,train,clade-A
+011,0.60,0.58,0.62,mid,reference,test,clade-B
+100,0.20,0.18,0.22,low,alternate,train,clade-A
+101,0.55,0.50,0.60,mid,alternate,test,clade-B
+110,0.70,0.68,0.72,high,alternate,test,clade-B
+111,0.95,0.92,0.98,high,alternate,test,clade-B

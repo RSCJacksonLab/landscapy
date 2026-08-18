@@ -39,6 +39,29 @@ def declare_edge_semantics(
 
     The NetworkX ``weight`` convention is reserved for conductance. Raw or
     normalized distances must use distinct keys.
+
+    Parameters
+    ----------
+    graph : networkx.Graph
+        Undirected graph to annotate.
+    constructor : str
+        Name of the graph constructor.
+    distance_key : str, optional
+        Edge key containing raw distances.
+    distance_units : str, optional
+        Units of the raw distance.
+    normalized_distance_key : str, optional
+        Edge key containing distances in ``[0, 1]``.
+    affinity_key : str, optional
+        Edge key containing dimensionless affinities.
+    conductance_key : str, optional
+        Edge key containing dimensionless conductances.
+    transition_probability_key : str, optional
+        Edge key containing transition probabilities.
+    legacy_aliases : mapping, optional
+        Mapping from legacy keys to canonical semantics.
+    notes : str, optional
+        Additional schema notes.
     """
     if not isinstance(graph, nx.Graph):
         raise TypeError("graph must be a NetworkX graph")
@@ -65,7 +88,18 @@ def declare_edge_semantics(
 
 
 def edge_semantics(graph: nx.Graph) -> dict[str, Any] | None:
-    """Return a defensive copy of the declared edge schema, if present."""
+    """Return a defensive copy of the declared edge schema.
+
+    Parameters
+    ----------
+    graph : networkx.Graph
+        Graph to inspect.
+
+    Returns
+    -------
+    dict or None
+        Declared edge schema, or ``None`` when absent.
+    """
     schema = graph.graph.get(EDGE_SCHEMA_GRAPH_KEY)
     return dict(schema) if isinstance(schema, Mapping) else None
 
@@ -83,6 +117,23 @@ def resolve_edge_attribute(
     ``requested='auto'`` uses constructor-declared graph metadata. An
     attribute-free graph is treated as explicitly unweighted, while a legacy
     graph containing an ambiguous ``weight`` is rejected.
+
+    Parameters
+    ----------
+    graph : networkx.Graph
+        Graph whose edge attributes are resolved.
+    semantic : str
+        Scientific edge semantic to resolve.
+    requested : str or None, default="auto"
+        Explicit edge key, ``"auto"`` for schema lookup, or ``None`` for
+        an unweighted analysis.
+    required : bool, default=False
+        Require a resolved edge key.
+
+    Returns
+    -------
+    str or None
+        Resolved edge key, or ``None`` for an unweighted analysis.
     """
     if requested is None:
         if required:
@@ -152,6 +203,18 @@ def migrate_legacy_edge_semantics(
     Returns ``True`` when a known legacy constructor schema was migrated.
     Generic graphs containing only ``weight`` remain undeclared because that
     value could be either a distance or a conductance.
+
+    Parameters
+    ----------
+    graph : networkx.Graph
+        Graph to migrate in place.
+    sequence_length : int, optional
+        Sequence length used to normalize legacy Hamming distances.
+
+    Returns
+    -------
+    bool
+        Whether a known legacy schema was migrated.
     """
     if EDGE_SCHEMA_GRAPH_KEY in graph.graph:
         return False

@@ -1,8 +1,7 @@
-"""Exercise the one-command non-ML install through the installed CLI."""
+"""Exercise the default full-feature install through the installed CLI."""
 
 from __future__ import annotations
 
-import importlib.util
 from importlib.metadata import PackageNotFoundError, version
 import os
 import shutil
@@ -14,7 +13,7 @@ from pathlib import Path
 from fitness_landscape import FitnessLandscape
 
 
-NON_ML_DISTRIBUTIONS = (
+REQUIRED_DISTRIBUTIONS = (
     "click",
     "cogent3",
     "faiss-cpu",
@@ -25,6 +24,7 @@ NON_ML_DISTRIBUTIONS = (
     "scikit-learn",
     "softalign",
     "torch",
+    "torch-geometric",
     "transformers",
     "tqdm",
 )
@@ -44,18 +44,13 @@ def _landscapy_executable() -> Path:
 
 
 def main() -> None:
-    for distribution in NON_ML_DISTRIBUTIONS:
+    for distribution in REQUIRED_DISTRIBUTIONS:
         try:
             version(distribution)
         except PackageNotFoundError as error:
             raise AssertionError(
-                f"landscapy[all] did not install {distribution}"
+                f"default landscapy install did not install {distribution}"
             ) from error
-    if importlib.util.find_spec("torch_geometric") is not None:
-        raise AssertionError(
-            "landscapy[all] unexpectedly installed the ml-only "
-            "torch-geometric dependency"
-        )
 
     cli = _landscapy_executable()
     subprocess.run([str(cli), "--help"], check=True, capture_output=True, text=True)
