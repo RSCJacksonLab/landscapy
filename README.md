@@ -1,52 +1,16 @@
 # Landscapy
 
-Landscapy is a Python package for constructing and analysing graph-based
-fitness landscapes. It supports sequence-aware graph construction, layered
-fitness and annotation data, landscape models, ruggedness and epistasis
-analyses, graph alignment, phylogenetic reconstruction, and portable export.
-
-## Release scope
-
-The `0.9` publication release is intentionally limited to undirected fitness
-landscapes. It includes the analysis methods used by the accompanying
-application note and deterministic export to portable landscape bundles.
-
-The following experimental areas are not part of this release:
-
-- directed graphs and directed fitness landscapes;
-- bottleneck analysis;
-- coupling analysis;
-- persistent-homology analysis; and
-- built-in plotting or interactive visualisation.
-
-Those areas are maintained independently on feature branches so that they do
-not enlarge or destabilise the publication API. Landscapy exports data for use
-with external plotting and visualisation tools.
+Landscapy is a Python package for constructing and analysing graph-based fitness landscapes. It supports sequence-aware graph construction, layered fitness and annotation data, landscape models and ruggedness and epistasis analyses, with use cases in sequence similarity network analysis and protein engineering. Landscapy supports a generic interface to deep learning packages, maintained in [landscapy-ml](https://github.com/RSCJacksonLab/landscapy-ml).
 
 ## Requirements and installation
 
 Landscapy supports Python 3.11 and 3.12.
 
-The default installation includes every user-facing feature in the `all` and
-`ml` dependency groups:
+The default installation includes every user-facing feature in the `all` and `ml` dependency groups:
 
 ```bash
 python -m pip install landscapy
 ```
-
-This installs the CLI, portable Parquet export, kNN and TDA constructors,
-analyses, CPU parallelism, alignment, phylogeny, CPU FAISS where a compatible
-wheel exists, protein language-model embeddings, and PyTorch Geometric export.
-Named extras remain accepted for compatibility with existing environment
-specifications, but the default dependency set already includes their
-user-facing capabilities. Development tools remain separate.
-
-FAISS availability depends on upstream binary wheels. Landscapy installs
-`faiss-cpu` on supported Linux x86-64/ARM64, current macOS Intel/Apple Silicon,
-and Windows x86-64/ARM64 platforms. On other platforms, the comprehensive
-install keeps scikit-learn's portable BallTree backend available. Select it with
-`--backend balltree`. GPU FAISS is not supplied by `faiss-cpu`; when a compatible
-GPU build is unavailable, omit `--use-gpu` to use CPU FAISS or select BallTree.
 
 For development from a checkout:
 
@@ -55,110 +19,15 @@ python -m pip install -e ".[dev]"
 python -m pytest
 ```
 
-## Quick start
+See [Installation and system requirements](https://github.com/RSCJacksonLab/landscapy/blob/main/docs/cookbook/installation/README.md) for more information on requirements and installation.
 
-```python
-from fitness_landscape.analysis.dirichlet_energy import (
-    calculate_ruggedness_dirichlet_energy,
-)
-from fitness_landscape.models import create_nk_binary_landscape
-
-landscape = create_nk_binary_landscape(N=4, K=1, seed=42)
-result = calculate_ruggedness_dirichlet_energy(landscape)
-print(result["global_dirichlet_energy"])
-print(result["total_dirichlet_energy"])  # Per-node normalization.
-
-# Weighting is opt-in and requires an explicit conductance key.
-weighted = calculate_ruggedness_dirichlet_energy(
-    landscape,
-    weight_key="weight",
-)
-```
-
-For nearest-neighbour graphs, `embedding_domain="plm"` uses Euclidean
-distances in the supplied or computed PLM embeddings. The same domain-aware
-geometry is used by sparse kNN prefilters in diffusion constructors; see the
-[kNN embedding-domain contract](docs/cookbook/graph-construction/knn-embedding-domains.md).
-Embedding diffusion evaluates its RBF affinity only on that sparse candidate
-graph and uses resource-guarded exact sparse powers, avoiding dense `n x n`
-kernel construction.
-
-## Portable landscape export
-
-The portable directory bundle is the canonical, inspectable export format.
-It does not require pickle and is suitable for checksummed artifact storage.
-
-```python
-landscape.save_bundle_dir(
-    "artifacts/example_landscape",
-    metadata={
-        "dataset_name": "example-dataset",
-        "assay_type": "DMS",
-        "version": "v1",
-        "provenance": {"pipeline": "application-note"},
-    },
-    include_embeddings=True,
-)
-
-reloaded = landscape.load_bundle_dir("artifacts/example_landscape")
-landscape.export_lsbundle(
-    "artifacts/example_landscape.lsbundle",
-    backend="portable",
-)
-```
-
-The directory contains a versioned manifest, metadata, canonical node and edge
-tables, sequence arrays, layers, annotations, and optional embedding arrays.
-When `pyarrow` is installed, tabular payloads use Parquet; otherwise Landscapy
-uses its deterministic JSON-table fallback. A pickle-backed compatibility
-export remains available via `backend="pickle"`, but it is not the recommended
-long-term storage format.
-
-CSV export is also available through `to_csv_landscape` and
-`read_csv_landscape` in `fitness_landscape.core.landscape`.
-
-## Main modules
-
-The exact supported names and import namespaces are listed in the
-[0.9 public API contract](docs/cookbook/foundations/public-api.md). CI validates that contract
-against the exported objects and their NumPy-style docstrings.
-
-Graph constructors and weighted analyses follow the documented
-[edge distance and conductance contract](docs/cookbook/graph-construction/edge-semantics.md). In
-particular, NetworkX `weight` is reserved for conductance and is never a raw
-distance. Constructor input and small-sample behavior are specified in the
-[graph-constructor contract](docs/cookbook/graph-construction/input-contracts.md), and diffusion graphs
-follow the [reversible diffusion contract](docs/cookbook/graph-construction/diffusion-semantics.md).
-Transition eigenmodes follow the documented
-[random-walk spectral contract](docs/cookbook/ruggedness/spectral-operators.md). Effective
-resistance and disconnected-category aggregation follow the
-[component-wise resistance contract](docs/cookbook/topology/effective-resistance-contract.md).
-Publication-facing distribution, pairwise, and permutation inference follows
-the documented [statistical inference contract](docs/cookbook/statistics/inference-contract.md).
-Walsh, regression, ensemble, and reference-free epistasis methods follow the
-documented [epistasis domain and coefficient contract](docs/cookbook/epistasis/estimand-contracts.md).
-
-- `fitness_landscape.core`: sequences, fitness and annotation layers,
-  undirected graph construction, and `FitnessLandscape`.
-- `fitness_landscape.models`: NK, Rough Mount Fuji, and elementary landscapes.
-- `fitness_landscape.analysis`: ruggedness, epistasis, adaptive walks,
-  statistics, diffusion scale, and alignment metrics.
-- `fitness_landscape.transforms`: Walsh-Hadamard, eigenmode, and graph Fourier
-  transforms.
-- `fitness_landscape.phylo`: phylogenetic inference and ancestral-state
-  reconstruction used to construct undirected landscapes.
-- `fitness_landscape.io`: deterministic portable bundles and compatibility
-  archives.
-
-## Command-line interface
+## Command-line interface and quickstart
 
 ```bash
 landscapy --help
-landscapy-evol --help
-landscapy-phylo --help
 ```
 
-Given an aligned protein FASTA file, a minimal portable kNN CLI workflow is:
+Given an aligned protein FASTA file (`sequences.fasta`), a minimal portable kNN CLI workflow is:
 
 ```bash
 landscapy knn-landscape \
@@ -169,41 +38,58 @@ landscapy knn-landscape \
   --embedding-domain ohe
 ```
 
-The BallTree example works across supported operating systems and does not
-require a platform-specific FAISS build.
+The equivalent Python code is:
+
+```python
+from pathlib import Path
+
+from fitness_landscape import FitnessLandscape, create_knn_graph
+from fitness_landscape.core.graph import _encode_multiallele
+from fitness_landscape.utils import fasta_to_prot20_sequences
+
+sequences, aligned_sequences = fasta_to_prot20_sequences(
+    "sequences.fasta",
+    strict=False,
+    return_gapped=True,
+)
+embedding_sequences = (
+    aligned_sequences if aligned_sequences is not None else sequences
+)
+embeddings, _ = _encode_multiallele(embedding_sequences)
+
+graph = create_knn_graph(
+    sequences=sequences,
+    k=5,
+    embeddings=embeddings,
+    embedding_domain="ohe",
+    backend="balltree",
+    _compute_hamming_edges=True,
+)
+landscape = FitnessLandscape.from_graph(
+    graph,
+    embeddings={"ohe": embeddings},
+    active_embedding_domain="ohe",
+)
+landscape.save(Path("landscape.pkl"))
+```
 
 ## Cookbook
 
-The [worked-example cookbook](docs/cookbook/README.md) starts with installation
-and system requirements, then covers empirical tables, the layered
-`FitnessLandscape` data model, graph construction, topology, and analysis.
-Every recipe states its assumptions, expected outputs, and limits of
-interpretation, and its executable example is checked in CI.
+The [worked-example cookbook](https://github.com/RSCJacksonLab/landscapy/blob/main/docs/cookbook/README.md) provides examples for common Landscapy usage. Every recipe states its assumptions, expected outputs, and limits of interpretation, and its executable example is checked in CI.
 
-- [Installation and system requirements](docs/cookbook/installation/README.md)
-- [Foundations](docs/cookbook/foundations/README.md)
-- [Components, topology, and annotated groups](docs/cookbook/topology/README.md)
-- [Graph construction and representation choice](docs/cookbook/graph-construction/README.md)
-- [Saving, sharing, CLI use, and external visualization](docs/cookbook/io/README.md)
-- [Ruggedness, autocorrelation, and spectral analysis](docs/cookbook/ruggedness/README.md)
-- [Adaptive walks, accessibility, basins, optima, and neutral networks](docs/cookbook/accessibility/README.md)
-- [Epistasis on complete, sampled, and categorical landscapes](docs/cookbook/epistasis/README.md)
-- [Statistical inference and robustness analysis](docs/cookbook/statistics/README.md)
-- [Simulation models and known-answer validation](docs/cookbook/simulation/README.md)
-- [Validated exports for downstream machine learning](docs/cookbook/ml/README.md)
-- [Scaling, backend selection, and reproducible execution](docs/cookbook/scaling/README.md)
-
-## Citation
-
-Citation metadata is provided in `CITATION.cff`. Release changes are recorded
-in `CHANGELOG.md`.
-
-## Authors
-
-- Matthew A. Spence
-- Barnabas Gall
-- Dana S. Matthews
+- [Installation and system requirements](https://github.com/RSCJacksonLab/landscapy/blob/main/docs/cookbook/installation/README.md)
+- [Foundations](https://github.com/RSCJacksonLab/landscapy/blob/main/docs/cookbook/foundations/README.md)
+- [Components, topology, and annotated groups](https://github.com/RSCJacksonLab/landscapy/blob/main/docs/cookbook/topology/README.md)
+- [Graph construction and representation choice](https://github.com/RSCJacksonLab/landscapy/blob/main/docs/cookbook/graph-construction/README.md)
+- [Saving, sharing, CLI use, and external visualization](https://github.com/RSCJacksonLab/landscapy/blob/main/docs/cookbook/io/README.md)
+- [Ruggedness, autocorrelation, and spectral analysis](https://github.com/RSCJacksonLab/landscapy/blob/main/docs/cookbook/ruggedness/README.md)
+- [Adaptive walks, accessibility, basins, optima, and neutral networks](https://github.com/RSCJacksonLab/landscapy/blob/main/docs/cookbook/accessibility/README.md)
+- [Epistasis on complete, sampled, and categorical landscapes](https://github.com/RSCJacksonLab/landscapy/blob/main/docs/cookbook/epistasis/README.md)
+- [Statistical inference and robustness analysis](https://github.com/RSCJacksonLab/landscapy/blob/main/docs/cookbook/statistics/README.md)
+- [Simulation models and known-answer validation](https://github.com/RSCJacksonLab/landscapy/blob/main/docs/cookbook/simulation/README.md)
+- [Validated exports for downstream machine learning](https://github.com/RSCJacksonLab/landscapy/blob/main/docs/cookbook/ml/README.md)
+- [Scaling, backend selection, and reproducible execution](https://github.com/RSCJacksonLab/landscapy/blob/main/docs/cookbook/scaling/README.md)
 
 ## License
 
-Landscapy is distributed under the MIT License. See `LICENSE`.
+Landscapy is distributed under the MIT License. See [LICENSE](LICENSE).
