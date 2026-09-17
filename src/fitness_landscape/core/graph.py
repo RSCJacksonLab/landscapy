@@ -2880,6 +2880,7 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
                                              embedding_domain: Literal["plm", "ohe", "composition"] | None = None,
                                              evolutionary_time: float = 1.0,
                                              equilibrium_frequencies: Optional[np.ndarray] = None,
+                                             max_in_flight_alignments: int | None = None,
                                              _compute_hamming_edges: bool = False,
                                              **kwargs) -> nx.Graph:
     """
@@ -2976,6 +2977,11 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
         Stationary amino-acid frequencies in PROT_20 order. When omitted they
         are inferred from ``replacement_matrix``.
 
+    max_in_flight_alignments : int, optional
+        Maximum number of Ray alignment tasks retained in the object store at
+        once. Defaults to ``max(64, 8 * cpus)``. This bounds scheduler and
+        object-store memory without changing the candidate pairs or scores.
+
     _compute_hamming_edges : bool, default=False
         Reserved compatibility flag. Release builds disable the optional
         post-construction mutation pass.
@@ -3010,6 +3016,14 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     use_stationary, t_int = _validate_diffusion_power(t)
     thr = _validate_connectivity_threshold(connectivity_threshold)
     num_cpus = _validate_integer(cpus, name="cpus", minimum=1)
+    if max_in_flight_alignments is None:
+        max_in_flight = max(64, 8 * num_cpus)
+    else:
+        max_in_flight = _validate_integer(
+            max_in_flight_alignments,
+            name="max_in_flight_alignments",
+            minimum=1,
+        )
     if isinstance(tau, (bool, np.bool_)):
         raise TypeError("`tau` must be a finite real number greater than zero.")
     try:
@@ -3125,24 +3139,35 @@ def create_evol_diffusion_graph(sequences: List[BaseNumpySequence],
     total_tasks = len(pairs_to_align)
     _logger.info('Submitted alignment tasks: %d', total_tasks)
     if total_tasks:
+        completed = 0
+        log_every = max(1, total_tasks // 20)
         with ray_runtime(num_cpus, purpose="parallel evolutionary sequence alignment") as ray:
             score_pair_remote = ray.remote(_score_pair)
-            refs = [
-                score_pair_remote.options(num_cpus=1).remote(
-                    i,
-                    j,
-                    sequences[i],
-                    sequences[j],
-                    evolutionary_score_matrix,
-                )
-                for (i, j) in pairs_to_align
-            ]
-            pending = list(refs)
-            completed = 0
-            log_every = max(1, total_tasks // 20)
+            pair_iterator = iter(pairs_to_align)
+
+            def submit_next(count):
+                refs = []
+                for _ in range(count):
+                    try:
+                        i, j = next(pair_iterator)
+                    except StopIteration:
+                        break
+                    refs.append(
+                        score_pair_remote.options(num_cpus=1).remote(
+                            i,
+                            j,
+                            sequences[i],
+                            sequences[j],
+                            evolutionary_score_matrix,
+                        )
+                    )
+                return refs
+
+            pending = submit_next(min(max_in_flight, total_tasks))
             while pending:
                 num_returns = min(32, len(pending))
                 ready, pending = ray.wait(pending, num_returns=num_returns)
+                pending.extend(submit_next(len(ready)))
                 results = ray.get(ready)
                 for i, j, score in results:
                     rows_list.append(i); cols_list.append(j); data_list.append(float(score))

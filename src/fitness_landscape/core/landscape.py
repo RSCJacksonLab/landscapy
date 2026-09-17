@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from cogent3.core.alignment import Alignment
     from cogent3.core.tree import PhyloNode
     from torch_geometric.data import Data
+    from ..analysis.bottleneck import BoundaryModel
 
 
 GraphCtor = Callable[..., nx.Graph]
@@ -310,6 +311,12 @@ class FitnessLandscape:
         Embedding domain used by graph annotations and tensor exports.
     embedding_metadata : mapping, optional
         Provenance metadata keyed by embedding domain.
+    boundary_model : BoundaryModel, optional
+        Absorbing boundary defined by input-sequence indices. The model is
+        bound after the canonical sequence-row to graph-node mapping is built.
+    attach_embeddings : bool, default=True
+        Attach active embedding rows to graph nodes. Embeddings remain
+        available in :attr:`embeddings` when false.
     _build_sequence_indexes : bool, default=True
         Build duplicate-safe sequence lookup indexes. Disabling this is only
         supported when no fitness or annotation layers are attached.
@@ -345,6 +352,8 @@ class FitnessLandscape:
                  emb_arr_key: str = 'emb_arr',
                  active_embedding_domain: str | None = None,
                  embedding_metadata: Mapping[str, Mapping[str, Any]] | None = None,
+                 boundary_model: "BoundaryModel | None" = None,
+                 attach_embeddings: bool = True,
                  _build_sequence_indexes: bool = True):
         
         if graph.is_directed():
@@ -383,6 +392,11 @@ class FitnessLandscape:
             str(domain): dict(meta) for domain, meta in (embedding_metadata or {}).items()
         }
         self._emb_arr_key = emb_arr_key
+        if not isinstance(attach_embeddings, (bool, np.bool_)):
+            raise TypeError("attach_embeddings must be a boolean")
+        self._attach_embeddings = bool(attach_embeddings)
+        self._boundary_model = None
+        self._boundary_nodes: tuple[Hashable, ...] = ()
 
         # Finalize setup and annotate the graph only after every supplied
         # object has passed alignment validation.
@@ -406,11 +420,18 @@ class FitnessLandscape:
         )  # duplicate-safe
         self._annotate_graph_nodes_with_fitness()
         self._annotate_graph_nodes_with_annotations()
-        if self.get_embedding() is not None:
+        if self._attach_embeddings and self.get_embedding() is not None:
             self._annotate_graph_nodes_with_embeddings()
         self._records = self._build_sequence_index() if _build_sequence_indexes else {}
         if _build_sequence_indexes:
             self._enforce_unique_sequences()
+        if boundary_model is not None:
+            apply_boundary = getattr(boundary_model, "apply_to_landscape", None)
+            if not callable(apply_boundary):
+                raise TypeError(
+                    "boundary_model must provide apply_to_landscape(landscape)"
+                )
+            apply_boundary(self)
         
         if self.fitness_layers:
             self._active_view_name = (
@@ -510,6 +531,23 @@ class FitnessLandscape:
     def sequence_index_to_node(self) -> dict[int, Hashable]:
         """Return the canonical sequence-index to graph-node mapping."""
         return dict(self._nodes_by_index)
+
+    @property
+    def boundary_model(self):
+        """Return the absorbing boundary model bound to this landscape, if any."""
+        return self._boundary_model
+
+    @property
+    def boundary_nodes(self) -> tuple[Hashable, ...]:
+        """Return graph nodes bound to boundary sequence rows."""
+        return tuple(self._boundary_nodes)
+
+    @property
+    def boundary_sequence_indices(self) -> tuple[int, ...]:
+        """Return input-sequence indices defining the boundary."""
+        if self._boundary_model is None:
+            return ()
+        return tuple(self._boundary_model.sequence_indices)
 
     def sequence_index_for_node(self, node: Hashable) -> int:
         """Return the canonical sequence row for a graph node.
@@ -2868,6 +2906,7 @@ class FitnessLandscape:
               embedding_domain: Literal["plm", "ohe"] = "ohe",
               attach_embeddings: bool = True,
               emb_arr_key: str = "emb_arr",
+              boundary_model: "BoundaryModel | None" = None,
               # PLM knobs (ignored for ohe/hamming)
               model_name: str = "facebook/esm2_t6_8M_UR50D",
               batch_size: int = 64,
@@ -2909,6 +2948,11 @@ class FitnessLandscape:
         emb_arr_key : str, default=`"emb_arr"`
             The key under which embeddings will be stored in the graph
             nodes.
+
+        boundary_model : BoundaryModel, optional
+            Absorbing boundary defined by zero-based indices into ``sequences``.
+            It is applied after graph construction through the canonical
+            duplicate-safe sequence-row to node mapping.
         
         model_name : str, default=`"facebook/esm2_t6_8M_UR50D"`
             The name of the model to use for PLM embeddings.
@@ -2964,7 +3008,9 @@ class FitnessLandscape:
                    annotation_layers=annotation_layers,
                    embeddings=(embedding_store or None),
                    emb_arr_key=emb_arr_key,
-                   active_embedding_domain=active_domain)
+                   active_embedding_domain=active_domain,
+                   boundary_model=boundary_model,
+                   attach_embeddings=attach_embeddings)
 
     @classmethod
     def from_alignment(cls,
@@ -3059,7 +3105,8 @@ class FitnessLandscape:
                    emb_arr_key=emb_arr_key,
                    active_embedding_domain=_choose_active_embedding_domain(
                        embedding_store, embedding_domain, attach_embeddings
-                   ))
+                   ),
+                   attach_embeddings=attach_embeddings)
 
     @classmethod
     def from_phylogeny(cls,

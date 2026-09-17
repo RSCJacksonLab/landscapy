@@ -1,609 +1,492 @@
+"""Bottleneck analysis with an explicit absorbing sequence boundary."""
+
 from __future__ import annotations
+
 import math
 import warnings
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple, Literal
+from typing import TYPE_CHECKING, Dict, Iterable, List, Sequence, Set, Tuple
+
 import networkx as nx
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
-from ..graph_matching.minimum_spanning_graph import reconstruct_latent_graph_with_steiner
-from ..core.landscape import FitnessLandscape
+
+if TYPE_CHECKING:
+    from ..core.landscape import FitnessLandscape
 
 
-def _ensure_affinity(G: nx.Graph,
-                     length_key: str="weight",
-                     sim_key: str="sim",
-                     tau: float=None) -> None:
-    """
-    Ensure an affinity on G. If sim_attr missing, build
-    sim = exp(-length/tau). If tau is None, use median(length) as
-    scale. Similarity is necessary for Dirichlet eigenfunctions and the
-    latent graph proxy will return distances.
+BOUNDARY_GRAPH_KEY = "landscapy_boundary_model"
+BOUNDARY_NODE_KEY = "is_boundary"
+ABSORBING_NODE_KEY = "absorbing_boundary"
+BOUNDARY_EDGE_KEY = "boundary_relation"
+BOUNDARY_CROSSING_KEY = "crosses_boundary"
 
-    Parameters
-    ----------
-    G : nx.Graph
-        The graph to process / validate.
 
-    length_key : str, default=`weight`
-        The string distance is stored under.
-
-    sim_ley : str, default=`sim`
-        The string that similarity is stored under.
-
-    tau : float, default=None
-        The scaling factor.
-
-    """
-    has_sim = sum(1 for _,_,d in G.edges(data=True) if sim_key in d)
-    if has_sim >= 0.8 * G.number_of_edges():
-        return sim_key
-
-    lengths = [float(d.get(length_key, 0.0)) for _,_,d in G.edges(data=True)]
-    if lengths:
-        if tau is None:
-            tau = float(np.median([L for L in lengths if np.isfinite(L) and L>0])) or 1.0
-        inv_tau = 1.0 / tau
-        for _,_,d in G.edges(data=True):
-            L = float(d.get(length_key, 0.0))
-            d[sim_key] = float(np.exp(-L * inv_tau))
-    else:
-        for _,_,d in G.edges(data=True):
-            d[sim_key] = float(d.get("weight", 1.0))
-
-    return sim_key
-
-def _outward_cut_leakage(envelope_graph: nx.Graph,
-                         S: Sequence,
-                         weight_key:str = "sim") -> Dict:
-    """
-    Helper function to define the outward cut leakage from the observed
-    solution set graph.
-
-    Parameters
-    ----------
-    envelope_graph : nx.Graph
-        The full latent graph
-
-    S : Iterable
-        The observed solution set graph nodes.
-
-    weight_key : str, default=`weight`
-        The key that similarity measurements are stored under. that the
-        weights must be similarity measurments and not geodeic
-        distances.
-
-    Returns
-    -------
-    b : Dict
-        The edge leakage dict. b[i] = sum of envelope weights from i in
-        S to any neighbor outside S.
-    """
-    Sset = set(S)
-    b = {}
-    for u in S:
-        leak = 0.0
-        if u in envelope_graph:
-            for v, d in envelope_graph[u].items():
-                if v not in Sset:
-                    leak += float(d.get(weight_key, 1.0))
-        b[u] = leak
-    return b
-
-@dataclass
+@dataclass(frozen=True)
 class BoundaryModel:
-    """
-    Parameters for the boundary/leakage model used in the Dirichlet operator. Data helper class.
+    """Define an absorbing boundary by positions in the input sequence list.
 
-    Attributes
-    ----------
-    kind : {'degree_deficit', 'envelope', 'constant', 'custom'}
-        - 'degree_deficit': target degree per node is max(internal_degree, median(internal_degree)).
-        - 'envelope': target degree derived from an "envelope" supergraph; leakage is the difference
-          between envelope-degree and internal-degree on S.
-        - 'constant': use a constant leakage value for all nodes in S (use `constant_value`).
-        - 'custom': provide explicit leakage values via `b_leak_custom`.
-    alpha : float, optional (default=1.0)
-        Robin interpolation between Neumann (0.0) and Dirichlet (1.0) boundary.
-        The leakage vector is scaled by `alpha` before constructing the operator.
-    constant_value : float, optional
-        Only used when `kind == 'constant'`. Non-negative constant leakage per node.
-    """
-    kind: Literal['degree_deficit', 'envelope', 'constant', 'custom'] = "envelope"
-    alpha: float = 1.0
-    constant_value: Optional[float] = None
-
-
-def _nx_to_sparse_on_nodes(G: nx.Graph,
-                           nodes: Sequence) -> Tuple[sp.csr_matrix, Dict]:
-    """
-    Convert a NetworkX graph to a CSR adjacency restricted to `nodes` (in given order).
+    ``sequence_indices`` always refers to the exact list passed to
+    :class:`~fitness_landscape.core.landscape.FitnessLandscape`. Binding is
+    deferred until landscape construction has established its canonical,
+    duplicate-safe mapping from sequence rows to graph nodes.
 
     Parameters
     ----------
-    G : nx.Graph
-        Symmetric weighted graph with edge attribute 'weight' (defaults to 1.0 if absent).
-    nodes : sequence
-        Node list specifying the order to use.
-
-    Returns
-    -------
-    W : scipy.sparse.csr_matrix
-        Sparse weighted adjacency among `nodes` only. shape (n, n)
-    index : dict
-        Mapping node : row/col index in W.
-    """
-    idx = {n: i for i, n in enumerate(nodes)}
-    rows, cols, data = [], [], []
-    for u, v, d in G.edges(data=True):
-        if u in idx and v in idx:
-            i, j = idx[u], idx[v]
-            w = float(d.get("weight", 1.0))
-            rows.extend([i, j])
-            cols.extend([j, i])
-            data.extend([w, w])
-    n = len(nodes)
-    W = sp.csr_matrix((data, (rows, cols)), shape=(n, n), dtype=float)
-    return W, idx
-
-
-def _degree_vector(W: sp.csr_matrix) -> np.ndarray:
-    """
-    Helper function for row sums of a sparse matrix as a 1-D float array.
-
-    Parameters
-    ----------
-    W : scipy.sparse.csr_matrix
-        The sparse matrix.
-
-    Returns
-    -------
-    np.ndarray
-        The summed row array.
-    """
-    return np.asarray(W.sum(axis=1)).ravel()
-
-
-def build_dirichlet_operator(G: nx.Graph,
-                             S: Iterable,
-                             boundary: BoundaryModel = BoundaryModel(),
-                             normalized: bool = True) -> Tuple[sp.csr_matrix, List]:
-    """
-    Construct the Dirichlet operator on a subset `S` with a chosen boundary model.
-
-    Parameters
-    ----------
-    G : nx.Graph
-        Symmetric weighted graph on observed nodes.
-
-    S : iterable
-        Nodes defining the domain (e.g., a functional set S_tau). Order in the
-        returned matrix follows `list(S)`.
-
-    boundary : BoundaryModel, optional
-        Boundary/leakage model.
-
-    envelope_graph : nx.Graph, optional
-        If `boundary.kind == 'envelope'`, degrees from this supergraph are used
-        as target degrees for the leakage calculation.
-
-    normalized : bool, optional (default=True)
-        If True, return the normalized Dirichlet operator; otherwise, combinatorial.
-
-    Returns
-    -------
-    L_D : scipy.sparse.csr_matrix
-        Dirichlet operator on S.
-    nodes_S : list
-        Node ordering used for rows/cols of L_D.
-    """
-    nodes_S = list(S)
-    if len(nodes_S) == 0:
-        raise ValueError("S is empty. Provide at least one node.")
-
-    W_SS, idx = _nx_to_sparse_on_nodes(G, nodes_S)
-    d_in = _degree_vector(W_SS)
-
-    # Compute leakage vector b according to boundary model
-    if boundary.kind == "degree_deficit":
-        target = np.maximum(d_in, np.median(d_in))  # robust baseline
-        b = np.clip(target - d_in, 0.0, np.inf)
-    elif boundary.kind == "constant":
-        if boundary.constant_value is None or boundary.constant_value < 0:
-            raise ValueError("Provide non-negative constant_value for 'constant' boundary.")
-        b = np.full_like(d_in, fill_value=float(boundary.constant_value), dtype=float)
-    elif boundary.kind == "custom":
-        raise ValueError("For 'custom' leakage, use `build_dirichlet_operator_custom_leak`.")
-    else:
-        raise ValueError("Unknown boundary.kind. Use 'degree_deficit', 'envelope', 'constant', or 'custom'.")
-
-    # Robin interpolation scale
-    b = float(boundary.alpha) * b
-
-    # Combinatorial Dirichlet operator pieces
-    D_in = sp.diags(d_in, offsets=0, format="csr")
-    L_comb = D_in - W_SS
-    B = sp.diags(b, offsets=0, format="csr")
-    L_D = L_comb + B
-
-    if not normalized:
-        return L_D.tocsr(), nodes_S
-
-    # Normalized Dirichlet operator
-    Deg = D_in + B
-    diag = Deg.diagonal()
-    with np.errstate(divide="ignore", invalid="ignore"):
-        invsqrt = np.zeros_like(diag)
-        mask = diag > 0
-        invsqrt[mask] = 1.0 / np.sqrt(diag[mask])
-    Dm12 = sp.diags(invsqrt, offsets=0, format="csr")
-    L_Dn = Dm12 @ L_D @ Dm12
-    return L_Dn.tocsr(), nodes_S
-
-
-# Always use custom leak with envelope graph.
-def build_dirichlet_operator_custom_leak(G: nx.Graph,
-                                         S: Iterable,
-                                         b_leak: Dict,
-                                         normalized: bool = True) -> Tuple[sp.csr_matrix, List]:
-    """
-    Construct the Dirichlet operator on `S` with a custom leakage vector.
-
-    Parameters
-    ----------
-    G : nx.Graph
-        Symmetric weighted graph on observed nodes.
-
-    S : iterable
-        Nodes in the solution set.
-
-    b_leak : dict
-        Mapping node : non-negative leakage value b_i. Missing nodes default to 0.
-
-    normalized : bool, default=`True`
-        If True, return the normalized Dirichlet operator; otherwise, combinatorial.
-
-    Returns
-    -------
-    L_D : scipy.sparse.csr_matrix
-        Dirichlet operator on S.
-    nodes_S : list
-        Node ordering used for rows/cols of L_D.
-    """
-    nodes_S = list(S)
-    W_SS, idx = _nx_to_sparse_on_nodes(G, nodes_S)
-    d_in = _degree_vector(W_SS)
-
-    b = np.array([float(max(0.0, b_leak.get(n, 0.0))) for n in nodes_S], dtype=float)
-
-    D_in = sp.diags(d_in, offsets=0, format="csr")
-    L_comb = D_in - W_SS
-    B = sp.diags(b, offsets=0, format="csr")
-    L_D = L_comb + B
-
-    if not normalized:
-        return L_D.tocsr(), nodes_S
-
-    Deg = D_in + B
-    diag = Deg.diagonal()
-    with np.errstate(divide="ignore", invalid="ignore"):
-        invsqrt = np.zeros_like(diag)
-        mask = diag > 0
-        invsqrt[mask] = 1.0 / np.sqrt(diag[mask])
-    Dm12 = sp.diags(invsqrt, offsets=0, format="csr")
-    L_Dn = Dm12 @ L_D @ Dm12
-    return L_Dn.tocsr(), nodes_S
-
-
-# Note the graph must be connected.
-def first_dirichlet_eigenpair(L_D: np.ndarray,
-                              k: int = 1,
-                              which: str = "SM",
-                              tol: float = 1e-6,
-                              maxiter: int = 5000) -> Tuple[float, np.ndarray]:
-    """
-    Compute the smallest Dirichlet eigenvalue and eigenfunction.
-
-    Parameters
-    ----------
-    L_D : scipy.sparse.csr_matrix
-        Symmetric Dirichlet operator (combinatorial or normalized).
-    k : int, optional, default=1
-        Number of eigenpairs; only the smallest is returned.
-    which : 'SM' or'SA', default='SM'
-        Selection mode for ARPACK (smallest magnitude or algebraic).
-    tol : float, default=1e-6
-        Convergence tolerance.
-    maxiter : int, default=5000
-        Maximum iterations for the eigensolver.
-
-    Returns
-    -------
-    lambda1 : float
-        The smallest Dirichlet eigenvalue.
-    f1 : ndarray
-        The corresponding eigenfunction. Sign is chosen so that sum(f1) >= 0. Shape (n,)
-    """
-    try:
-        vals, vecs = spla.eigsh(L_D, k=k, which=which, tol=tol, maxiter=maxiter)
-    except Exception:
-        # Shift slightly to ensure numerical stability
-        n = L_D.shape[0]
-        Ls = L_D + 1e-6 * sp.eye(n, format="csr")
-        vals, vecs = spla.eigsh(Ls, k=k, which="SM", tol=tol, maxiter=maxiter)
-
-    f1 = vecs[:, 0]
-    if float(np.sum(f1)) < 0:
-        f1 = -f1
-    return float(vals[0]), f1
-
-def rank_throat_edges(G: nx.Graph,
-                      nodes_S: Sequence,
-                      f: np.ndarray,
-                      weight_key: str = "weight",
-                      degree_normalize: bool = True) -> pd.DataFrame:
-    """
-    Rank edges in the induced subgraph on S by Dirichlet-eigenfunction gradient.
-
-    Parameters
-    ----------
-    G : nx.Graph
-        Symmetric weighted graph with edge weight attribute.
-    nodes_S : sequence
-        Node ordering corresponding to the entries of `f`.
-    f : ndarray, shape (n,)
-        First Dirichlet eigenfunction values on nodes_S.
-    weight_attr : str, optional (default='weight')
-        Edge attribute name to use as weight. Defaults to 1.0 if missing.
-    degree_normalize : bool, optional (default=True)
-        If True, divide the gradient score by sqrt(deg(u)+deg(v)) to temper hubs.
-
-    Returns
-    -------
-    df_edges : pandas.DataFrame
-        Columns: ['u','v','weight','f_u','f_v','grad','grad_norm'], sorted by 'grad_norm' desc.
-    """
-    idx = {n: i for i, n in enumerate(nodes_S)}
-    rows = []
-    for u, v, d in G.edges(nodes_S, data=True):
-        if u in idx and v in idx:
-            i, j = idx[u], idx[v]
-            w = float(d.get(weight_key, 1.0))
-            df = abs(f[i] - f[j]) * w
-            if degree_normalize:
-                du = max(G.degree(u), 1)
-                dv = max(G.degree(v), 1)
-                df_norm = df / math.sqrt(du + dv)
-            else:
-                df_norm = df
-            rows.append((u, v, w, f[i], f[j], df, df_norm))
-
-    df_edges = pd.DataFrame(
-        rows, columns=["u", "v", "weight", "f_u", "f_v", "grad", "grad_norm"]
-    ).sort_values("grad_norm", ascending=False, ignore_index=True)
-    return df_edges
-
-def local_cheeger_sweep(G: nx.Graph,
-                        S: Iterable,
-                        f: np.ndarray,
-                        nodes_S: Sequence,
-                        weight_key: str = "weight",
-                        max_half_volume: bool = True,) -> Tuple[float, Set]:
-    """
-    Estimate the local Cheeger constant on S via a spectral sweep over f.
-
-    Parameters
-    ----------
-    G : nx.Graph
-        Symmetric weighted graph.
-    S : iterable
-        Nodes in the domain.
-    f : ndarray, shape (n,)
-        Dirichlet eigenfunction values corresponding to nodes_S.
-    nodes_S : sequence
-        Node ordering for f.
-    weight_attr : str, optional (default='weight')
-        Edge weight attribute name.
-    max_half_volume : bool, optional (default=True)
-        If True, only consider sets T whose volume <= 0.5 * vol(S) to conform
-        to the usual Cheeger convention.
-
-    Returns
-    -------
-    h_est : float
-        Estimated local Cheeger constant (minimum sweep conductance).
-    T_star : set
-        The subset achieving the minimum (argmin) in the sweep.
-    """
-    S = list(S)
-    Sset = set(S)
-    idx = {n: i for i, n in enumerate(nodes_S)}
-    f_on_S = np.array([f[idx[n]] for n in S], dtype=float)
-
-    # Sort nodes by decreasing f
-    order = [n for _, n in sorted(zip(-f_on_S, S))]
-
-    # Degrees in the full graph, but only for nodes in S
-    deg = {u: 0.0 for u in S}
-    for u, v, d in G.edges(S, data=True):
-        w = float(d.get(weight_key, 1.0))
-        if u in Sset:
-            deg[u] += w
-        if v in Sset:
-            deg[v] += w
-
-    vol_S = sum(deg.values())
-    best_phi = float("inf")
-    T_star: Set = set()
-    T: Set = set()
-    vol_T = 0.0
-
-    for x in order:
-        T.add(x)
-        vol_T += deg[x]
-
-        if max_half_volume and vol_T > 0.5 * max(vol_S, 1e-12):
-            break
-
-        # Cut from T to V\T measured in full G (includes edges to outside S)
-        cut = 0.0
-        for u in T:
-            for v, d in G[u].items():
-                if v not in T:
-                    cut += float(d.get(weight_key, 1.0))
-
-        phi = cut / max(vol_T, 1e-12)
-        if phi < best_phi:
-            best_phi = phi
-            T_star = set(T)
-
-    return float(best_phi), T_star
-
-def calculate_local_bottleneck(fitness_landscape: Union[nx.Graph, FitnessLandscape],
-                               latent_graph: Union[nx.Graph, FitnessLandscape] = None,
-                               weight_key: str = 'weight',
-                               sim_key: str = 'sim',
-                               tau: float = None,
-                               normalized_laplacian: bool = True,
-                               normalize_degree: bool = True,
-                               return_latent_graph: bool = False,
-                               **kwargs
-                               ) -> Dict:
-    """
-    Function to compute how locally bottlenecked an observed
-    (connected) fitnesslandscape is, assuming it is an induced subgraph
-    of a larger unobserved latent graph that has been sampled by
-    evolution.
-
-    Parameters
-    ----------
-    fitness_lanscape : FitnessLandscape or nx.Graph
-        The observed fitness landscape.
-
-    latent_graph : nx.Graph, default=`None`
-        The latent graph that the observed landscape has been induced
-        from. If `None`, a minimum spanning latent graph will be
-        constructed using `reconstruct_latent_graph_with_steiner`.
-
-    weight_key : str, default=`weight`
-        The key that edge weight attributes are stored under.
-
-    sim_key : str, default=`sim`
-        The key that edge similarity attributes are stored under.
-
-    tau : float, default=`None`
-        The weight-to-similarity `neglog` normalization factor. If
-        `None`, the median weight attribute is used.
-
-    normalized_laplacian : bool, default=`True`
-        Boolean to use the normalized Laplacian in Dirichlet operator
-        construction.
-
-    normalize_degree : bool, default=`True`
-        Boolean to normalize the Dirichlet operator gradient by
-        sqrt(deg(u)+deg(v)) to temper hubs during throat ranking.
-
-    return_latent_graph : bool, default=`False`,
-        Boolean to return the latent graph.
-
-    **kwargs
-        Key word args passed to the
-        `reconstruct_latent_graph_with_steiner` function.
-
-    Returns
-    -------
-    results : Dict
-        The dictionary of results.
+    sequence_indices : sequence of int
+        Unique, zero-based input rows that define the boundary.
+    absorbing : bool, default=True
+        Declare the boundary absorbing for downstream Dirichlet analysis.
+        Non-absorbing boundaries are not supported by this model.
     """
 
-    # Typing for induced graph.
-    if isinstance(fitness_landscape, FitnessLandscape):
-        G_obs = fitness_landscape.graph
-    else:
-        G_obs = fitness_landscape
-    if not isinstance(G_obs, nx.Graph):
-        raise ValueError(f"Expected `nx.Graph` or `FitnessLandscape`, found {type(fitness_landscape)}")
+    sequence_indices: Sequence[int]
+    absorbing: bool = True
 
-    # Truncate to the largest connected component when the observed graph is disconnected.
-    if G_obs.number_of_nodes() == 0:
-        raise ValueError("Observed graph has no nodes; cannot compute bottleneck statistics.")
-    if not nx.is_connected(G_obs):
-        components = list(nx.connected_components(G_obs))
-        if len(components) > 1:
-            largest = max(components, key=len)
-            warnings.warn(
-                "Observed graph has "
-                f"{len(components)} connected components; restricting bottleneck analysis to "
-                f"the largest component containing {len(largest)} nodes.",
-                RuntimeWarning
+    def __post_init__(self) -> None:
+        if not isinstance(self.absorbing, (bool, np.bool_)):
+            raise TypeError("absorbing must be a boolean")
+        if not bool(self.absorbing):
+            raise ValueError("BoundaryModel represents an absorbing boundary")
+
+        indices = tuple(self.sequence_indices)
+        if not indices:
+            raise ValueError("sequence_indices must contain at least one boundary row")
+        for index in indices:
+            if isinstance(index, (bool, np.bool_)) or not isinstance(
+                index, (int, np.integer)
+            ):
+                raise TypeError("sequence_indices must contain only integers")
+            if int(index) < 0:
+                raise ValueError("sequence_indices must be non-negative")
+        normalized = tuple(int(index) for index in indices)
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("sequence_indices must not contain duplicates")
+        object.__setattr__(self, "sequence_indices", normalized)
+        object.__setattr__(self, "absorbing", True)
+
+    def nodes(self, landscape: "FitnessLandscape") -> tuple:
+        """Return graph nodes corresponding to the declared input rows."""
+
+        size = len(landscape.sequences)
+        invalid = [index for index in self.sequence_indices if index >= size]
+        if invalid:
+            raise IndexError(
+                "Boundary sequence index outside the landscape: "
+                f"{invalid[0]} not in [0, {size})"
             )
-            G_obs = G_obs.subgraph(largest).copy()
-    latent_kwargs = dict(kwargs)
+        return tuple(
+            landscape.node_for_sequence_index(index)
+            for index in self.sequence_indices
+        )
 
-    # Typing for latent graph
-    # Constrcut the latent spanning graph.
-    if latent_graph is None:
-        latent_graph = reconstruct_latent_graph_with_steiner(G_obs, **latent_kwargs)[0]
-    elif isinstance(latent_graph, FitnessLandscape):
-        latent_graph = latent_graph.graph
+    def apply_to_landscape(self, landscape: "FitnessLandscape") -> None:
+        """Bind the boundary to a constructed landscape and annotate its graph."""
 
-    if not isinstance(latent_graph, nx.Graph):
-        raise ValueError(f"Expected `nx.Graph` or `FitnessLandscape`, found {type(latent_graph)}")
+        boundary_nodes = self.nodes(landscape)
+        boundary_set = set(boundary_nodes)
+        graph = landscape.graph
+        crossing_count = 0
 
-    S = list(G_obs.nodes())
+        for node in graph.nodes:
+            is_boundary = node in boundary_set
+            graph.nodes[node][BOUNDARY_NODE_KEY] = is_boundary
+            graph.nodes[node][ABSORBING_NODE_KEY] = is_boundary
 
-    # Ensure edges capture similarity key.
-    sim_attr_env = _ensure_affinity(G_obs,
-                                    length_key=weight_key,
-                                    sim_key=sim_key,
-                                    tau=tau)
+        for node_a, node_b, data in graph.edges(data=True):
+            a_boundary = node_a in boundary_set
+            b_boundary = node_b in boundary_set
+            if a_boundary and b_boundary:
+                relation = "boundary-boundary"
+            elif a_boundary or b_boundary:
+                relation = "boundary-interior"
+                crossing_count += 1
+            else:
+                relation = "interior-interior"
+            data[BOUNDARY_EDGE_KEY] = relation
+            data[BOUNDARY_CROSSING_KEY] = relation == "boundary-interior"
 
-    # Define leakage boundary model from latent graph.
-    b_leak = _outward_cut_leakage(latent_graph,
-                                  S,
-                                  weight_key=sim_attr_env)
+        graph.graph[BOUNDARY_GRAPH_KEY] = {
+            "type": "absorbing-sequence-index",
+            "sequence_indices": list(self.sequence_indices),
+            "boundary_nodes": list(boundary_nodes),
+            "boundary_node_count": len(boundary_nodes),
+            "interior_node_count": graph.number_of_nodes() - len(boundary_nodes),
+            "crossing_edge_count": crossing_count,
+            "absorbing": True,
+        }
+        landscape._boundary_model = self
+        landscape._boundary_nodes = boundary_nodes
 
-    # Construct Robin Laplacian Dirichlet operator.
-    L_D, nodes_S = build_dirichlet_operator_custom_leak(G=G_obs,
-                                                        S=S,
-                                                        b_leak=b_leak,
-                                                        normalized=normalized_laplacian)
 
-    # Rank eigenfunction bottelenecks.
-    lam1, f1 = first_dirichlet_eigenpair(L_D)
-    throats = rank_throat_edges(G=G_obs,
-                                nodes_S=nodes_S,
-                                f=f1,
-                                weight_key=weight_key,
-                                degree_normalize=normalize_degree)
+def _resolve_boundary(
+    landscape: "FitnessLandscape",
+    boundary: BoundaryModel | None,
+) -> tuple[BoundaryModel, tuple, list]:
+    if boundary is None:
+        boundary = getattr(landscape, "_boundary_model", None)
+    if not isinstance(boundary, BoundaryModel):
+        raise TypeError(
+            "Provide BoundaryModel(sequence_indices=...) or construct the "
+            "FitnessLandscape with boundary_model=..."
+        )
+    boundary.apply_to_landscape(landscape)
+    boundary_nodes = boundary.nodes(landscape)
+    boundary_set = set(boundary_nodes)
+    interior_nodes = [
+        node for node in landscape.graph.nodes if node not in boundary_set
+    ]
+    if not interior_nodes:
+        raise ValueError("The boundary contains every landscape node")
+    return boundary, boundary_nodes, interior_nodes
 
-    # Cheeger cutset sweep.
-    h_est, T_star = local_cheeger_sweep(G=latent_graph,
-                                        S=S,
-                                        f=f1,
-                                        nodes_S=nodes_S,
-                                        weight_key=sim_attr_env)
 
-    results = {
-        "first_dirichlet_eigenvalue": lam1,
-        "first_dirichlet_eigenvector": f1,
-        "dirichlet_eigenfunction_throats": throats,
-        "local_cheeger_constant": h_est,
-        "local_cheeger_cutset": T_star
+def _edge_weight(data: dict, weight_key: str) -> float:
+    weight = float(data.get(weight_key, 1.0))
+    if not np.isfinite(weight) or weight < 0.0:
+        raise ValueError(
+            f"Edge attribute {weight_key!r} must be finite and non-negative"
+        )
+    return weight
+
+
+def _nx_to_sparse_on_nodes(
+    graph: nx.Graph,
+    nodes: Sequence,
+    *,
+    weight_key: str,
+) -> Tuple[sp.csr_matrix, Dict]:
+    """Convert the graph adjacency induced by ``nodes`` to CSR form."""
+
+    index = {node: position for position, node in enumerate(nodes)}
+    rows: list[int] = []
+    columns: list[int] = []
+    values: list[float] = []
+    for node_a, node_b, data in graph.edges(data=True):
+        if node_a in index and node_b in index:
+            row, column = index[node_a], index[node_b]
+            weight = _edge_weight(data, weight_key)
+            rows.extend([row, column])
+            columns.extend([column, row])
+            values.extend([weight, weight])
+    adjacency = sp.csr_matrix(
+        (values, (rows, columns)),
+        shape=(len(nodes), len(nodes)),
+        dtype=float,
+    )
+    return adjacency, index
+
+
+def _boundary_leakage(
+    graph: nx.Graph,
+    interior_nodes: Sequence,
+    boundary_nodes: Sequence,
+    *,
+    weight_key: str,
+) -> dict:
+    """Sum joint-graph conductance from each interior node to the boundary."""
+
+    boundary_set = set(boundary_nodes)
+    leakage = {}
+    for node in interior_nodes:
+        leakage[node] = sum(
+            _edge_weight(data, weight_key)
+            for neighbour, data in graph[node].items()
+            if neighbour in boundary_set
+        )
+    return leakage
+
+
+def build_dirichlet_operator(
+    landscape: "FitnessLandscape",
+    boundary: BoundaryModel | None = None,
+    *,
+    weight_key: str = "weight",
+    normalized: bool = True,
+    interior_nodes: Iterable | None = None,
+) -> Tuple[sp.csr_matrix, List]:
+    """Construct the absorbing-boundary Dirichlet operator.
+
+    The operator acts only on non-boundary nodes. Joint-graph edge weight from
+    an interior node to a boundary node is added to that interior node's
+    diagonal leakage term. Boundary nodes are therefore absorbing and do not
+    appear as operator rows.
+    """
+
+    _, boundary_nodes, all_interior = _resolve_boundary(landscape, boundary)
+    if interior_nodes is None:
+        nodes = list(all_interior)
+    else:
+        allowed = set(all_interior)
+        nodes = list(interior_nodes)
+        if not nodes:
+            raise ValueError("interior_nodes must not be empty")
+        if len(set(nodes)) != len(nodes):
+            raise ValueError("interior_nodes must not contain duplicates")
+        unknown = [node for node in nodes if node not in allowed]
+        if unknown:
+            raise ValueError(f"Node {unknown[0]!r} is not an interior graph node")
+
+    adjacency, _ = _nx_to_sparse_on_nodes(
+        landscape.graph,
+        nodes,
+        weight_key=weight_key,
+    )
+    internal_degree = np.asarray(adjacency.sum(axis=1)).ravel()
+    leakage_map = _boundary_leakage(
+        landscape.graph,
+        nodes,
+        boundary_nodes,
+        weight_key=weight_key,
+    )
+    leakage = np.array([leakage_map[node] for node in nodes], dtype=float)
+
+    degree = sp.diags(internal_degree, offsets=0, format="csr")
+    boundary_degree = sp.diags(leakage, offsets=0, format="csr")
+    operator = degree - adjacency + boundary_degree
+    if not normalized:
+        return operator.tocsr(), nodes
+
+    total_degree = internal_degree + leakage
+    inverse_square_root = np.zeros_like(total_degree)
+    positive = total_degree > 0.0
+    inverse_square_root[positive] = 1.0 / np.sqrt(total_degree[positive])
+    scale = sp.diags(inverse_square_root, offsets=0, format="csr")
+    return (scale @ operator @ scale).tocsr(), nodes
+
+
+def first_dirichlet_eigenpair(
+    operator: sp.spmatrix | np.ndarray,
+    *,
+    tol: float = 1e-6,
+    maxiter: int = 5000,
+) -> Tuple[float, np.ndarray]:
+    """Return the smallest algebraic eigenpair of a Dirichlet operator."""
+
+    matrix = sp.csr_matrix(operator, dtype=float)
+    if matrix.shape[0] != matrix.shape[1] or matrix.shape[0] == 0:
+        raise ValueError("operator must be a non-empty square matrix")
+    if matrix.shape[0] <= 2:
+        values, vectors = np.linalg.eigh(matrix.toarray())
+        position = int(np.argmin(values))
+        value = float(values[position])
+        vector = vectors[:, position]
+    else:
+        try:
+            values, vectors = spla.eigsh(
+                matrix,
+                k=1,
+                which="SA",
+                tol=tol,
+                maxiter=maxiter,
+            )
+        except spla.ArpackNoConvergence as error:
+            if error.eigenvalues is None or len(error.eigenvalues) == 0:
+                raise
+            position = int(np.argmin(error.eigenvalues))
+            value = float(error.eigenvalues[position])
+            vector = error.eigenvectors[:, position]
+        else:
+            value = float(values[0])
+            vector = vectors[:, 0]
+    if float(np.sum(vector)) < 0.0:
+        vector = -vector
+    return value, np.asarray(vector, dtype=float)
+
+
+def rank_throat_edges(
+    graph: nx.Graph,
+    nodes: Sequence,
+    eigenvector: np.ndarray,
+    *,
+    weight_key: str = "weight",
+    degree_normalize: bool = True,
+) -> pd.DataFrame:
+    """Rank interior edges by weighted Dirichlet-eigenfunction gradient."""
+
+    index = {node: position for position, node in enumerate(nodes)}
+    rows = []
+    for node_a, node_b, data in graph.subgraph(nodes).edges(data=True):
+        weight = _edge_weight(data, weight_key)
+        gradient = abs(eigenvector[index[node_a]] - eigenvector[index[node_b]]) * weight
+        if degree_normalize:
+            denominator = math.sqrt(
+                max(graph.degree(node_a), 1) + max(graph.degree(node_b), 1)
+            )
+            normalized_gradient = gradient / denominator
+        else:
+            normalized_gradient = gradient
+        rows.append(
+            (
+                node_a,
+                node_b,
+                weight,
+                eigenvector[index[node_a]],
+                eigenvector[index[node_b]],
+                gradient,
+                normalized_gradient,
+            )
+        )
+    columns = ["u", "v", "weight", "f_u", "f_v", "grad", "grad_norm"]
+    return pd.DataFrame(rows, columns=columns).sort_values(
+        "grad_norm", ascending=False, ignore_index=True
+    )
+
+
+def local_cheeger_sweep(
+    graph: nx.Graph,
+    interior_nodes: Iterable,
+    eigenvector: np.ndarray,
+    nodes: Sequence,
+    *,
+    weight_key: str = "weight",
+    max_half_volume: bool = True,
+) -> Tuple[float, Set]:
+    """Estimate local conductance by sweeping the Dirichlet eigenvector."""
+
+    interior = list(interior_nodes)
+    index = {node: position for position, node in enumerate(nodes)}
+    missing = [node for node in interior if node not in index]
+    if missing:
+        raise ValueError(f"Node {missing[0]!r} has no eigenvector entry")
+    order = sorted(interior, key=lambda node: -eigenvector[index[node]])
+
+    degree = {
+        node: sum(
+            _edge_weight(data, weight_key)
+            for _, data in graph[node].items()
+        )
+        for node in interior
     }
+    total_volume = sum(degree.values())
+    best_conductance = float("inf")
+    best_set: Set = set()
+    sweep_set: Set = set()
+    sweep_volume = 0.0
 
-    # Attach latent reconstruction parameters if available.
-    recon_params = None
-    if hasattr(latent_graph, "graph"):
-        recon_params = latent_graph.graph.get("latent_reconstruction_params")
-    if recon_params is None and latent_kwargs:
-        recon_params = dict(latent_kwargs)
-    if recon_params is not None:
-        results["latent_reconstruction_params"] = recon_params
+    for node in order:
+        sweep_set.add(node)
+        sweep_volume += degree[node]
+        if (
+            max_half_volume
+            and len(sweep_set) > 1
+            and sweep_volume > 0.5 * max(total_volume, 1e-12)
+        ):
+            break
+        cut = sum(
+            _edge_weight(data, weight_key)
+            for member in sweep_set
+            for neighbour, data in graph[member].items()
+            if neighbour not in sweep_set
+        )
+        conductance = cut / max(sweep_volume, 1e-12)
+        if conductance < best_conductance:
+            best_conductance = conductance
+            best_set = set(sweep_set)
 
-    if return_latent_graph:
-        results['latent_graph'] = latent_graph
+    return float(best_conductance), best_set
 
-    return results
+
+def _crossing_edge_table(
+    graph: nx.Graph,
+    boundary_nodes: Sequence,
+    *,
+    weight_key: str,
+) -> pd.DataFrame:
+    boundary_set = set(boundary_nodes)
+    rows = []
+    for node_a, node_b, data in graph.edges(data=True):
+        if (node_a in boundary_set) == (node_b in boundary_set):
+            continue
+        boundary_node, interior_node = (
+            (node_a, node_b) if node_a in boundary_set else (node_b, node_a)
+        )
+        rows.append(
+            {
+                "boundary_node": boundary_node,
+                "interior_node": interior_node,
+                "weight": _edge_weight(data, weight_key),
+            }
+        )
+    return pd.DataFrame(rows, columns=["boundary_node", "interior_node", "weight"])
+
+
+def calculate_local_bottleneck(
+    fitness_landscape: "FitnessLandscape",
+    boundary: BoundaryModel | None = None,
+    *,
+    weight_key: str = "weight",
+    normalized_laplacian: bool = True,
+    normalize_degree: bool = True,
+    largest_component_only: bool = True,
+) -> Dict:
+    """Analyse bottlenecks inside a joint landscape with an absorbing boundary.
+
+    Boundary nodes are taken from input-row indices. The analysed domain is the
+    induced graph on all remaining nodes, while domain-to-boundary edge weights
+    supply the Dirichlet leakage term.
+    """
+
+    if not hasattr(fitness_landscape, "node_for_sequence_index"):
+        raise TypeError("fitness_landscape must be a FitnessLandscape")
+    model, boundary_nodes, interior_nodes = _resolve_boundary(
+        fitness_landscape, boundary
+    )
+    graph = fitness_landscape.graph
+    components = list(nx.connected_components(graph.subgraph(interior_nodes)))
+    analysed_nodes = list(interior_nodes)
+    if largest_component_only and len(components) > 1:
+        largest = max(components, key=len)
+        warnings.warn(
+            "Interior graph has "
+            f"{len(components)} connected components; restricting bottleneck analysis "
+            f"to the largest component containing {len(largest)} nodes.",
+            RuntimeWarning,
+        )
+        analysed_nodes = [node for node in interior_nodes if node in largest]
+
+    operator, operator_nodes = build_dirichlet_operator(
+        fitness_landscape,
+        model,
+        weight_key=weight_key,
+        normalized=normalized_laplacian,
+        interior_nodes=analysed_nodes,
+    )
+    eigenvalue, eigenvector = first_dirichlet_eigenpair(operator)
+    throats = rank_throat_edges(
+        graph,
+        operator_nodes,
+        eigenvector,
+        weight_key=weight_key,
+        degree_normalize=normalize_degree,
+    )
+    conductance, cutset = local_cheeger_sweep(
+        graph,
+        operator_nodes,
+        eigenvector,
+        operator_nodes,
+        weight_key=weight_key,
+    )
+    leakage = _boundary_leakage(
+        graph,
+        operator_nodes,
+        boundary_nodes,
+        weight_key=weight_key,
+    )
+
+    return {
+        "boundary_sequence_indices": tuple(model.sequence_indices),
+        "boundary_nodes": tuple(boundary_nodes),
+        "interior_nodes": tuple(operator_nodes),
+        "boundary_crossing_edges": _crossing_edge_table(
+            graph, boundary_nodes, weight_key=weight_key
+        ),
+        "boundary_leakage": leakage,
+        "first_dirichlet_eigenvalue": eigenvalue,
+        "first_dirichlet_eigenvector": eigenvector,
+        "dirichlet_eigenfunction_throats": throats,
+        "local_cheeger_constant": conductance,
+        "local_cheeger_cutset": cutset,
+    }

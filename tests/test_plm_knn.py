@@ -166,6 +166,7 @@ def test_fitness_landscape_build_passes_selected_plm_domain_to_knn(monkeypatch):
     assert captured["embeddings"] is embeddings
     assert captured["embedding_domain"] == "plm"
     assert np.array_equal(landscape.embeddings["plm"], embeddings)
+    assert all("emb_arr" not in data for _, data in landscape.graph.nodes(data=True))
 
 
 def test_fitness_landscape_build_computes_plm_required_by_knn(monkeypatch):

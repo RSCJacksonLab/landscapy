@@ -30,6 +30,8 @@ _EXPORTS = {
     "fit_t_grid_posterior": "diffusion_scale",
     "fit_t_profile_likelihood": "diffusion_scale",
     "fit_t_bootstrap": "diffusion_scale",
+    "BoundaryModel": "bottleneck",
+    "build_dirichlet_operator": "bottleneck",
     "local_cheeger_sweep": "bottleneck",
     "calculate_local_bottleneck": "bottleneck",
     "first_dirichlet_eigenpair": "bottleneck",
