@@ -465,6 +465,22 @@ class FitnessLandscape:
                 f"does not match the number of nodes in the graph ({self.graph.number_of_nodes()})."
             )
 
+        # All built-in graph constructors retain the input sequence objects on
+        # nodes in row order. Accept that exact identity mapping without
+        # materialising full sequence tuples for every row. The general
+        # duplicate-safe resolver remains the fallback for imported or
+        # reordered graphs.
+        positional_mapping: dict[Hashable, int] = {}
+        positional_identity = True
+        for position, node in enumerate(self._node_order):
+            node_data = self.graph.nodes[node]
+            if node_data.get("sequence") is not self.sequences[position]:
+                positional_identity = False
+                break
+            positional_mapping[node] = position
+        if positional_identity:
+            return positional_mapping
+
         by_identity: dict[int, list[int]] = defaultdict(list)
         by_signature: dict[tuple[tuple[Any, ...], Any], list[int]] = defaultdict(list)
         by_key: dict[tuple[Any, ...], list[int]] = defaultdict(list)
@@ -2907,6 +2923,7 @@ class FitnessLandscape:
               attach_embeddings: bool = True,
               emb_arr_key: str = "emb_arr",
               boundary_model: "BoundaryModel | None" = None,
+              _build_sequence_indexes: bool = True,
               # PLM knobs (ignored for ohe/hamming)
               model_name: str = "facebook/esm2_t6_8M_UR50D",
               batch_size: int = 64,
@@ -2953,6 +2970,12 @@ class FitnessLandscape:
             Absorbing boundary defined by zero-based indices into ``sequences``.
             It is applied after graph construction through the canonical
             duplicate-safe sequence-row to node mapping.
+
+        _build_sequence_indexes : bool, default=True
+            Build content-addressed sequence lookup indexes. Set false for
+            large, row-addressed topology-only landscapes that do not attach
+            fitness or annotation layers. Positional node/sequence mappings
+            and boundary models remain available.
         
         model_name : str, default=`"facebook/esm2_t6_8M_UR50D"`
             The name of the model to use for PLM embeddings.
@@ -3010,7 +3033,8 @@ class FitnessLandscape:
                    emb_arr_key=emb_arr_key,
                    active_embedding_domain=active_domain,
                    boundary_model=boundary_model,
-                   attach_embeddings=attach_embeddings)
+                   attach_embeddings=attach_embeddings,
+                   _build_sequence_indexes=_build_sequence_indexes)
 
     @classmethod
     def from_alignment(cls,

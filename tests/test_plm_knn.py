@@ -169,6 +169,36 @@ def test_fitness_landscape_build_passes_selected_plm_domain_to_knn(monkeypatch):
     assert all("emb_arr" not in data for _, data in landscape.graph.nodes(data=True))
 
 
+def test_fitness_landscape_build_routes_low_memory_sequence_index_toggle(monkeypatch):
+    captured = {}
+
+    def fake_knn(sequences, **kwargs):
+        captured.update(kwargs)
+        graph = nx.Graph()
+        graph.add_nodes_from(
+            (index, {"sequence": sequence})
+            for index, sequence in enumerate(sequences)
+        )
+        return graph
+
+    monkeypatch.setattr(landscape_module, "create_knn_graph", fake_knn)
+    sequences = _sequences()
+    landscape = FitnessLandscape.build(
+        sequences,
+        graph="knn",
+        embeddings={"plm": _plm_embeddings()},
+        embedding_domain="plm",
+        attach_embeddings=False,
+        _build_sequence_indexes=False,
+        k=1,
+    )
+
+    assert "_build_sequence_indexes" not in captured
+    assert landscape.node_to_sequence_index == {0: 0, 1: 1, 2: 2}
+    assert landscape._seq_to_nodes == {}
+    assert landscape._records == {}
+
+
 def test_fitness_landscape_build_computes_plm_required_by_knn(monkeypatch):
     embeddings = _plm_embeddings()
     captured = {}
