@@ -11,6 +11,7 @@ denominators visible.
 5. [Compute effective resistance](effective-resistance.md)
 6. [Analyse category diffusion and crossing](category-diffusion-and-crossing.md)
 7. [Attach external community annotations](community-annotations.md)
+8. [Compare occupancy using Louvain counts and graph smoothing](occupancy-concentration.md)
 
 ## Reference contracts
 

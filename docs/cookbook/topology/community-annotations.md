@@ -1,8 +1,10 @@
 # Attach external community annotations
 
-Landscapy does not expose a built-in community-detection API. Run a named
-external NetworkX algorithm, record its parameters, then attach its output as an
-annotation for auditable downstream workflows.
+For general community annotations, run a named external NetworkX algorithm,
+record its parameters, then attach its output as an annotation for auditable
+downstream workflows. The [occupancy-concentration API](occupancy-concentration.md)
+also computes Louvain regions on the fly for comparing sequence panels, without
+attaching or changing annotation layers.
 
 ## Input
 
