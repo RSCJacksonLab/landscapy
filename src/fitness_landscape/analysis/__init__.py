@@ -38,6 +38,7 @@ _EXPORTS = {
     "rank_throat_edges": "bottleneck",
     "calculate_sequence_occupancy": "bottleneck",
     "calculate_graph_occupancy": "bottleneck",
+    "calculate_polarity_field": "polarity",
     "procrustes": "graph_induction_alignment",
     "edge_prf_on_observed": "graph_induction_alignment",
     "sp_rmse": "graph_induction_alignment",

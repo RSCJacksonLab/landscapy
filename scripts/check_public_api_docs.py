@@ -70,6 +70,7 @@ PUBLIC_EXPORTS: dict[str, tuple[str, ...]] = {
         "rank_throat_edges",
         "calculate_sequence_occupancy",
         "calculate_graph_occupancy",
+        "calculate_polarity_field",
         "procrustes",
         "edge_prf_on_observed",
         "sp_rmse",
